@@ -1,0 +1,5 @@
+{"timestamp":"2026-03-04T09:00:00Z","type":"session_meta","payload":{"id":"019cb1e1-ffff-ffff-ffff-ffffffffffff","timestamp":"2026-03-04T09:00:00Z","cwd":"/Users/alice/test-proj","originator":"codex-tui","cli_version":"0.107.0","source":"cli"}}
+{"timestamp":"2026-03-04T09:30:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"q1"}]}}
+{"timestamp":"2026-03-04T09:59:26Z","type":"compacted","payload":{"message":"summary","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"old q"}]}]}}
+{"timestamp":"2026-03-04T09:59:27Z","type":"event_msg","payload":{"type":"context_compacted"}}
+{"timestamp":"2026-03-04T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"q2"}]}}

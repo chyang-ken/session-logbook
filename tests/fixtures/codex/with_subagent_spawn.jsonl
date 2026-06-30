@@ -1,0 +1,5 @@
+{"timestamp":"2026-04-22T22:30:00Z","type":"session_meta","payload":{"id":"019db8c9-aaaa-bbbb-cccc-dddddddddddd","timestamp":"2026-04-22T22:30:00Z","cwd":"/Users/alice","originator":"Codex Desktop","cli_version":"0.122.0-alpha.1","source":"cli"}}
+{"timestamp":"2026-04-22T22:30:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Spawn a worker to do OCR"}]}}
+{"timestamp":"2026-04-22T22:30:02Z","type":"event_msg","payload":{"type":"collab_agent_spawn_end","call_id":"call_xx","sender_thread_id":"019db8c9-aaaa-bbbb-cccc-dddddddddddd","new_thread_id":"019db8e9-69d4-7f41-9879-d4c1189f33b2","new_agent_nickname":"Hypatia","new_agent_role":"worker","prompt":"Run OCR on this batch of images and export the results","model":"gpt-5.4","reasoning_effort":"high","status":"pending_init"}}
+{"timestamp":"2026-04-22T23:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Worker finished, results are in ocr.md"}]}}
+{"timestamp":"2026-04-22T23:00:01Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Worker finished"}}

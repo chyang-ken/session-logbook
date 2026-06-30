@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local agent config (this is what the dashboard reads — never vendor it in)
+.claude/
+
+# ── Private scratch space ──────────────────────────────────────────────
+# Personal R&D, experiments, scratch analysis, and anything containing real
+# session data lives here and is NEVER committed. This is the project's
+# go-forward home for the kind of private artifacts that must stay off the
+# public history. See CLAUDE.md for the rationale.
+_private/
+
+# Generated demo data (run examples/make_demo.py to recreate)
+examples/demo-home/

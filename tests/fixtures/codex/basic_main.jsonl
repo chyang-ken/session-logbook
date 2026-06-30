@@ -1,0 +1,11 @@
+{"timestamp":"2026-05-14T10:00:00Z","type":"session_meta","payload":{"id":"019e2900-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":"2026-05-14T10:00:00Z","cwd":"/Users/alice/test-proj","originator":"codex-tui","cli_version":"0.131.0-alpha.9","source":"cli"}}
+{"timestamp":"2026-05-14T10:00:01Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/Users/alice/test-proj","model":"gpt-5.3-codex","personality":"pragmatic"}}
+{"timestamp":"2026-05-14T10:00:02Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2026-05-14T10:00:03Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>...</permissions instructions>"}]}}
+{"timestamp":"2026-05-14T10:00:04Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context><cwd>/Users/alice/test-proj</cwd></environment_context>"},{"type":"input_text","text":"hello codex"}]}}
+{"timestamp":"2026-05-14T10:00:05Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"x"}}
+{"timestamp":"2026-05-14T10:00:06Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\"}","call_id":"c1"}}
+{"timestamp":"2026-05-14T10:00:07Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"file1\nfile2"}}
+{"timestamp":"2026-05-14T10:00:08Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}
+{"timestamp":"2026-05-14T10:00:09Z","type":"event_msg","payload":{"type":"agent_message","message":"done"}}
+{"timestamp":"2026-05-14T10:00:10Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"done"}}

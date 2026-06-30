@@ -1,0 +1,2 @@
+{"timestamp":"2026-04-28T01:00:00Z","type":"session_meta","payload":{"id":"019dd31c-bbbb-bbbb-bbbb-bbbbbbbbbbbb","timestamp":"2026-04-28T01:00:00Z","cwd":"/Users/alice/context-tool","originator":"Codex Desktop","cli_version":"0.118.0-alpha.2","source":{"subagent":{"other":"guardian"}},"thread_source":"main","base_instructions":{"text":"You are judging one planned coding-agent action."}}}
+{"timestamp":"2026-04-28T01:00:01Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/Users/alice/context-tool","model":"codex-auto-review"}}

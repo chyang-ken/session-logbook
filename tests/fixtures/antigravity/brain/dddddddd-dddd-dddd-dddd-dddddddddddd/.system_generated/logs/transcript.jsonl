@@ -1,0 +1,10 @@
+{"type": "USER_INPUT", "created_at": "2026-06-07T06:00:00Z", "content": "<USER_REQUEST>Search for something and look at a file for me</USER_REQUEST>"}
+{"type": "PLANNER_RESPONSE", "created_at": "2026-06-07T06:00:01Z", "tool_calls": [{"name": "search_web", "args": {"toolSummary": "\"Web search\"", "query": "\"foo\""}}]}
+{"type": "SEARCH_WEB", "created_at": "2026-06-07T06:00:02Z", "status": "DONE", "content": "Created At: 2026-06-07T06:00:01Z\nCompleted At: 2026-06-07T06:00:02Z\nSEARCH_RESULT_FOO"}
+{"type": "PLANNER_RESPONSE", "created_at": "2026-06-07T06:00:03Z", "content": "Found it"}
+{"type": "PLANNER_RESPONSE", "created_at": "2026-06-07T06:00:04Z", "tool_calls": [{"name": "view_file", "args": {"AbsolutePath": "\"/x/missing.md\""}}]}
+{"type": "ERROR_MESSAGE", "created_at": "2026-06-07T06:00:05Z", "status": "DONE", "content": "Created At: 2026-06-07T06:00:05Z\nVIEW_FILE_NOT_FOUND"}
+{"type": "PLANNER_RESPONSE", "created_at": "2026-06-07T06:00:06Z", "tool_calls": [{"name": "schedule", "args": {"toolSummary": "\"Schedule task\""}}]}
+{"type": "GENERIC", "created_at": "2026-06-07T06:00:07Z", "status": "RUNNING", "content": "Created At: 2026-06-07T06:00:07Z\nTask: t-1\nStatus: RUNNING_SCHED"}
+{"type": "PLANNER_RESPONSE", "created_at": "2026-06-07T06:00:08Z", "tool_calls": [{"name": "call_mcp_tool", "args": {"toolSummary": "\"MCP call\""}}]}
+{"type": "MCP_TOOL", "created_at": "2026-06-07T06:00:09Z", "status": "ERROR", "content": "Created At: 2026-06-07T06:00:09Z\nMCP_ERROR_BOOM"}

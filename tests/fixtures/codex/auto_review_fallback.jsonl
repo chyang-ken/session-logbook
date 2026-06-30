@@ -1,0 +1,2 @@
+{"timestamp":"2026-04-28T01:00:00Z","type":"session_meta","payload":{"id":"019dd99a-9999-8888-7777-666666666666","timestamp":"2026-04-28T01:00:00Z","cwd":"/Users/alice/test-proj","originator":"Codex Desktop","cli_version":"0.118.0","source":"cli"}}
+{"timestamp":"2026-04-28T01:00:01Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/Users/alice/test-proj","model":"codex-auto-review"}}
