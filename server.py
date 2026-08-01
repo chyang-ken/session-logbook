@@ -65,6 +65,10 @@ BRIEF_TIMEOUT_SEC = 180  # claude -p call timeout; measured ~10-15s, leaving 12x
 # Search
 SEARCH_SNIPPET_CONTEXT = 60   # how many characters to take on each side of a match
 SEARCH_MAX_SNIPPETS = 3       # max snippets returned per session
+RIPGREP_FALLBACK_PATHS = (
+    Path("/opt/homebrew/bin/rg"),  # Apple Silicon Homebrew GUI/background services
+    Path("/usr/local/bin/rg"),    # Intel Homebrew and common local installs
+)
 
 # ---------- In-memory state ----------
 _cache = {}   # jsonl_path_str -> session meta dict
@@ -1718,6 +1722,36 @@ def enriched_sessions():
 
 
 # ---------- Full-text search ----------
+_search_fallback_warnings = set()
+
+
+def _warn_search_fallback(reason: str):
+    """Report a degraded search path once instead of silently becoming slow."""
+    if reason in _search_fallback_warnings:
+        return
+    _search_fallback_warnings.add(reason)
+    print(
+        f"[warn] full-text search: {reason}; using slower Python fallback",
+        file=sys.stderr,
+    )
+
+
+def _find_ripgrep():
+    """Resolve ripgrep in shells and restricted GUI/background environments.
+
+    Hammerspoon and launchd do not inherit the user's interactive-shell PATH. Prefer PATH
+    when available, then probe the standard Homebrew locations used on macOS. Return an
+    absolute executable path so subprocesses do not depend on their caller's environment.
+    """
+    found = shutil.which("rg")
+    if found:
+        return found
+    for candidate in RIPGREP_FALLBACK_PATHS:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def _search_session(jsonl_path: Path, terms: list[str]):
     """Full-text search one session by scanning user/assistant messages and returning snippets.
 
@@ -1840,19 +1874,26 @@ def _rg_prefilter(terms, paths):
     Return set[str] path strings, or None when rg is unavailable/fails so the caller can
     fall back to a full scan.
     """
-    if not shutil.which("rg"):
+    rg_executable = _find_ripgrep()
+    if not rg_executable:
+        _warn_search_fallback("ripgrep executable not found")
         return None
     path_strs = [str(p) for p in paths]
     candidate = None  # None = unconstrained so far; intersect per term to implement AND
     for term in terms:
         # -i is case-insensitive and -F is literal matching, aligned with _search_session lower()+substring semantics
-        cmd = ["rg", "-l", "-i", "-F", "--no-messages", "--", term, *path_strs]
+        cmd = [rg_executable, "-l", "-i", "-F", "--no-messages", "--", term, *path_strs]
         try:
             r = subprocess.run(cmd, capture_output=True, timeout=20)
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        except subprocess.TimeoutExpired:
+            _warn_search_fallback("ripgrep prefilter timed out")
+            return None
+        except (FileNotFoundError, OSError) as e:
+            _warn_search_fallback(f"ripgrep prefilter could not start ({type(e).__name__})")
             return None  # includes ARG_MAX overflow (E2BIG); fall back to full scan
         # rg exit codes: 0=matches, 1=no matches (both normal), >=2=real error
         if r.returncode not in (0, 1):
+            _warn_search_fallback(f"ripgrep prefilter exited with status {r.returncode}")
             return None
         hit = {ln for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln}
         candidate = hit if candidate is None else (candidate & hit)
@@ -2595,6 +2636,11 @@ def main(argv=None):
     args = parse_args(argv)
     PORT = args.port
     print(f"[info] state file: {STATE_FILE}")
+    rg_executable = _find_ripgrep()
+    if rg_executable:
+        print(f"[info] full-text search: ripgrep at {rg_executable}")
+    else:
+        _warn_search_fallback("ripgrep executable not found")
     load_state()
     print(f"[info] scanning {PROJECTS_DIR} ...")
     t0 = datetime.now()

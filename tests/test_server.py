@@ -38,6 +38,50 @@ class TestVendorAssets(unittest.TestCase):
         )
 
 
+class TestRipgrepDiscovery(unittest.TestCase):
+    def setUp(self):
+        server._search_fallback_warnings.clear()
+
+    def tearDown(self):
+        server._search_fallback_warnings.clear()
+
+    def test_prefers_path_lookup(self):
+        with mock.patch.object(server.shutil, "which", return_value="/custom/bin/rg"):
+            self.assertEqual(server._find_ripgrep(), "/custom/bin/rg")
+
+    def test_finds_standard_install_when_background_path_is_restricted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "rg"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            with mock.patch.object(server.shutil, "which", return_value=None), \
+                 mock.patch.object(server, "RIPGREP_FALLBACK_PATHS", (executable,)):
+                self.assertEqual(server._find_ripgrep(), str(executable))
+
+    def test_missing_ripgrep_warns_and_falls_back(self):
+        with mock.patch.object(server, "_find_ripgrep", return_value=None), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertIsNone(server._rg_prefilter(["needle"], [Path("session.jsonl")]))
+        self.assertIn("ripgrep executable not found", stderr.getvalue())
+        self.assertIn("slower Python fallback", stderr.getvalue())
+
+    def test_prefilter_invokes_resolved_absolute_path(self):
+        completed = mock.Mock(returncode=1, stdout=b"")
+        with mock.patch.object(server, "_find_ripgrep", return_value="/opt/homebrew/bin/rg"), \
+             mock.patch.object(server.subprocess, "run", return_value=completed) as run:
+            result = server._rg_prefilter(["needle"], [Path("session.jsonl")])
+        self.assertEqual(result, set())
+        self.assertEqual(run.call_args.args[0][0], "/opt/homebrew/bin/rg")
+
+    def test_runtime_failure_warns_and_falls_back(self):
+        completed = mock.Mock(returncode=2, stdout=b"")
+        with mock.patch.object(server, "_find_ripgrep", return_value="/opt/homebrew/bin/rg"), \
+             mock.patch.object(server.subprocess, "run", return_value=completed), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertIsNone(server._rg_prefilter(["needle"], [Path("session.jsonl")]))
+        self.assertIn("exited with status 2", stderr.getvalue())
+
+
 class TestComputeScope(unittest.TestCase):
     def setUp(self):
         self.now = time.time()
