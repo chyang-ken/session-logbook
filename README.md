@@ -42,7 +42,7 @@ That's it. There is no build step, no `pip install`, and no browser-side CDN fet
 - **Time decay** — a session untouched for N days drops into 🕸 Dusty automatically (toggle 7 / 14 / 21 days in the UI). Your main surface only shows what's live.
 - **Card previews** — opening user message + the most recent user/assistant turns, so you can tell sessions apart at a glance.
 - **Full conversation view** — click a card to expand; user / assistant / tool / skill turns are color-coded. Pop out to a standalone full-screen reader (`/?session=<id>`).
-- **User-message navigation** — jump between turns with `↑ N/M ↓ go to: __`, or the keyboard (`j` next, `k` prev).
+- **Conversation navigation** — jump between user turns with `↑ N/M ↓ go to: __`, use `latest` to reach the newest message, or move with the keyboard (`j` next, `k` prev).
 - **Full-text search** — multi-word AND; matched snippets highlighted; session IDs match too. Backed by `ripgrep` when available, with a pure-Python fallback.
 - **Star / Archive / Note** — lightweight organizing that persists to `~/.session-logbook/state.json`.
 - **Files panel** — browse a project's recently-changed files or fuzzy-find by name (`fd`-backed).

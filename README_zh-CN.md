@@ -36,7 +36,7 @@ python3 server.py          # → http://127.0.0.1:47821
 - **时间衰减** —— N 天没动自动进 🕸 Dusty（UI 切 7/14/21 天）。
 - **卡片预览** —— 首则 user 开场 + 最近 user/assistant 轮次。
 - **完整对话视图** —— 点卡片展开，user/assistant/tool/skill 四色区分；可弹出全屏阅读（`/?session=<id>`）。
-- **User msg 导航** —— `↑ N/M ↓ go to: __`，键盘 `j`/`k`。
+- **对话导航** —— 用 `↑ N/M ↓ go to: __` 跳转 user 轮次，点 `latest` 直达最新消息，或用键盘 `j`/`k` 前后移动。
 - **全文搜索** —— 多词 AND、片段高亮、session ID 也匹配（`ripgrep` 加速，纯 Python 兜底）。
 - **Star / Archive / Note** —— 轻量整理，持久化到 `~/.session-logbook/state.json`。
 - **Files 面板** —— 浏览专案最近改动文件，或按文件名模糊查找（`fd` 驱动）。

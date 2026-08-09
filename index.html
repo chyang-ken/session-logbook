@@ -3757,6 +3757,7 @@ function renderConv(data, meta) {
       <button class="conv-nav-btn" id="conv-next" data-tooltip="Next user msg (j)">${ICONS.chevronDown}</button>
       <span class="conv-nav-goto-label">go to</span>
       <input class="conv-nav-goto" id="conv-goto" type="number" min="1" max="${userCount}" placeholder="#">
+      <button class="conv-nav-btn" id="conv-latest" data-tooltip="Jump to latest message">latest</button>
       <span class="conv-hint">k/j prev/next</span>
     </div>
     <div class="conv-head-find">
@@ -3996,13 +3997,8 @@ function bindConvNav(body, head) {
   const $prev = head.querySelector('#conv-prev');
   const $next = head.querySelector('#conv-next');
   const $goto = head.querySelector('#conv-goto');
+  const $latest = head.querySelector('#conv-latest');
   $tot.textContent = total;
-
-  if (total === 0) {
-    $cur.textContent = '0';
-    $prev.disabled = true; $next.disabled = true; $goto.disabled = true;
-    return null;
-  }
 
   let active = 0;
   // mode='programmatic': triggered by button/goto/keyboard; the scroll listener doesn't grab active (avoids the last user msg jumping back to the top one due to viewport clamp)
@@ -4017,6 +4013,20 @@ function bindConvNav(body, head) {
     $cur.textContent = i + 1;
     $prev.disabled = i === 0;
     $next.disabled = i === total - 1;
+  }
+
+  function scrollToLatest() {
+    if (total > 0) setActive(total - 1);
+    mode = 'programmatic';
+    body.scrollTo({top: body.scrollHeight, behavior: 'smooth'});
+  }
+
+  $latest.addEventListener('click', scrollToLatest);
+
+  if (total === 0) {
+    $cur.textContent = '0';
+    $prev.disabled = true; $next.disabled = true; $goto.disabled = true;
+    return null;
   }
 
   function scrollTo(i) {
