@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-09
+
 ### Added
 - Initial public release of Session Logbook.
 - Unified, read-only dashboard for Claude Code, Codex, and Antigravity sessions.
@@ -16,4 +18,5 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Files panel (recent files + `fd`-backed name search).
 - Downloadable anchored transcript export.
 
-[Unreleased]: https://github.com/chyang-ken/session-logbook/commits/main
+[Unreleased]: https://github.com/chyang-ken/session-logbook/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/chyang-ken/session-logbook/releases/tag/v0.1.0

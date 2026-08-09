@@ -50,6 +50,41 @@ This project is developed in the open, for a worldwide audience. A few rules mak
 - For UI changes, include a before/after screenshot.
 - Make sure `python3 -m unittest discover -s tests` is green.
 
+All changes to `main`, including maintainer changes, go through a pull request. The
+required Python 3.9, 3.11, and 3.13 CI checks must pass on a branch that is up to
+date with `main`, and review conversations must be resolved before merge. An
+outside approval is welcome but is not required for maintainer-only changes.
+
+## Maintainer releases
+
+Session Logbook is distributed as source through GitHub Releases. There is no
+package registry publication or deployment step.
+
+1. Prepare a focused release pull request: move the completed entries in
+   `CHANGELOG.md` from `Unreleased` to a SemVer version and date, then add a new
+   empty `Unreleased` section.
+2. Merge the release pull request only after all required checks pass.
+3. Record the exact merge commit and confirm the `CI` run for that commit is
+   successful.
+4. Create an annotated `vX.Y.Z` tag on that exact commit and push the tag.
+5. Create the GitHub release from the existing tag. Use the changelog entry as
+   the release notes; do not publish a release from an unverified branch tip.
+6. Read the release back from GitHub and confirm its tag resolves to the commit
+   verified in step 3.
+
+Example commands after the release pull request is merged:
+
+```bash
+git fetch origin
+git switch main
+git pull --ff-only
+python3 -m unittest discover -s tests
+git tag -a vX.Y.Z <verified-merge-commit> -m "Session Logbook vX.Y.Z"
+git push origin vX.Y.Z
+gh release create vX.Y.Z --verify-tag --title "Session Logbook vX.Y.Z" --notes-file <release-notes-file>
+gh release view vX.Y.Z --json tagName,isDraft,isPrerelease,url
+```
+
 ## Reporting bugs & requesting features
 
 Use the [issue templates](https://github.com/chyang-ken/session-logbook/issues/new/choose). For security issues, follow [`SECURITY.md`](SECURITY.md) instead of opening a public issue.
