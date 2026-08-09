@@ -65,6 +65,7 @@ BRIEF_TIMEOUT_SEC = 180  # claude -p call timeout; measured ~10-15s, leaving 12x
 # Search
 SEARCH_SNIPPET_CONTEXT = 60   # how many characters to take on each side of a match
 SEARCH_MAX_SNIPPETS = 3       # max snippets returned per session
+MAX_JSON_BODY = 1024 * 1024   # local state updates should never need more than 1 MiB
 RIPGREP_FALLBACK_PATHS = (
     Path("/opt/homebrew/bin/rg"),  # Apple Silicon Homebrew GUI/background services
     Path("/usr/local/bin/rg"),    # Intel Homebrew and common local installs
@@ -88,6 +89,37 @@ _CWD_INDEX_SEEN = set()  # jsonl_path_str values already peeked; reused by incre
 _CWD_SEQ = {}  # jsonl_path_str -> list[str] order-preserving deduped cwd sequence for pick_project_path
 # Mark dirty only when scanning actually changes the cache; frequent /api/sessions polling must not write repeatedly.
 _scan_cache_dirty = False
+
+
+def _is_trusted_http_request(host: str, origin: str = "", fetch_site: str = "") -> bool:
+    """Accept browser traffic only from this loopback server's own origin.
+
+    Binding to 127.0.0.1 prevents network access, but does not stop a hostile web page
+    from sending requests to localhost. Host validation blocks DNS rebinding, while
+    Origin and Sec-Fetch-Site validation block ordinary cross-site browser requests.
+    Command-line clients may omit Origin and Sec-Fetch-Site, but must still use a local
+    Host header.
+    """
+    host = (host or "").strip().lower()
+    if host not in {HOST, f"{HOST}:{PORT}", "localhost", f"localhost:{PORT}"}:
+        return False
+
+    if (fetch_site or "").strip().lower() == "cross-site":
+        return False
+
+    origin = (origin or "").strip()
+    if not origin:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(origin)
+        origin_port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in {HOST, "localhost"}
+        and origin_port == PORT
+    )
 
 
 # ---------- State persistence ----------
@@ -1952,6 +1984,29 @@ _FALLBACK_EXCLUDE_DIRS = {
 _FALLBACK_EXCLUDE_FILES = {".DS_Store"}
 
 
+def _resolve_known_project_root(root: str):
+    """Resolve root only when it belongs to a project discovered from a session.
+
+    The Files panel intentionally reads project files, but an HTTP caller must not be
+    able to replace that project root with an arbitrary directory such as the user's
+    home directory. Return the canonical Path or None when it is not in the session
+    cache.
+    """
+    if not _cache:
+        scan_sessions()
+    for meta in _cache.values():
+        project_path = meta.get("project_path")
+        # The frontend receives this exact value from session metadata and returns it.
+        # Do not construct a Path from the HTTP value; select the trusted cached value.
+        if not project_path or root != project_path:
+            continue
+        try:
+            return Path(project_path).resolve()
+        except (OSError, RuntimeError):
+            return None
+    return None
+
+
 def _stat_safe(p: Path):
     try:
         return p.stat()
@@ -2373,13 +2428,27 @@ class Handler(BaseHTTPRequestHandler):
         self._safe_write(body)
 
     def _read_json(self):
+        content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise ValueError("Content-Type must be application/json")
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return {}
+        if length > MAX_JSON_BODY:
+            raise ValueError("request body too large")
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
 
+    def _request_is_trusted(self):
+        return _is_trusted_http_request(
+            self.headers.get("Host", ""),
+            self.headers.get("Origin", ""),
+            self.headers.get("Sec-Fetch-Site", ""),
+        )
+
     def do_GET(self):
+        if not self._request_is_trusted():
+            return self._send_json(403, {"error": "cross-site request rejected"})
         # Ensure _state has been loaded from disk. Idempotent: only the first call reads.
         # Protects startup paths such as `import server; ThreadingHTTPServer(..., server.Handler)`
         # that bypass main().
@@ -2531,6 +2600,9 @@ class Handler(BaseHTTPRequestHandler):
             root = (qs.get("root") or [""])[0]
             if not root:
                 return self._send_json(400, {"error": "missing root"})
+            root_path = _resolve_known_project_root(root)
+            if root_path is None:
+                return self._send_json(403, {"error": "unknown project root"})
             try:
                 limit = int((qs.get("limit") or ["50"])[0])
             except ValueError:
@@ -2540,7 +2612,7 @@ class Handler(BaseHTTPRequestHandler):
             include_ignored = inc_raw in ("1", "true", "yes")
             try:
                 return self._send_json(
-                    200, list_recent_files(root, limit, include_ignored=include_ignored)
+                    200, list_recent_files(str(root_path), limit, include_ignored=include_ignored)
                 )
             except Exception as e:
                 return self._send_json(500, {"error": str(e)})
@@ -2549,6 +2621,9 @@ class Handler(BaseHTTPRequestHandler):
             root = (qs.get("root") or [""])[0]
             if not root:
                 return self._send_json(400, {"error": "missing root"})
+            root_path = _resolve_known_project_root(root)
+            if root_path is None:
+                return self._send_json(403, {"error": "unknown project root"})
             query = (qs.get("q") or [""])[0]
             try:
                 limit = int((qs.get("limit") or ["300"])[0])
@@ -2559,7 +2634,9 @@ class Handler(BaseHTTPRequestHandler):
             include_ignored = inc_raw in ("1", "true", "yes")
             try:
                 return self._send_json(
-                    200, find_files_by_name(root, query, limit, include_ignored=include_ignored)
+                    200, find_files_by_name(
+                        str(root_path), query, limit, include_ignored=include_ignored
+                    )
                 )
             except Exception as e:
                 return self._send_json(500, {"error": str(e)})
@@ -2567,6 +2644,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_bytes(404, "Not found", "text/plain; charset=utf-8")
 
     def do_POST(self):
+        if not self._request_is_trusted():
+            return self._send_json(403, {"error": "cross-site request rejected"})
         # Ensure _state has been loaded from disk; same rationale as do_GET.
         load_state()
         # POST is a write path. If load failed, return 503 immediately; never let the handler
@@ -2622,7 +2701,10 @@ class Handler(BaseHTTPRequestHandler):
             reveal = bool(body.get("reveal"))
             if not file_path or not root:
                 return self._send_json(400, {"error": "missing path or root"})
-            ok, err = open_file_in_system(file_path, root, reveal=reveal)
+            root_path = _resolve_known_project_root(root)
+            if root_path is None:
+                return self._send_json(403, {"error": "unknown project root"})
+            ok, err = open_file_in_system(file_path, str(root_path), reveal=reveal)
             if not ok:
                 return self._send_json(400, {"error": err})
             return self._send_json(200, {"ok": True})
