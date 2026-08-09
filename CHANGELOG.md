@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-09
+
+### Security
+- Reject cross-site and DNS-rebinding requests to the loopback HTTP server.
+- Restrict Files-panel roots to projects discovered from local session metadata.
+- Reject non-JSON or oversized state-changing requests.
+
 ## [0.1.0] - 2026-08-09
 
 ### Added
@@ -18,5 +25,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Files panel (recent files + `fd`-backed name search).
 - Downloadable anchored transcript export.
 
-[Unreleased]: https://github.com/chyang-ken/session-logbook/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/chyang-ken/session-logbook/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/chyang-ken/session-logbook/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/chyang-ken/session-logbook/releases/tag/v0.1.0

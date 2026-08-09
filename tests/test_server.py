@@ -30,6 +30,52 @@ class TestCliArgs(unittest.TestCase):
                 server.parse_args(["--port", "70000"])
 
 
+class TestLocalHttpBoundary(unittest.TestCase):
+    def test_accepts_same_origin_browser_request(self):
+        self.assertTrue(server._is_trusted_http_request(
+            f"127.0.0.1:{server.PORT}",
+            f"http://127.0.0.1:{server.PORT}",
+            "same-origin",
+        ))
+
+    def test_accepts_local_command_line_client_without_origin(self):
+        self.assertTrue(server._is_trusted_http_request(
+            f"localhost:{server.PORT}",
+        ))
+
+    def test_rejects_cross_site_browser_request(self):
+        self.assertFalse(server._is_trusted_http_request(
+            f"127.0.0.1:{server.PORT}",
+            "https://attacker.example",
+            "cross-site",
+        ))
+
+    def test_rejects_dns_rebinding_host(self):
+        self.assertFalse(server._is_trusted_http_request(
+            "attacker.example",
+            f"http://127.0.0.1:{server.PORT}",
+            "same-origin",
+        ))
+
+    def test_rejects_origin_on_wrong_local_port(self):
+        self.assertFalse(server._is_trusted_http_request(
+            f"127.0.0.1:{server.PORT}",
+            "http://127.0.0.1:9999",
+            "same-site",
+        ))
+
+    def test_allows_only_discovered_project_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            known = Path(tmp) / "known"
+            unknown = Path(tmp) / "unknown"
+            known.mkdir()
+            unknown.mkdir()
+            cache = {"session.jsonl": {"project_path": str(known)}}
+            with mock.patch.object(server, "_cache", cache):
+                self.assertEqual(server._resolve_known_project_root(str(known)), known.resolve())
+                self.assertIsNone(server._resolve_known_project_root(str(unknown)))
+
+
 class TestVendorAssets(unittest.TestCase):
     def test_woff2_content_type(self):
         self.assertEqual(
