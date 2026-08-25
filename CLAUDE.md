@@ -125,7 +125,7 @@ dashboard server. Its commands are:
 |---|---|
 | `locate <target>` | Resolve a Session ID, exact JSONL path, or bounded search query |
 | `context <target>` | Emit the standard anchored transcript plus the next line cursor |
-| `follow <target> --after-line N` | Emit only rendered content after the previous cursor |
+| `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record |
 | `status <target>` | Report observed file/session metadata without guessing process liveness |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
 | `search <query>` | Search real User/Assistant messages with source/project/date/role filters |

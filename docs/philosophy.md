@@ -67,8 +67,9 @@ separate Skills.
 
 The Skill calls `session_logbook_cli.py`, which owns source detection and reuses the same parsers
 and anchored renderer as the dashboard. It works without the HTTP server. Following an active
-Session is polling: the caller supplies the previous `[L#]` cursor and receives only later rendered
-content. This does not introduce SSE, WebSocket, messaging, Session spawning, or any claim that a
+Session is polling: the caller supplies the previous `[L#]` cursor and receives that cursor line
+once more before later rendered content, avoiding a miss when the last record was only half-written.
+This does not introduce SSE, WebSocket, messaging, Session spawning, or any claim that a
 quiet transcript proves liveness or completion.
 
 ## The won't-do list (with reasons)

@@ -353,8 +353,9 @@ def _line_count(path: Path) -> int:
     return count + (1 if last and last != b"\n" else 0)
 
 
-def _filter_after_line(body: str, after_line: int) -> str:
-    if after_line <= 0:
+def _filter_from_cursor_line(body: str, cursor_line: int) -> str:
+    """Keep the cursor line once more so a partially written final record is not missed."""
+    if cursor_line <= 0:
         return body
     kept = []
     current_anchor = 0
@@ -362,7 +363,7 @@ def _filter_after_line(body: str, after_line: int) -> str:
         match = ANCHOR_RE.search(line)
         if match:
             current_anchor = int(match.group(1))
-        if current_anchor > after_line:
+        if current_anchor >= cursor_line:
             kept.append(line)
     return "\n".join(kept).lstrip("\n")
 
@@ -385,15 +386,17 @@ def render_context(path: Path, after_line: int = 0) -> str:
         body = anchored_transcript.render_codex(path)
     else:
         body = anchored_transcript.render_claude(path)
-    body = _filter_after_line(body, after_line)
+    body = _filter_from_cursor_line(body, after_line)
     header = anchored_transcript.digest_header(path.resolve(), item["source"])
     observation = "\n".join([
         f"# SESSION_ID: {item.get('id')}",
         f"# PROJECT: {item.get('project_path') or ''}",
-        f"# AFTER: L{after_line}",
+        f"# INPUT_CURSOR: L{after_line}",
+        f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
-        f"# NEW_CONTENT: {'yes' if body.strip() else 'no'}",
+        f"# RETURNED_CONTENT: {'yes' if body.strip() else 'no'}",
         f"# EXPLICIT_TERMINAL: {_observed_terminal(item)}",
+        "# The cursor line is returned again on follow; ignore it when its [L#] was already seen.",
         "# A quiet file is not proof that its Agent is still running or has finished.",
     ])
     return header + "\n" + observation + "\n\n" + (body or "[NO NEW RENDERED CONTENT]")
@@ -461,9 +464,12 @@ def parse_args(argv=None):
     _add_target_filters(context)
     context.add_argument("--after-line", type=int, default=0)
 
-    follow = sub.add_parser("follow", help="render only content after a previous cursor")
+    follow = sub.add_parser("follow", help="render from a previous cursor, repeating its line once")
     _add_target_filters(follow)
-    follow.add_argument("--after-line", type=int, required=True)
+    follow.add_argument(
+        "--cursor-line", "--after-line", dest="after_line", type=int, required=True,
+        help="previous NEXT_CURSOR; that line is deliberately returned again",
+    )
 
     status = sub.add_parser("status", help="report observed transcript state")
     _add_target_filters(status)

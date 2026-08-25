@@ -45,8 +45,8 @@ ID, an exact JSONL path, or a search query:
 # Compact context with [L#] anchors back to the original JSONL
 python3 session_logbook_cli.py context '<session-id-or-path>'
 
-# On the next check, return only content added after the prior cursor
-python3 session_logbook_cli.py follow '<session-id-or-path>' --after-line 427
+# On the next check, repeat the cursor line once, then return later content
+python3 session_logbook_cli.py follow '<session-id-or-path>' --cursor-line 427
 
 # Search only real user messages across recent Session history
 python3 session_logbook_cli.py search 'payment retry' --role user --since 30d

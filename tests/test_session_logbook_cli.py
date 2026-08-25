@@ -88,16 +88,46 @@ class SessionLogbookCliTests(unittest.TestCase):
         self.assertIn("NEXT_CURSOR: L3", rendered)
         self.assertIn("EXPLICIT_TERMINAL: unknown", rendered)
 
-    def test_follow_returns_only_newer_anchored_content(self):
+    def test_follow_repeats_cursor_line_then_returns_newer_content(self):
         rendered = cli.render_context(self.claude, after_line=2)
+        self.assertIn("implemented retry policy", rendered)
         self.assertIn("verify the payment flow", rendered)
         self.assertNotIn("design payment retry", rendered)
-        self.assertIn("AFTER: L2", rendered)
+        self.assertIn("INPUT_CURSOR: L2", rendered)
+        self.assertIn("REPEATED_CURSOR_LINE: L2", rendered)
 
-    def test_quiet_follow_is_explicitly_empty(self):
+    def test_quiet_follow_returns_only_the_overlap_line(self):
         rendered = cli.render_context(self.claude, after_line=3)
-        self.assertIn("NEW_CONTENT: no", rendered)
-        self.assertIn("[NO NEW RENDERED CONTENT]", rendered)
+        self.assertIn("NEXT_CURSOR: L3", rendered)
+        self.assertIn("REPEATED_CURSOR_LINE: L3", rendered)
+        self.assertIn("verify the payment flow", rendered)
+        self.assertNotIn("implemented retry policy", rendered)
+
+    def test_completed_partial_cursor_line_is_returned_on_next_follow(self):
+        path = Path(self.tmp.name) / "partial.jsonl"
+        first = {"type": "user", "timestamp": "2026-08-20T10:00:00Z",
+                 "cwd": "/Users/alice/my-app", "message": {"content": "first"}}
+        second = {"type": "assistant", "timestamp": "2026-08-20T10:00:01Z",
+                  "cwd": "/Users/alice/my-app",
+                  "message": {"content": [{"type": "text", "text": "completed later"}]}}
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(first) + "\n")
+            handle.write('{"type":"assistant"')
+
+        with mock.patch.object(server, "PROJECTS_DIR", Path(self.tmp.name)):
+            before = cli.render_context(path)
+            self.assertIn("NEXT_CURSOR: L2", before)
+            self.assertNotIn("completed later", before)
+
+            with open(path, "r+", encoding="utf-8") as handle:
+                handle.seek(0)
+                handle.write(json.dumps(first) + "\n")
+                handle.write(json.dumps(second) + "\n")
+                handle.truncate()
+
+            after = cli.render_context(path, after_line=2)
+            self.assertIn("REPEATED_CURSOR_LINE: L2", after)
+            self.assertIn("completed later", after)
 
     def test_search_role_filter_and_and_semantics(self):
         user_hits = cli.search_sessions("payment retry", role="user")

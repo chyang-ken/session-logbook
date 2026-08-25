@@ -38,8 +38,8 @@ python3 server.py          # → http://127.0.0.1:47821
 # 生成带 [L#] 原文锚点的精简上下文
 python3 session_logbook_cli.py context '<session-id-or-path>'
 
-# 下次检查只返回上一个锚点之后的新增内容
-python3 session_logbook_cli.py follow '<session-id-or-path>' --after-line 427
+# 下次检查先重复上次读到的最后一行，再返回后续内容
+python3 session_logbook_cli.py follow '<session-id-or-path>' --cursor-line 427
 
 # 只搜索最近历史中的真实 User 消息
 python3 session_logbook_cli.py search 'payment retry' --role user --since 30d
