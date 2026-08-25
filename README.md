@@ -36,6 +36,33 @@ Open <http://127.0.0.1:47821>. The first scan takes 10–30s depending on how ma
 
 That's it. There is no build step, no `pip install`, and no browser-side CDN fetch — editing `index.html` and refreshing the browser is the entire dev loop.
 
+## Give a Session to another Agent
+
+The dashboard does not need to be running. The read-only Agent CLI accepts a known Session
+ID, an exact JSONL path, or a search query:
+
+```bash
+# Compact context with [L#] anchors back to the original JSONL
+python3 session_logbook_cli.py context '<session-id-or-path>'
+
+# On the next check, return only content added after the prior cursor
+python3 session_logbook_cli.py follow '<session-id-or-path>' --after-line 427
+
+# Search only real user messages across recent Session history
+python3 session_logbook_cli.py search 'payment retry' --role user --since 30d
+```
+
+The repository also ships one Agent Skill, [`session-logbook`](skills/session-logbook/SKILL.md),
+covering handoff, follow-up observation, evidence expansion, discovery, and historical mining.
+Install it by linking the repository copy into your Agent's Skill directory so the Skill and
+CLI always stay on the same version:
+
+```bash
+mkdir -p ~/.claude/skills ~/.codex/skills
+ln -s "$PWD/skills/session-logbook" ~/.claude/skills/session-logbook
+ln -s "$PWD/skills/session-logbook" ~/.codex/skills/session-logbook
+```
+
 ## Features
 
 - **Four zones, one page** — Starred / Recent / Dusty / Archived, with project grouping (by the last two path segments; `.worktrees/` fold into their parent).
@@ -47,6 +74,7 @@ That's it. There is no build step, no `pip install`, and no browser-side CDN fet
 - **Star / Archive / Note** — lightweight organizing that persists to `~/.session-logbook/state.json`.
 - **Files panel** — browse a project's recently-changed files or fuzzy-find by name (`fd`-backed).
 - **Downloadable anchored transcript** — export a compact, navigable transcript with line-number anchors back to the original JSONL (useful for feeding a session to an agent for analysis).
+- **One read-only Agent interface** — resolve a known Session, hand it to another Agent, retrieve only later additions, expand exact source lines, or search bounded history without running the dashboard.
 
 ## Where to go next
 
@@ -54,6 +82,7 @@ That's it. There is no build step, no `pip install`, and no browser-side CDN fet
 |---|---|
 | **Try it** | [Quickstart](#quickstart) above |
 | **Understand the design & boundaries** | [`docs/philosophy.md`](docs/philosophy.md) |
+| **Let an Agent use Session history** | [`skills/session-logbook/SKILL.md`](skills/session-logbook/SKILL.md) |
 | **Work on the UI** | [`docs/design-system.md`](docs/design-system.md) |
 | **Contribute** | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Report a bug / request a feature** | [Open an issue](https://github.com/chyang-ken/session-logbook/issues) |

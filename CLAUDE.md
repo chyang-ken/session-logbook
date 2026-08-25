@@ -116,7 +116,24 @@ A POST body missing `starred` / `archived` defaults to `True`.
 | `/` | dashboard | list view (default) |
 | `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text |
 
-## 5. Key constants (top of `server.py`)
+## 5. Agent-facing CLI and Skill
+
+`session_logbook_cli.py` is the stable read-only interface for Agents and does not require the
+dashboard server. Its commands are:
+
+| Command | Outcome |
+|---|---|
+| `locate <target>` | Resolve a Session ID, exact JSONL path, or bounded search query |
+| `context <target>` | Emit the standard anchored transcript plus the next line cursor |
+| `follow <target> --after-line N` | Emit only rendered content after the previous cursor |
+| `status <target>` | Report observed file/session metadata without guessing process liveness |
+| `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
+| `search <query>` | Search real User/Assistant messages with source/project/date/role filters |
+
+The single packaged Skill is `skills/session-logbook/`. It routes Agent requests to this CLI;
+do not add separate find/read/compress Skills or duplicate source parsing in Skill instructions.
+
+## 6. Key constants (top of `server.py`)
 
 | Constant | Default | Purpose |
 |---|---|---|
@@ -130,7 +147,7 @@ A POST body missing `starred` / `archived` defaults to `True`.
 State lives at `~/.session-logbook/state.json`, with rotating backups under
 `~/.session-logbook/backups/`.
 
-## 6. Code map
+## 7. Code map
 
 | Location | Responsibility |
 |---|---|
@@ -143,13 +160,15 @@ State lives at `~/.session-logbook/state.json`, with rotating backups under
 | `sources/codex.py` `is_codex_path` / `CODEX_ARCHIVED_ROOT` | Codex (`~/.codex`) data source; `is_codex_path` is the centralized dual-root predicate (active `sessions` + `archived_sessions`) |
 | `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source |
 | `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex`); the single source of truth behind the `/anchored` endpoint |
+| `session_logbook_cli.py` | read-only Agent access: resolve, search, anchored handoff, incremental follow, status, and evidence expansion |
+| `skills/session-logbook/` | the single Agent-facing Skill; thin routing layer over `session_logbook_cli.py` |
 | `index.html` `<style>` | all CSS (custom props in `:root`) |
 | `index.html` `stripWorktree` / `projectKey` | path normalization + grouping keys |
 | `index.html` `computeScope` | frontend scope override |
 | `index.html` `render` / `renderCard` / `renderConv` | list, card, and conversation rendering |
 | `index.html` `bindConvNav` | user-message navigation (j/k + goto + scroll state machine) |
 
-## 7. Style
+## 8. Style
 
 - UI reference: Notion / Linear — light, sans-serif, **readability over decoration**.
 - CSS custom properties (`--bg`, `--text-1`, …) defined in `:root`.
@@ -158,7 +177,7 @@ State lives at `~/.session-logbook/state.json`, with rotating backups under
   hover semantics are tokenized — pick by action category, not by what looks nice. Don't add
   new color variables without proving the existing tokens can't cover the case.
 
-## 8. Tests
+## 9. Tests
 
 ```bash
 python3 -m unittest discover -s tests
@@ -167,7 +186,7 @@ python3 -m unittest discover -s tests
 `tests/` uses Python `unittest` with synthetic fixtures. All tests must pass before merge;
 CI runs the same command on every push and PR.
 
-## 9. Decision log
+## 10. Decision log
 
 Decisions backed by an experiment / comparison / measurement are recorded under
 [`docs/decisions/`](docs/decisions/) — see that directory's README for the format.

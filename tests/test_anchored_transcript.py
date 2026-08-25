@@ -2,8 +2,8 @@
 
 The anchored transcript is the standard reduced artifact meant for agents to read
 (see docs/philosophy.md "context reduction for whom"). Core contract: every line carries
-a [L#] origin line-number anchor, human turns carry [U#], and truncation leaves a marker --
-the agent uses the anchors to go back to the original and expand.
+a [L#] origin line-number anchor, human turns carry [U#], User and Assistant text stays whole,
+and reduced tool-process detail can be expanded from the original by anchor.
 """
 import json
 import tempfile
@@ -65,16 +65,36 @@ class ClaudeRenderTests(unittest.TestCase):
         self.assertEqual(line1["message"]["content"], "hello world")
 
 
-class ClaudeTruncationTests(unittest.TestCase):
-    def test_long_text_leaves_truncation_marker(self):
-        long_text = "x" * 9000  # exceeds the user 6000 truncation threshold
+class MessagePreservationTests(unittest.TestCase):
+    def test_long_claude_user_and_assistant_text_stays_complete(self):
+        user_text = "u" * 9000
+        assistant_text = "a" * 4000
         path = _write_jsonl([
             {"type": "user", "timestamp": "2026-06-11T10:00:00Z",
-             "message": {"content": long_text}},
+             "message": {"content": user_text}},
+            {"type": "assistant", "timestamp": "2026-06-11T10:00:01Z",
+             "message": {"content": [{"type": "text", "text": assistant_text}]}},
         ])
         out = at.render_claude(path)
-        self.assertIn("chars truncated]", out)  # leaves a back-reference marker
-        self.assertLess(len(out), len(long_text))  # actually shortened
+        self.assertIn(user_text, out)
+        self.assertIn(assistant_text, out)
+
+    def test_long_codex_user_and_assistant_text_stays_complete(self):
+        user_text = "u" * 9000
+        assistant_text = "a" * 4000
+        path = _write_jsonl([
+            {"type": "session_meta", "timestamp": "2026-06-11T10:00:00Z",
+             "payload": {"cwd": "/tmp", "model": "gpt-5"}},
+            {"type": "response_item", "timestamp": "2026-06-11T10:00:01Z",
+             "payload": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": user_text}]}},
+            {"type": "response_item", "timestamp": "2026-06-11T10:00:02Z",
+             "payload": {"type": "message", "role": "assistant",
+                         "content": [{"type": "output_text", "text": assistant_text}]}},
+        ])
+        out = at.render_codex(path)
+        self.assertIn(user_text, out)
+        self.assertIn(assistant_text, out)
 
     def test_base64_blob_stripped(self):
         blob = "QUJD" * 800  # a long string that looks like base64
@@ -117,6 +137,21 @@ class CodexRenderTests(unittest.TestCase):
         self.assertIn("the real question", out)
         self.assertNotIn("[U2]", out)
 
+    def test_injection_and_real_prompt_in_same_message_are_split(self):
+        path = _write_jsonl([
+            {"type": "session_meta", "timestamp": "2026-06-11T10:00:00Z",
+             "payload": {"cwd": "/tmp", "model": "gpt-5"}},
+            {"type": "response_item", "timestamp": "2026-06-11T10:00:01Z",
+             "payload": {"type": "message", "role": "user", "content": [
+                 {"type": "input_text", "text": "<environment_context><cwd>/tmp</cwd></environment_context>"},
+                 {"type": "input_text", "text": "keep this real prompt"},
+             ]}},
+        ])
+        out = at.render_codex(path)
+        self.assertIn("[CONTEXT injected:", out)
+        self.assertIn("[U1] [L2] USER", out)
+        self.assertIn("keep this real prompt", out)
+
 
 class DigestHeaderTests(unittest.TestCase):
     """Self-describing header: lets a cold recipient read the anchors and go back to the original from the .txt alone."""
@@ -131,7 +166,12 @@ class DigestHeaderTests(unittest.TestCase):
         h = at.digest_header("/x.jsonl", "claude")
         self.assertIn("[L<n>]", h)     # line-number anchor legend
         self.assertIn("[U<n>]", h)     # human turn legend
-        self.assertIn("truncated", h)  # truncation marker legend
+        self.assertIn("truncated", h)  # reduced tool-process detail still carries a marker
+
+    def test_header_promises_complete_conversation_messages(self):
+        h = at.digest_header("/x.jsonl", "codex")
+        self.assertIn("User and Assistant messages", h)
+        self.assertIn("are complete", h)
 
     def test_header_source_label(self):
         self.assertIn("Codex", at.digest_header("/x.jsonl", "codex"))

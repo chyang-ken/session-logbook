@@ -4,9 +4,10 @@
 See docs/philosophy.md ("context reduction — for whom"): this is the standard reduced form
 **for agents to read** — not a replacement for the raw jsonl, but a navigation layer carrying
 original coordinates. Every line is tagged with `[U#]` (the Nth human turn) / `[L#]` (the
-original line number); when detail is truncated, a `…[+N chars truncated]` marker is left so an
-agent can use `[L#]` to jump back into the raw jsonl and recover the full content. Compression
-is roughly 8–45x (depending on how much of the session is screenshots / tool output).
+original line number). User and Assistant message text is preserved in full. Tool inputs,
+tool outputs, thinking, injected context, and binary content are reduced; when one of those is
+truncated, a `…[+N chars truncated]` marker is left so an agent can use `[L#]` to jump back into
+the raw jsonl and recover the full content.
 
 Two sources:
 - `render_claude(path)` — Claude Code session jsonl (`~/.claude/projects/...`)
@@ -48,8 +49,8 @@ def digest_header(jsonl_path, source="claude") -> str:
     label = "Codex" if source == "codex" else "Claude Code"
     lines = [
         "# ┌─ COMPACT SESSION DIGEST ─────────────────────────────────────────",
-        f"# │ Lossy, navigable digest of a {label} session. Most detail is stripped",
-        "# │ to save tokens; every kept line is anchored back to the full source.",
+        f"# │ Navigable transcript of a {label} session. User and Assistant messages",
+        "# │ are complete; tool-process detail is reduced to save tokens.",
         "# │",
         f"# │ SOURCE (full, authoritative): {jsonl_path}",
         "# │ To expand any point, open that file at the cited [L#] line.",
@@ -161,7 +162,7 @@ def render_claude(path) -> str:
                     uturn += 1
                     o_lines.append("")
                     o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts}{side} ━━━━━━━━━━")
-                    o_lines.append(trunc(txt, 6000))
+                    o_lines.append(str(txt))
             elif t == 'assistant':
                 msg = o.get('message') or {}
                 for b in (msg.get('content') or []):
@@ -171,7 +172,7 @@ def render_claude(path) -> str:
                     if bt == 'text':
                         tx = (b.get('text') or '').strip()
                         if tx:
-                            o_lines.append(f"[L{ln}] ASSISTANT{side}: {trunc(tx, 2500)}")
+                            o_lines.append(f"[L{ln}] ASSISTANT{side}: {tx}")
                     elif bt == 'thinking':
                         th = (b.get('thinking') or '').strip()
                         if th:
@@ -212,6 +213,32 @@ def _msg_text(content):
                 out.append('[image]')
         return "\n".join(out)
     return str(content)
+
+
+def _codex_user_parts(content):
+    """Split one Codex user message into injected context and real human text.
+
+    Codex may place environment/AGENTS blocks and the real prompt in separate input_text
+    blocks inside the same response_item. Classifying the concatenated string by its prefix
+    drops the real prompt. Keep block boundaries until injection filtering is complete.
+    """
+    if not isinstance(content, list):
+        text = _msg_text(content)
+        return ([text] if _is_injected(text) else []), ("" if _is_injected(text) else text)
+    injected = []
+    human = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get('type')
+        if kind not in ('input_text', 'text'):
+            continue
+        text = block.get('text', '')
+        if _is_injected(text):
+            injected.append(text)
+        elif text:
+            human.append(text)
+    return injected, "\n".join(human)
 
 
 def _fc_summary(name, args_raw):
@@ -272,20 +299,21 @@ def render_codex(path) -> str:
                 pt = p.get('type')
                 if pt == 'message':
                     role = p.get('role')
-                    txt = _msg_text(p.get('content'))
                     if role == 'developer':
                         continue
                     if role == 'user':
-                        if _is_injected(txt):
-                            o_lines.append(f"[L{ln}]   [CONTEXT injected: {trunc(txt,80)}]")
-                        else:
+                        injected, txt = _codex_user_parts(p.get('content'))
+                        for context in injected:
+                            o_lines.append(f"[L{ln}]   [CONTEXT injected: {trunc(context,80)}]")
+                        if txt.strip():
                             uturn += 1
                             o_lines.append("")
                             o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts} ━━━━━━━━━━")
-                            o_lines.append(trunc(txt, 6000))
+                            o_lines.append(txt)
                     elif role == 'assistant':
+                        txt = _msg_text(p.get('content'))
                         if txt.strip():
-                            o_lines.append(f"[L{ln}] ASSISTANT: {trunc(txt,2500)}")
+                            o_lines.append(f"[L{ln}] ASSISTANT: {txt}")
                 elif pt == 'reasoning':
                     summ = _msg_text(p.get('summary'))
                     if summ.strip():
