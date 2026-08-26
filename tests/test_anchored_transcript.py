@@ -55,8 +55,22 @@ class ClaudeRenderTests(unittest.TestCase):
 
     def test_tool_result_anchored_to_origin_line(self):
         # tool_result is on line 3 of the original -> [L3]
-        self.assertIn("[L3]   ⮑ TOOL_RESULT", self.out)
-        self.assertIn("file1", self.out)
+        self.assertIn("[L3]   ⮑ TOOL_RESULT OK", self.out)
+        self.assertIn("2 lines, 11 chars hidden", self.out)
+        self.assertNotIn("file1", self.out)
+
+    def test_tool_error_keeps_leading_error_text(self):
+        error = "permission denied: " + "x" * 500
+        path = _write_jsonl([
+            {"type": "user", "timestamp": "2026-06-11T10:00:00Z",
+             "message": {"content": [
+                 {"type": "tool_result", "content": error, "is_error": True},
+             ]}},
+        ])
+        out = at.render_claude(path)
+        self.assertIn("TOOL_RESULT ERROR", out)
+        self.assertIn("permission denied", out)
+        self.assertIn("truncated", out)
 
     def test_L_anchor_points_to_real_line(self):
         # [L#] must be back-referenceable: line 1 really is that user message
@@ -117,6 +131,24 @@ class CodexRenderTests(unittest.TestCase):
     def test_session_meta_anchored(self):
         out = at.render_codex(FIXTURES / "basic_main.jsonl")
         self.assertIn("[SESSION_META]", out)
+
+    def test_successful_output_keeps_status_and_size_not_body(self):
+        out = at.render_codex(FIXTURES / "basic_main.jsonl")
+        self.assertIn("OUTPUT OK", out)
+        self.assertIn("2 lines, 11 chars hidden", out)
+        self.assertNotIn("file1", out)
+
+    def test_structured_failed_output_keeps_leading_error(self):
+        path = _write_jsonl([
+            {"type": "session_meta", "timestamp": "2026-06-11T10:00:00Z",
+             "payload": {"cwd": "/tmp", "model": "gpt-5"}},
+            {"type": "response_item", "timestamp": "2026-06-11T10:00:01Z",
+             "payload": {"type": "function_call_output", "call_id": "c1",
+                         "output": json.dumps({"exit_code": 1, "output": "build failed"})}},
+        ])
+        out = at.render_codex(path)
+        self.assertIn("OUTPUT ERROR", out)
+        self.assertIn("build failed", out)
 
     def test_agents_md_injection_filtered(self):
         # AGENTS.md injection should be marked as [CONTEXT injected: ...], not treated as a human turn

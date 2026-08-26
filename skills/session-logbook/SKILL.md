@@ -60,8 +60,9 @@ or an ISO date, and `--include-subagents`.
 
 - The anchored transcript is the default Agent handoff artifact. Do not replace it with a
   model summary unless the user separately asks for interpretation or synthesis.
-- Preserve User and Assistant messages. Tool activity is reduced and remains expandable by
-  source line.
+- Preserve User and Assistant messages. Tool actions keep their target path, search scope, or
+  command prefix. Successful result bodies collapse to status and size; leading error text stays
+  visible. Expand any hidden detail by source line with `evidence`.
 - If a query returns several candidates, do not silently pick one. Use recent message snippets,
   project, source, and time to identify the intended Session.
 - Never write to the source JSONL. Resume or message a Session only when the user separately
