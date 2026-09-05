@@ -31,8 +31,9 @@ STATE_FILE = DEFAULT_STATE_FILE
 BACKUP_DIR = DEFAULT_STATE_FILE.parent / "backups"  # `~/.session-logbook/backups/`
 BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-cleaned
 
-# bump this whenever extract_metadata schema changes
-CACHE_SCHEMA_VERSION = 1
+# bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
+# it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
+CACHE_SCHEMA_VERSION = 2
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 SCAN_CACHE_BACKUP_DIR = Path.home() / ".session-logbook" / "scan-cache-backups"
 
@@ -521,6 +522,16 @@ def _build_cwd_map(force: bool = False):
 _PROJECT_PATH_SHALLOW = {"/", "/Users", "/home"}
 
 
+def _is_shallow_root(path: str) -> bool:
+    """True for paths too shallow to be a project root: '/', the user-container dirs, and a
+    bare home directory such as /Users/alice. A commonpath landing here means the cwd values
+    belong to unrelated projects, so it says nothing about which project the session is.
+    """
+    if path in _PROJECT_PATH_SHALLOW:
+        return True
+    return os.path.dirname(path) in ("/Users", "/home")
+
+
 def _find_anchor_from_folder(folder_name: str, cwds_seq: list):
     """Find the cwd whose encoded form equals folder_name, i.e. the user's startup cwd.
     Return None when decoding is uncertain (directory names containing '-' or '.' are ambiguous),
@@ -540,8 +551,15 @@ def pick_project_path(folder_name: str, cwds_seq: list):
     Priority:
       1. If the last cwd is under .claude/worktrees/, keep the last cwd (worktree work-root).
       2. If there is a single cwd, use it directly.
-      3. For multiple cwd values, compute commonpath; use it only when it stays under the
-         folder anchor, otherwise fall back to the last cwd.
+      3. For multiple cwd values, compute commonpath and compare it with the folder anchor
+         (the session's startup cwd):
+           - commonpath at or under the anchor -> use commonpath (agent cd'd within the project);
+           - commonpath above the anchor -> keep the anchor. The agent visited an unrelated
+             directory mid-session; the startup cwd still expresses the project intent, and
+             the commonpath would otherwise collapse to a shared ancestor such as the home
+             directory, which is not a project at all.
+      4. Without a usable anchor, use commonpath unless it is too shallow to be a project
+         root, in which case fall back to the last cwd.
     """
     if not cwds_seq:
         return None
@@ -555,10 +573,13 @@ def pick_project_path(folder_name: str, cwds_seq: list):
     except ValueError:
         return last
     anchor = _find_anchor_from_folder(folder_name, cwds_seq)
-    if anchor and (common == anchor or common.startswith(anchor + "/")):
-        return common
-    # If no anchor matched, use SHALLOW as a guard against degenerate commonpath values above /Users.
-    if common in _PROJECT_PATH_SHALLOW:
+    if anchor:
+        if common == anchor or common.startswith(anchor + "/"):
+            return common
+        # commonpath escaped above the startup cwd: the agent stepped outside the project.
+        return anchor
+    # Without an anchor, guard against a commonpath too shallow to name a project.
+    if _is_shallow_root(common):
         return last
     return common
 

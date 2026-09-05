@@ -510,6 +510,29 @@ class TestPickProjectPath(unittest.TestCase):
             "/Users/alice",
         )
 
+    def test_cd_into_unrelated_project_keeps_anchor(self):
+        """Regression: an agent that cd's into an unrelated project must not collapse the
+        session to the shared ancestor (the home directory). The startup cwd wins.
+        """
+        cwds = [
+            "/Users/alice/my-app",
+            "/Users/alice/other-repo",
+            "/Users/alice/other-repo/docs",
+        ]
+        # commonpath = /Users/alice, above the anchor /Users/alice/my-app -> keep the anchor
+        self.assertEqual(
+            server.pick_project_path("-Users-alice-my-app", cwds),
+            "/Users/alice/my-app",
+        )
+
+    def test_no_anchor_home_commonpath_falls_back_to_last(self):
+        """A bare home directory is not a project root: without an anchor, fall back to last."""
+        cwds = ["/Users/alice/proj-1", "/Users/alice/proj-2"]
+        self.assertEqual(
+            server.pick_project_path("-some-other-folder", cwds),
+            "/Users/alice/proj-2",
+        )
+
     def test_anchor_decode_fails_falls_back_to_last(self):
         """If folder_name cannot decode an anchor and commonpath is SHALLOW, fall back to last."""
         cwds = ["/Users/alice/proj-1", "/Users/bob/proj-2"]
