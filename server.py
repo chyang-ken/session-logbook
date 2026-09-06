@@ -518,7 +518,7 @@ def _build_cwd_map(force: bool = False):
 # ---------- project_path selection ----------
 # Philosophy: the folder name is Claude Code's encoded startup cwd, a naturally stable anchor.
 # Agent cd commands during a session are implementation details, not project intent. See
-# docs/decisions/2026-05-14-project-path-strategy.md.
+# docs/decisions/2026-09-05-project-path-anchor-fix.md.
 _PROJECT_PATH_SHALLOW = {"/", "/Users", "/home"}
 
 
