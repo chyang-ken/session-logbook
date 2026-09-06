@@ -189,6 +189,16 @@ python3 scripts/check_no_cjk.py
 `tests/` uses Python `unittest` with synthetic fixtures. All tests must pass before merge;
 CI runs the same command on every push and PR.
 
+CI's floor is Python 3.9 and its runners have no git identity. Before pushing, run the suite once
+under a 3.9 interpreter too (on macOS, `/usr/bin/python3` is 3.9), and never let a test rely on
+the developer's global git config — the `Z` timezone suffix and `git tag -a` without an identity
+have both bitten here.
+
+To smoke a pre-merge build against real local session data, start it through a launcher that
+rebinds `server.STATE_FILE`, `server.SCAN_CACHE_FILE` and `server.SCAN_CACHE_BACKUP_DIR` to a temp
+directory first; otherwise the unreleased build writes into the production `~/.session-logbook/`
+state and cache.
+
 `scripts/check_no_cjk.py` enforces the English-first rule over every tracked file and runs as
 its own CI job. Run it before you commit — a local pre-commit hook is optional and easy to
 bypass, so CI is the gate that actually holds.

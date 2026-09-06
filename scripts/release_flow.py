@@ -77,6 +77,24 @@ def is_ancestor(a: str, b: str, cwd: Optional[Path] = None) -> bool:
                           capture_output=True).returncode == 0
 
 
+def main_content_on_staging(main: str, staging: str, cwd: Optional[Path] = None) -> bool:
+    """True when everything on `main` also exists on `staging`.
+
+    A release PR lands on the protected `main` as a merge commit, and that commit itself is never
+    on `staging`, so plain ancestry would cry wolf after every release. Compare content instead:
+    `main` is fine when its tree equals the tree of its merge-base with `staging` — i.e. the merge
+    added nothing beyond what `staging` already had. A hotfix committed straight to `main` changes
+    the tree and is still caught.
+    """
+    if is_ancestor(main, staging, cwd):
+        return True
+    base = subprocess.run(["git", "merge-base", main, staging], cwd=cwd, capture_output=True, text=True)
+    if base.returncode != 0 or not base.stdout.strip():
+        return False
+    return subprocess.run(["git", "diff", "--quiet", base.stdout.strip(), main], cwd=cwd,
+                          capture_output=True).returncode == 0
+
+
 def rev(ref: str, cwd: Optional[Path] = None) -> str:
     return git("rev-parse", ref, cwd=cwd)
 
@@ -182,10 +200,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         lines.append(f"release-flow: newest deploy {latest.tag} is {latest.days(now):.0f} days old; "
                      f"nothing has soaked {args.soak_days} days yet.")
 
-    # 3. Did main get commits that never went through staging?
-    if ref_exists(main, cwd) and not is_ancestor(main, staging, cwd):
+    # 3. Did main get content that never went through staging?
+    if ref_exists(main, cwd) and not main_content_on_staging(main, staging, cwd):
         actionable = True
-        lines.append(f"release-flow: WARNING {main} has commits that are not on {staging}. "
+        lines.append(f"release-flow: WARNING {main} has changes that are not on {staging}. "
                      f"Merge {MAIN} into {STAGING} so the river stays one-way.")
 
     if not online:

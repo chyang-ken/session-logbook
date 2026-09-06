@@ -141,6 +141,21 @@ class ReleaseFlowTests(unittest.TestCase):
         sh(["git", "checkout", "--quiet", "staging"], cwd=self.clone)
         self.assertIn("not on origin/staging", self.check())
 
+    def test_check_accepts_release_merge_commit_on_main(self):
+        # A promotion lands on main as a merge commit (main is branch-protected, so the release
+        # branch cannot be fast-forwarded). That commit is not on staging, but its content is.
+        f1 = self.commit("f1", "feature one")
+        self.commit("f2", "feature two")
+        self.push_staging()
+        self.deployed_tag(f1, days_ago=20)
+        sh(["git", "checkout", "--quiet", "main"], cwd=self.clone)
+        sh(["git", "merge", "--quiet", "--no-ff", "-m", "Merge release", f1], cwd=self.clone)
+        sh(["git", "push", "--quiet", "origin", "main"], cwd=self.clone)
+        sh(["git", "checkout", "--quiet", "staging"], cwd=self.clone)
+        out = self.check()
+        self.assertNotIn("WARNING", out)
+        self.assertIn("already contains", out)
+
     # ---- deploy ----
     def _serve(self):
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), _OK)
