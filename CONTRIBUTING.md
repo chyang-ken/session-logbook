@@ -36,7 +36,7 @@ All tests must pass before a PR is merged. CI runs the same command on every pus
 
 This project is developed in the open, for a worldwide audience. A few rules make that sustainable:
 
-1. **English first.** Commit messages, public-facing code comments, docstrings, and repo docs are written in **English**. A `_zh-CN` companion (e.g. `README_zh-CN.md`) is welcome where it helps, but English is the source of truth.
+1. **English first.** Commit messages, public-facing code comments, docstrings, and repo docs are written in **English**. A `_zh-CN` companion (e.g. `README_zh-CN.md`) is welcome where it helps, but English is the source of truth. CI enforces this for tracked files; run it yourself with `python3 scripts/check_no_cjk.py`, and add a deliberate exception to the allowlist in that script.
 2. **Never commit real session data.** This is a tool that reads *your* private agent logs. Test fixtures and examples must be **synthetic** — no real transcripts, no real usernames, no references to other projects you work on. When in doubt, invent placeholder data (`/Users/alice/my-app`, UUIDs like `aaaa…`).
 3. **Keep scratch work out of git.** Experiments, scratch analysis, and personal R&D belong in the git-ignored `_private/` directory (or a separate private repo) — never in the public history. See [`CLAUDE.md`](CLAUDE.md) for the full rationale.
 4. **Respect the scope.** Before adding a feature, check [`docs/philosophy.md`](docs/philosophy.md). The dashboard is a read-only cockpit; "send a message", "spawn a session", "multi-user auth", and "live push" are explicit non-goals.
@@ -48,7 +48,7 @@ This project is developed in the open, for a worldwide audience. A few rules mak
 - Keep PRs focused. One concern per PR.
 - Describe the problem, the change, and how you verified it. The PR template will prompt you.
 - For UI changes, include a before/after screenshot.
-- Make sure `python3 -m unittest discover -s tests` is green.
+- Make sure `python3 -m unittest discover -s tests` and `python3 scripts/check_no_cjk.py` are green.
 
 All changes to `main`, including maintainer changes, go through a pull request. The
 required Python 3.9, 3.11, and 3.13 CI checks must pass on a branch that is up to

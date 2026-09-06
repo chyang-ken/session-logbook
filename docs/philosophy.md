@@ -48,15 +48,29 @@ Before shrinking a session, ask one question first: **who is the reduction for?*
 
 | Consumer | Artifact | Anchors / back-reference | Source | Current carrier |
 |---|---|---|---|---|
-| **Agent reading** (fed read-only analysis, expands back to the original on demand) | rendered anchored transcript (plain text) | `[U#]` for human turns + `[L#]` for the **original line number** — one jump and you're there | Dual-source ✓ | `tools/session-review/pipeline/render*.py` |
+| **Agent reading** (fed read-only analysis, expands back to the original on demand) | rendered anchored transcript (plain text) | `[U#]` for human turns + `[L#]` for the **original line number** — one jump and you're there | Claude + Codex ✓ | `sources/anchored_transcript.py` via the web download or Agent CLI |
 | **Human reading** (review, clipboard) | token-optimized Markdown | None (read once, then discard) | Dual-source ✓ | modal `export` button → `extract_transcript` |
-| **Programmatic parsing** (structured re-assembly) | structured JSONL | call_id / turn_id | Codex only | `scripts/trim_session_jsonl.py` (an early attempt, **now superseded by render**) |
+| **Programmatic parsing** (structured re-assembly) | structured JSONL | call_id / turn_id | Codex only | No current product surface; the early trim attempt was superseded by render |
 
 Hard rules:
 
-1. **The rendered anchored transcript is the standard reduction artifact for agents** — it does not replace the raw jsonl; it's a **navigation layer carrying original-file coordinates**. The details aren't in the transcript itself; the agent uses `[L#]` to fetch them back from the original with precision. The raw jsonl always lives in `~/.claude` / `~/.codex`, so "read the small transcript, expand on demand" holds naturally on the local machine. The dashboard's "download reduced version" button emits exactly this artifact (dual-source via `render.py` / `render_codex.py`).
+1. **The rendered anchored transcript is the standard reduction artifact for agents** — it does not replace the raw jsonl; it's a **navigation layer carrying original-file coordinates**. User and Assistant message text stays complete. Tool actions retain their target path, search scope, or command prefix. Successful result bodies collapse to status and size; leading error text stays visible. Thinking, injected context, and binary content are reduced. The agent uses `[L#]` to fetch hidden operational detail back from the original with precision. The raw jsonl always lives in `~/.claude` / `~/.codex`, so "read the conversation, expand operations on demand" holds naturally on the local machine. The dashboard download and `session_logbook_cli.py context` emit the same artifact through `sources/anchored_transcript.py`.
 2. **A model-written summary (a brief or a session-review report) is downstream of reduction, not a fourth kind of reduction** — it consumes any of the artifacts above and produces a shorter insight. Don't conflate "summary" with "reduction" as if they were the same layer.
 3. **Before adding any new "reduction / summary" variant, come back to this table** and prove the existing three can't cover the case before doing anything. The structured use case for `trim` has no live demand right now; to revive it, first prove the rendered anchored transcript can't feed your consumer.
+
+## Agent access has one product surface
+
+The repository's [`session-logbook` Skill](../skills/session-logbook/SKILL.md) is the only
+Agent-facing discovery and routing layer. Finding, handoff, incremental observation, evidence
+expansion, and historical mining are modes of the same read-only Session-history product, not
+separate Skills.
+
+The Skill calls `session_logbook_cli.py`, which owns source detection and reuses the same parsers
+and anchored renderer as the dashboard. It works without the HTTP server. Following an active
+Session is polling: the caller supplies the previous `[L#]` cursor and receives that cursor line
+once more before later rendered content, avoiding a miss when the last record was only half-written.
+This does not introduce SSE, WebSocket, messaging, Session spawning, or any claim that a
+quiet transcript proves liveness or completion.
 
 ## The won't-do list (with reasons)
 
