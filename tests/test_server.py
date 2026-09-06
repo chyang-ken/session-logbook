@@ -458,7 +458,7 @@ class TestCwdTruthMap(unittest.TestCase):
 
 
 class TestPickProjectPath(unittest.TestCase):
-    """project_path selection strategy. Decision log: docs/decisions/2026-05-14-project-path-strategy.md"""
+    """project_path selection strategy. Decision log: docs/decisions/2026-09-05-project-path-anchor-fix.md"""
 
     def setUp(self):
         server._CWD_TRUTH_MAP.clear()
