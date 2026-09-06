@@ -181,10 +181,15 @@ State lives at `~/.session-logbook/state.json`, with rotating backups under
 
 ```bash
 python3 -m unittest discover -s tests
+python3 scripts/check_no_cjk.py
 ```
 
 `tests/` uses Python `unittest` with synthetic fixtures. All tests must pass before merge;
 CI runs the same command on every push and PR.
+
+`scripts/check_no_cjk.py` enforces the English-first rule over every tracked file and runs as
+its own CI job. Run it before you commit — a local pre-commit hook is optional and easy to
+bypass, so CI is the gate that actually holds.
 
 ## 10. Decision log
 

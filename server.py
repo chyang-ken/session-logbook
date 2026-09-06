@@ -59,7 +59,7 @@ CONV_ASSISTANT_MAX = 200_000
 CONV_TOOL_RESULT_MAX = 1500
 CONV_TOOL_INPUT_MAX = 300
 
-# Transcript export (docs/decisions/2026-05-11-export-format.md)
+# Transcript export
 TRANSCRIPT_TOOL_RESULT_MAX = 200
 BRIEF_TIMEOUT_SEC = 180  # claude -p call timeout; measured ~10-15s, leaving 12x headroom
 
@@ -79,7 +79,7 @@ _state = {}   # session_id -> { archived, archived_at, note }
 # forgotten initialization. Every HTTP handler entry point falls back to load_state()
 # (idempotent) to prevent startup paths such as `import server; ThreadingHTTPServer(...)`
 # from skipping init and overwriting 260 disk entries with an empty _state.
-# Root cause of the 5/17 data-loss incident; see docs/decisions/2026-05-24-state-load-discipline.md.
+# Root cause of the 5/17 data-loss incident.
 _state_loaded = False
 
 # Ground-truth reverse table: encode every seen cwd using Claude Code's rules
@@ -1012,7 +1012,6 @@ def _truncate_tool_result(text, max_chars):
 
 
 # ---------- QA (AskUserQuestion) parsing ----------
-# Decision log: docs/decisions/2026-05-13-qa-turn-type.md
 # QA is a converged-conversation subtype at the same level as USER / ASSISTANT, not a truncated tool_result.
 # Input = assistant tool_use(AskUserQuestion).input; output = the user jsonl row toolUseResult.
 
@@ -1335,8 +1334,8 @@ def extract_conversation(jsonl_path):
 def extract_transcript(jsonl_path: Path) -> str:
     """Token-optimized export: v1 markdown shape, untruncated user/assistant, 200-char tool_result.
 
-    Design basis: docs/decisions/2026-05-11-export-format.md. The key difference from
-    extract_conversation is that messages are the core signal in export and are never truncated.
+    The key difference from extract_conversation is that messages are the core signal in
+    export and are never truncated.
     """
     out_blocks = []
     pending_tools = {}
@@ -1466,8 +1465,7 @@ def get_or_generate_brief(sid: str, jsonl_path: Path, transcript_text: str):
     """Core brief cache: reuse on content-hash (size+mtime) hit, regenerate otherwise.
 
     Returns (brief_text, status, generated_at_iso), where status is one of
-    {'cached', 'generated', 'regenerated', 'failed'}. Failures are not cached. See the
-    "Next steps" section of docs/decisions/2026-05-11-export-format.md.
+    {'cached', 'generated', 'regenerated', 'failed'}. Failures are not cached.
     """
     st = jsonl_path.stat()
     size, mtime = st.st_size, st.st_mtime
