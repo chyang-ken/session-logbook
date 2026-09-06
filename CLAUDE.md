@@ -100,7 +100,7 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 | `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, scope, archived, archived_at, starred, starred_at, note}]` |
 | `GET /api/search?q=…` | multi-word = AND; session ID matches too | `[{id, snippets:[{text, role, term}]}]` |
 | `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` |
-| `GET /api/sessions/:id/conversation` | — | `{id, project_path, custom_title, total_lines, turns:[…]}` |
+| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
 | `GET /api/sessions/:id/anchored` | — | Plain-text transcript with `[L#]` original-line anchors (for agents to read / download) |
 | `GET /api/recent-files` / `GET /api/find-files` | Files panel | recent-changed / `fd` name search |
 | `POST /api/sessions/:id/star` | `{starred: bool}` | `{id, …entry}` |
@@ -114,7 +114,7 @@ A POST body missing `starred` / `archived` defaults to `True`.
 | URL | Mode | Notes |
 |---|---|---|
 | `/` | dashboard | list view (default) |
-| `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text |
+| `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text; follows a running session in place (`startConvLive` polls `/conversation?fingerprint=…`, redraws only on change, keeps scroll / open state) |
 
 ## 5. Agent-facing CLI and Skill
 

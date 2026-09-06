@@ -3326,7 +3326,11 @@ function openConversation(sessionId, opts = {}) {
 
   fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`)
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-    .then(data => renderConv(data, meta))
+    .then(data => {
+      renderConv(data, meta);
+      // Standalone reader: start following this session's file so a running session updates in place
+      if (_convStandalone) startConvLive(sessionId, data.fingerprint);
+    })
     .catch(err => {
       // C4 error state: explain + offer retry, not a dead end
       $conv.querySelector('.conv-body').innerHTML =
@@ -4822,11 +4826,94 @@ async function livePoll() {
   window.addEventListener(ev, () => { _lastInteractionAt = Date.now(); }, {passive: true});
 });
 
+// ---------- Standalone single-session live refresh ----------
+// The dashboard loop above polls the session *list*; it has nothing to say about the transcript
+// open in a standalone tab (?session=<id>). This loop follows exactly one session file instead:
+// same visibility gating and adaptive cadence, but the change signal is the file fingerprint
+// (mtime + size) the /conversation endpoint returns — the backend skips re-parsing when it matches.
+// A finished session never changes its fingerprint, so a historical transcript is never redrawn.
+let _convLiveId = null;          // session being followed (null = not in standalone mode)
+let _convLiveFingerprint = null; // last fingerprint rendered
+let _convLiveTimer = null;
+let _convLivePolling = false;
+
+function startConvLive(sessionId, fingerprint) {
+  _convLiveId = sessionId;
+  _convLiveFingerprint = fingerprint || null;
+  scheduleConvLive();
+}
+
+function scheduleConvLive() {
+  clearTimeout(_convLiveTimer);
+  _convLiveTimer = setTimeout(convLivePoll, liveInterval());
+}
+
+// Snapshot the reader's local UI state before a redraw, so new content lands without moving the
+// viewport or collapsing what the user opened. Tool blocks / foldables are matched by position:
+// the file is append-only, so existing turns keep their index and new ones arrive at the end.
+function captureConvUiState(body) {
+  const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+  const openIdx = (sel) => [...body.querySelectorAll(sel)]
+    .map((el, i) => el.classList.contains('open') ? i : -1).filter(i => i >= 0);
+  return {
+    scrollTop: body.scrollTop,
+    nearBottom,
+    openTools: openIdx('.conv-tool'),
+    openFolds: openIdx('.conv-foldable'),
+  };
+}
+
+function restoreConvUiState(body, snap) {
+  const reopen = (sel, idxs) => {
+    const els = body.querySelectorAll(sel);
+    idxs.forEach(i => els[i] && els[i].classList.add('open'));
+  };
+  reopen('.conv-tool', snap.openTools);
+  reopen('.conv-foldable', snap.openFolds);
+  // Reading the tail → keep following it; otherwise hold the exact position
+  body.scrollTop = snap.nearBottom ? body.scrollHeight : snap.scrollTop;
+}
+
+async function convLivePoll() {
+  if (!_convLiveId) return;
+  if (_convLivePolling) { scheduleConvLive(); return; }
+  const body = $conv?.querySelector('.conv-body');
+  const findInput = $conv?.querySelector('#conv-find');
+  // Skip (but keep scheduling) when the tab is hidden, an in-conversation find is active
+  // (a redraw would wipe the highlights), or the user is selecting text to copy.
+  const skip = document.visibilityState !== 'visible'
+            || !body
+            || (findInput && findInput.value.trim())
+            || (window.getSelection()?.toString().length > 0);
+  if (skip) { scheduleConvLive(); return; }
+  _convLivePolling = true;
+  try {
+    const fp = _convLiveFingerprint ? `?fingerprint=${encodeURIComponent(_convLiveFingerprint)}` : '';
+    const res = await fetch(`/api/sessions/${encodeURIComponent(_convLiveId)}/conversation${fp}`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data.unchanged && data.fingerprint !== _convLiveFingerprint) {
+      const snap = captureConvUiState(body);
+      renderConv(data, null);
+      restoreConvUiState($conv.querySelector('.conv-body'), snap);
+      _convLiveFingerprint = data.fingerprint;
+      _lastInteractionAt = Date.now();  // the session is moving → stay on the fast cadence
+    }
+  } catch {
+    // Network jitter / service restart: ignore, retry next round
+  } finally {
+    _convLivePolling = false;
+  }
+  scheduleConvLive();
+}
+
 // Tab refocus: pull immediately (don't wait for the next tick), so the first glance on return is up to date
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible'
-      && !document.body.classList.contains('standalone')) {
-    _lastInteractionAt = Date.now();
+  if (document.visibilityState !== 'visible') return;
+  _lastInteractionAt = Date.now();
+  if (document.body.classList.contains('standalone')) {
+    if (_convLiveId) convLivePoll();  // it reschedules itself internally
+  } else {
     livePoll();  // it reschedules itself internally
   }
 });
@@ -4837,10 +4924,10 @@ applyColLeftPct();
   const sid = new URLSearchParams(location.search).get('session');
   if (sid) {
     document.body.classList.add('standalone');
-    openConversation(sid, {standalone: true});
+    openConversation(sid, {standalone: true});  // starts the single-session live loop once loaded
   } else {
     load();
-    scheduleLive();  // start the live heartbeat (not started in standalone mode)
+    scheduleLive();  // start the dashboard live heartbeat (standalone has its own loop, see startConvLive)
   }
 }
 
