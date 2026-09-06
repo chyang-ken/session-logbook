@@ -112,6 +112,8 @@ def list_deployed(cwd: Optional[Path] = None) -> List[Deployed]:
         if len(parts) != 3 or not parts[1] or not parts[2]:
             continue  # lightweight tags carry no date and no dereferenced object: not a deploy record
         tag, commit, when = parts
+        if when.endswith("Z"):
+            when = when[:-1] + "+00:00"  # git prints UTC as "Z"; Python < 3.11 only parses "+00:00"
         try:
             items.append(Deployed(tag, commit, datetime.fromisoformat(when)))
         except ValueError:

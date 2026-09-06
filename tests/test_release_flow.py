@@ -16,6 +16,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "release_flow.py"
 spec = importlib.util.spec_from_file_location("release_flow", SCRIPT)
@@ -45,6 +46,11 @@ class _OK(BaseHTTPRequestHandler):
 
 class ReleaseFlowTests(unittest.TestCase):
     def setUp(self):
+        # The script's own git calls inherit the process environment; CI runners have no git
+        # identity configured, and `git tag -a` refuses to write a tag without one.
+        self._env = mock.patch.dict(os.environ, {k: v for k, v in ENV.items() if k.startswith("GIT_")})
+        self._env.start()
+        self.addCleanup(self._env.stop)
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.origin = root / "origin.git"
