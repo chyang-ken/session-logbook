@@ -8,8 +8,10 @@ __pycache__/
 .vscode/
 .idea/
 
-# Local agent config (this is what the dashboard reads — never vendor it in)
-.claude/
+# Local agent state (worktrees, personal settings) stays out; the shared project hooks in
+# .claude/settings.json are part of the repository (see CLAUDE.md "Branch model and release flow")
+.claude/*
+!.claude/settings.json
 
 # ── Private scratch space ──────────────────────────────────────────────
 # Personal R&D, experiments, scratch analysis, and anything containing real

@@ -7,6 +7,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Introduce the `staging` → local soak → `main` release flow: `scripts/release_flow.py` (`check` / `deploy` / `release`), a project session-start hook that reports when something is ready for `main`, and CI on `staging` pushes. Documented in CLAUDE.md "Branch model and release flow".
 - Add a server-independent, read-only Agent CLI for locating, handing off, following, auditing, and searching Claude Code and Codex Sessions.
 - Ship one `session-logbook` Skill as the Agent-facing entry point, including opt-in subagent discovery and line-anchored incremental reads with a one-line overlap.
 

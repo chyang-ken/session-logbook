@@ -191,7 +191,44 @@ CI runs the same command on every push and PR.
 its own CI job. Run it before you commit — a local pre-commit hook is optional and easy to
 bypass, so CI is the gate that actually holds.
 
-## 10. Decision log
+## 10. Branch model and release flow
+
+`main` is what the public gets. It is never edited directly; it only ever moves *forward along
+`staging`* to a commit that has already been in daily use for a soak period.
+
+```
+feature branch ──PR──► staging ──deploy──► maintainer's machine ──14 days──► main ──(optional)──► vX.Y.Z release
+```
+
+- **`staging` is a one-way river.** Every change, hotfixes included, enters through a pull request
+  into `staging`. CI runs on the PR and again on the `staging` push. Its history is never rewritten
+  (no rebase, no force-push): the soak arithmetic below depends on commit order.
+- **Deploying = recording.** On the machine that hosts the resident dashboard,
+  `python3 scripts/release_flow.py deploy` fast-forwards the checkout to `staging`, restarts the
+  service, reads it back over HTTP, and only then pushes an annotated `deployed/<date>-<sha>` tag.
+  That tag date is when the soak clock starts for that commit and everything before it. The
+  restart command and health URL are machine-specific and live in git-ignored `_private/deploy.json`
+  (shape documented at the top of the script).
+- **Checking = the session-start hook.** `.claude/settings.json` runs
+  `scripts/release_flow.py check --quiet` whenever an agent session starts here, so "is anything
+  ready for `main`?" is asked automatically when work resumes. It prints only when something is
+  actionable: undeployed `staging` commits, a soaked commit `main` is behind, or a broken river.
+- **Releasing to `main` = a pull request, merged by a human.** `python3 scripts/release_flow.py release`
+  creates `release/<date>` at the newest deploy that has soaked ≥ 14 days and opens a PR into
+  `main`. Commits deployed later stay on `staging` and keep soaking. The script never merges;
+  `main` is branch-protected and merging it is a separate decision.
+- **Versioned GitHub releases** (`vX.Y.Z`, see CONTRIBUTING "Maintainer releases") remain a
+  separate, optional step taken from `main` after a promotion.
+
+Rollback is per layer: the local machine goes back by checking out an earlier `deployed/*` tag and
+restarting; a bad feature on `staging` is reverted with a new commit through a PR (never by
+rewriting history); nothing on `main` is ever force-moved.
+
+The pieces are deliberately split into a portable part (this section, the script, the hook — all
+git-only) and a per-repository part (soak days, restart command, health URL), so another project
+can adopt the same flow by copying the former and filling in the latter.
+
+## 11. Decision log
 
 Decisions backed by an experiment / comparison / measurement are recorded under
 [`docs/decisions/`](docs/decisions/) — see that directory's README for the format.
