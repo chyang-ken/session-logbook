@@ -50,7 +50,7 @@ python3 scripts/session_logbook.py follow '<target>' --cursor-line 427
 python3 scripts/session_logbook.py evidence '<target>' --line 427 --context 1
 
 # Search real messages; terms use AND semantics
-python3 scripts/session_logbook.py search 'payment retry' --role user --project venture-factory
+python3 scripts/session_logbook.py search 'payment retry' --role user --project my-app
 ```
 
 Useful search filters are `--source claude|codex`, `--project <substring>`, `--since 7d`
