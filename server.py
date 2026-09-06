@@ -16,6 +16,7 @@ from pathlib import Path
 from sources import antigravity as ag_source
 from sources import anchored_transcript
 from sources import codex as codex_source
+from sources import kimi as kimi_source
 
 # ---------- Config ----------
 HOST = "127.0.0.1"
@@ -1583,6 +1584,10 @@ def _find_jsonl(session_id):
     ag_tp = ag_source.AG_BRAIN / session_id / ".system_generated" / "logs" / "transcript.jsonl"
     if ag_tp.exists():
         return ag_tp
+    # Kimi filesystem fallback; id is the session directory name (session_<uuid>)
+    kimi_wire = kimi_source.find_wire_by_session_id(session_id)
+    if kimi_wire is not None:
+        return kimi_wire
     return None
 
 
@@ -1692,6 +1697,22 @@ def scan_sessions(force=False):
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
 
+    # --- Kimi paths ---
+    kimi_seen = set()
+    for jsonl_path in kimi_source.scan_sessions():
+        key = str(jsonl_path)
+        kimi_seen.add(key)
+        try:
+            cur_mtime = jsonl_path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        cached = _cache.get(key)
+        if force or cached is None or cached.get("mtime") != cur_mtime:
+            meta = kimi_source.extract_metadata(jsonl_path)
+            if meta and _cache.get(key) != meta:
+                _cache[key] = meta
+                _mark_scan_cache_dirty()
+
     # --- Clean stale cache keys per root prefix so sources do not delete each other. ---
     # Codex uses is_codex_path to recognize both roots (sessions + archived_sessions); otherwise
     # stale keys under the archived root would never be removed because they are not under CODEX_ROOT.
@@ -1707,6 +1728,9 @@ def scan_sessions(force=False):
             del _cache[p]
             _mark_scan_cache_dirty()
         elif p.startswith(ag_root_str) and p not in ag_seen:
+            del _cache[p]
+            _mark_scan_cache_dirty()
+        elif kimi_source.is_kimi_path(p) and p not in kimi_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
     for p in list(_CWD_SEQ.keys()):
@@ -1831,6 +1855,9 @@ def _search_session(jsonl_path: Path, terms: list[str]):
     elif is_ag:
         # Antigravity filenames are transcript.jsonl; id is the brain/<id>/ directory name
         session_id = ag_source._conv_id(jsonl_path)
+    elif kimi_source.is_kimi_path(jsonl_path):
+        # Kimi filenames are wire.jsonl; id is the <session_id>/agents/main/ ancestor directory name
+        session_id = kimi_source.session_id_for_path(jsonl_path)
     else:
         session_id = jsonl_path.stem
 
@@ -1876,6 +1903,9 @@ def _search_session(jsonl_path: Path, terms: list[str]):
                 elif t in ("USER_INPUT", "PLANNER_RESPONSE"):
                     # Antigravity row: extract user/assistant text and search it too
                     text = ag_source.search_text_from_line(d)
+                elif t in ("context.append_message", "context.append_loop_event"):
+                    # Kimi row: appended user message / assistant text part
+                    text = kimi_source.search_text_from_line(d)
 
                 if not text:
                     continue
@@ -2333,7 +2363,7 @@ def open_file_in_system(file_path: str, root: str, reveal: bool = False) -> tupl
 PWA_MANIFEST = json.dumps({
     "name": "Session Logbook",
     "short_name": "Logbook",
-    "description": "A minimal, local dashboard for browsing your Claude Code, Codex, and Antigravity agent sessions.",
+    "description": "A minimal, local dashboard for browsing your Claude Code, Codex, Antigravity, and Kimi Code agent sessions.",
     "start_url": "/",
     "scope": "/",
     "display": "standalone",
@@ -2559,6 +2589,8 @@ class Handler(BaseHTTPRequestHandler):
                     conv = codex_source.extract_conversation(jsonl)
                 elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
                     conv = ag_source.extract_conversation(jsonl)
+                elif kimi_source.is_kimi_path(jsonl):
+                    conv = kimi_source.extract_conversation(jsonl)
                 else:
                     conv = extract_conversation(jsonl)
                 conv['fingerprint'] = fingerprint
@@ -2577,6 +2609,8 @@ class Handler(BaseHTTPRequestHandler):
                     text = codex_source.extract_transcript(jsonl)
                 elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
                     text = ag_source.extract_transcript(jsonl)
+                elif kimi_source.is_kimi_path(jsonl):
+                    text = kimi_source.extract_transcript(jsonl)
                 else:
                     text = extract_transcript(jsonl)
                 brief_param = (qs.get('brief') or ['0'])[0].lower()
@@ -2618,6 +2652,9 @@ class Handler(BaseHTTPRequestHandler):
                 if codex_source.is_codex_path(jsonl):
                     src = "codex"
                     body = anchored_transcript.render_codex(jsonl)
+                elif kimi_source.is_kimi_path(jsonl):
+                    src = "kimi"
+                    body = anchored_transcript.render_kimi(jsonl)
                 else:
                     src = "claude"
                     body = anchored_transcript.render_claude(jsonl)

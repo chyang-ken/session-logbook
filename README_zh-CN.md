@@ -1,6 +1,6 @@
 # Session Logbook
 
-一个极简、本地、零依赖的面板，把你所有 AI 编程 agent 的 session —— **Claude Code、Codex、Antigravity** —— 汇聚到一页里浏览与整理。
+一个极简、本地、零依赖的面板，把你所有 AI 编程 agent 的 session —— **Claude Code、Codex、Antigravity、Kimi Code** —— 汇聚到一页里浏览与整理。
 
 [![CI](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -8,14 +8,14 @@
 
 > Other languages: [English](README.md)
 
-你的 agent 在 `~/.claude`、`~/.codex`、`~/.gemini` 下留下了成百上千份 session 逐字稿。Session Logbook **只读**地扫描它们、铺到一页上，让你 star / archive / 加备注 / 搜索 / 重读 —— 全程不离开本机。
+你的 agent 在 `~/.claude`、`~/.codex`、`~/.gemini`、`~/.kimi-code` 下留下了成百上千份 session 逐字稿。Session Logbook **只读**地扫描它们、铺到一页上，让你 star / archive / 加备注 / 搜索 / 重读 —— 全程不离开本机。
 
 ## 为什么
 
 你并行跑很多 agent、很多 worktree、横跨很多专案。一份扁平的 session 文件列表根本没法用。这个面板给这堆文件加上结构：
 
 - **一页四区** —— ⭐ Starred / 🔥 Recent / 🕸 Dusty / 📦 Archived，按时间自动降权，主工作面只留"活着的"。
-- **多 agent** —— Claude Code、Codex、Antigravity 的 session 统一汇聚、按专案分组。
+- **多 agent** —— Claude Code、Codex、Antigravity、Kimi Code 的 session 统一汇聚、按专案分组。
 - **只读且私密** —— 永不发消息、永不 spawn session、不连网络，只绑 `127.0.0.1`，浏览器资源也从本机提供。
 
 ## 快速开始

@@ -7,6 +7,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Add Kimi Code CLI (`$KIMI_CODE_HOME`, default `~/.kimi-code`) as a fourth session source: dashboard cards, conversation view (including AskUserQuestion as Q&A turns), markdown export, anchored transcript, full-text search, and the Agent CLI. Sub-agent streams are skipped like Codex sub-agents.
 - The standalone single-session reader (`/?session=<id>`) now follows a running session in place: it polls the session file's fingerprint and redraws only when the file changed, keeping the scroll position and expanded blocks. Finished sessions are never redrawn.
 - Add a server-independent, read-only Agent CLI for locating, handing off, following, auditing, and searching Claude Code and Codex Sessions.
 - Ship one `session-logbook` Skill as the Agent-facing entry point, including opt-in subagent discovery and line-anchored incremental reads with a one-line overlap.

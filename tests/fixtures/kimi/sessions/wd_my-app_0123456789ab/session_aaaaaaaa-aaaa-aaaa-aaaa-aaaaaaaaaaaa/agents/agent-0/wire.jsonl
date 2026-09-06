@@ -1,0 +1,8 @@
+{"type": "metadata", "protocol_version": "1.4", "created_at": 1700000000000, "time": 1700000001000}
+{"type": "config.update", "cwd": "/Users/alice/my-app", "modelAlias": "kimi-k2-turbo", "profileName": "subagent", "systemPrompt": "You are a sub-agent.", "thinkingEffort": "low", "time": 1700000002000}
+{"type": "tools.set_active_tools", "names": ["Bash", "Read"], "time": 1700000003000}
+{"type": "turn.prompt", "input": [{"type": "text", "text": "Inspect the hidden retry edge"}], "origin": {"kind": "system_trigger", "name": "subagent"}, "time": 1700000004000}
+{"type": "context.append_message", "message": {"role": "user", "content": [{"type": "text", "text": "Inspect the hidden retry edge"}], "toolCalls": [], "origin": {"kind": "system_trigger"}}, "time": 1700000005000}
+{"type": "context.append_loop_event", "event": {"type": "step.begin", "uuid": "sst_0", "turnId": 0, "step": 0}, "time": 1700000006000}
+{"type": "context.append_loop_event", "event": {"type": "content.part", "uuid": "sp_0", "turnId": 0, "step": 0, "stepUuid": "sst_0", "part": {"type": "text", "text": "Sub-agent report: no retry edge found."}}, "time": 1700000007000}
+{"type": "context.append_loop_event", "event": {"type": "step.end", "uuid": "sst_0", "turnId": 0, "step": 0, "finishReason": "end_turn", "usage": {"inputTokens": 5, "outputTokens": 5}, "messageId": "sm_0"}, "time": 1700000008000}

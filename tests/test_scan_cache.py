@@ -187,6 +187,7 @@ class TestScanCacheIncremental(ScanCacheTestCase):
                     mock.patch.object(server, "PROJECTS_DIR", projects_dir), \
                     mock.patch.object(server.codex_source, "scan_sessions", return_value=[]), \
                     mock.patch.object(server.ag_source, "scan_sessions", return_value=[]), \
+                    mock.patch.object(server.kimi_source, "scan_sessions", return_value=[]), \
                     mock.patch.object(server, "extract_metadata", side_effect=fake_extract):
                 server.scan_sessions(force=True)
                 self.assertCountEqual(calls, ["a.jsonl", "b.jsonl"])
