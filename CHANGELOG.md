@@ -7,6 +7,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Introduce the `staging` → local soak → `main` release flow: `scripts/release_flow.py` (`check` / `deploy` / `release`), a project session-start hook that reports when something is ready for `main`, and CI on `staging` pushes. Documented in CLAUDE.md "Branch model and release flow".
 - Add Kimi Code CLI (`$KIMI_CODE_HOME`, default `~/.kimi-code`) as a fourth session source: dashboard cards, conversation view (including AskUserQuestion as Q&A turns), markdown export, anchored transcript, full-text search, and the Agent CLI. Sub-agent streams are skipped like Codex sub-agents.
 - The standalone single-session reader (`/?session=<id>`) now follows a running session in place: it polls the session file's fingerprint and redraws only when the file changed, keeping the scroll position and expanded blocks. Finished sessions are never redrawn.
 - Add a server-independent, read-only Agent CLI for locating, handing off, following, auditing, and searching Claude Code and Codex Sessions.
