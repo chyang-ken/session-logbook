@@ -1,0 +1,17 @@
+{"type": "metadata", "protocol_version": "1.4", "created_at": 1700000000000, "time": 1700000001000}
+{"type": "config.update", "cwd": "/Users/alice/other-app", "modelAlias": "kimi-k2", "profileName": "default", "systemPrompt": "You are a helpful coding agent.", "thinkingEffort": "medium", "time": 1700000002000}
+{"type": "tools.set_active_tools", "names": ["Bash", "Read"], "time": 1700000003000}
+{"type": "turn.prompt", "input": [{"type": "text", "text": "Run the tests"}], "origin": {"kind": "user"}, "time": 1700000004000}
+{"type": "context.append_message", "message": {"role": "user", "content": "Run the tests", "toolCalls": [], "origin": {"kind": "user"}}, "time": 1700000005000}
+{"type": "llm.tools_snapshot", "hash": "deadbeef", "tools": [{"name": "Bash", "description": "Run a shell command", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}}], "time": 1700000006000}
+{"type": "llm.request", "kind": "step", "modelAlias": "kimi-k2", "model": "kimi-k2-0711-preview", "provider": "moonshot", "messageCount": 1, "maxTokens": 4096, "turnStep": 0, "time": 1700000007000}
+{"type": "context.append_loop_event", "event": {"type": "step.begin", "uuid": "bst_0", "turnId": 0, "step": 0}, "time": 1700000008000}
+{"type": "context.append_loop_event", "event": {"type": "content.part", "uuid": "bp_0", "turnId": 0, "step": 0, "stepUuid": "bst_0", "part": {"type": "think", "think": "Run the unit tests with the standard runner."}}, "time": 1700000009000}
+{"type": "context.append_loop_event", "event": {"type": "tool.call", "uuid": "btc_1", "turnId": 0, "step": 0, "stepUuid": "bst_0", "toolCallId": "bcall_1", "name": "Bash", "args": {"command": "python3 -m unittest"}, "description": "Running: python3 -m unittest", "display": {"kind": "command", "command": "python3 -m unittest", "cwd": "/Users/alice/other-app"}}, "time": 1700000010000}
+{"type": "permission.record_approval_result", "toolCallId": "bcall_1", "toolName": "Bash", "turnId": 0, "action": "allow", "result": "approved", "sessionApprovalRule": null, "time": 1700000011000}
+{"type": "context.append_loop_event", "event": {"type": "tool.result", "parentUuid": "btc_1", "toolCallId": "bcall_1", "result": {"output": "OK", "note": ""}}, "time": 1700000012000}
+{"type": "context.append_loop_event", "event": {"type": "step.end", "uuid": "bst_0", "turnId": 0, "step": 0, "finishReason": "tool_use", "usage": {"inputTokens": 9, "outputTokens": 4}, "messageId": "bm_0"}, "time": 1700000013000}
+{"type": "context.append_loop_event", "event": {"type": "step.begin", "uuid": "bst_1", "turnId": 0, "step": 1}, "time": 1700000014000}
+{"type": "context.append_loop_event", "event": {"type": "content.part", "uuid": "bp_1", "turnId": 0, "step": 1, "stepUuid": "bst_1", "part": {"type": "text", "text": "All tests pass."}}, "time": 1700000015000}
+{"type": "context.append_loop_event", "event": {"type": "step.end", "uuid": "bst_1", "turnId": 0, "step": 1, "finishReason": "end_turn", "usage": {"inputTokens": 11, "outputTokens": 3}, "messageId": "bm_1"}, "time": 1700000016000}
+{"type": "usage.record", "model": "kimi-k2-0711-preview", "usageScope": "turn", "usage": {"inputTokens": 20, "outputTokens": 7}, "time": 1700000017000}

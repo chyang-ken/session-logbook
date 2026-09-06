@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only command-line access to local Claude Code and Codex sessions.
+"""Read-only command-line access to local Claude Code, Codex, and Kimi Code sessions.
 
 This is the stable Agent-facing surface for Session Logbook. It reuses the
 dashboard's source adapters and anchored renderer, but does not require the web
@@ -19,9 +19,10 @@ from typing import Iterable, Optional
 import server
 from sources import anchored_transcript
 from sources import codex as codex_source
+from sources import kimi as kimi_source
 
 
-SUPPORTED_SOURCES = ("claude", "codex")
+SUPPORTED_SOURCES = ("claude", "codex", "kimi")
 ANCHOR_RE = re.compile(r"\[L(\d+)\]")
 
 
@@ -52,6 +53,8 @@ def detect_source(path: Path) -> Optional[str]:
     """Identify a supported transcript by root first, then by its first records."""
     if codex_source.is_codex_path(path):
         return "codex"
+    if kimi_source.is_kimi_path(path):
+        return "kimi"
     if _under(path, server.PROJECTS_DIR):
         return "claude"
 
@@ -68,6 +71,8 @@ def detect_source(path: Path) -> Optional[str]:
                 kind = row.get("type")
                 if kind == "session_meta":
                     return "codex"
+                if kind == "metadata" and row.get("protocol_version"):
+                    return "kimi"
                 if kind in {"user", "assistant", "system", "custom-title"}:
                     return "claude"
     except OSError:
@@ -100,6 +105,12 @@ def _relationship(path: Path, source: str) -> tuple[bool, Optional[str]]:
             return True, path.parent.parent.name
         return False, None
 
+    if source == "kimi":
+        # <session>/agents/<agent>/wire.jsonl: any agent other than "main" is a sub-agent of that session
+        if kimi_source.is_subagent_path(path):
+            return True, kimi_source.session_id_for_path(path)
+        return False, None
+
     meta = codex_source._read_session_meta(path) or {}
     parent = meta.get("parent_thread_id")
     source_info = meta.get("source")
@@ -120,6 +131,8 @@ def session_metadata(path: Path) -> dict:
 
     if source == "codex":
         meta = codex_source.extract_metadata(path)
+    elif source == "kimi":
+        meta = kimi_source.extract_metadata(path)
     else:
         meta = server.extract_metadata(path)
     if not meta:
@@ -161,8 +174,20 @@ def iter_session_paths(
                     continue
                 yield path
 
+    if source in (None, "kimi") and kimi_source.KIMI_SESSIONS_ROOT.exists():
+        for wire in kimi_source.scan_sessions():
+            yield wire
+            if include_subagents:
+                agents_dir = wire.parent.parent
+                for sub in sorted(agents_dir.glob("*/wire.jsonl")):
+                    if kimi_source.is_subagent_path(sub):
+                        yield sub
+
 
 def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
+    if source == "kimi":
+        return kimi_source.message_role_from_line(row)
+
     if source == "claude":
         if row.get("isMeta"):
             return None, ""
@@ -368,10 +393,26 @@ def _filter_from_cursor_line(body: str, cursor_line: int) -> str:
     return "\n".join(kept).lstrip("\n")
 
 
+_KIMI_TERMINAL = {
+    # Kimi writes `turn.ended.reason` per turn; only "completed" has been observed. Map the
+    # obvious spellings onto the Codex vocabulary; anything else stays "unknown".
+    "completed": "complete",
+    "complete": "complete",
+    "cancelled": "aborted",
+    "canceled": "aborted",
+    "aborted": "aborted",
+    "interrupted": "aborted",
+    "error": "error",
+    "failed": "error",
+}
+
+
 def _observed_terminal(item: dict) -> str:
+    reason = item.get("last_stop_reason")
+    if item["source"] == "kimi":
+        return _KIMI_TERMINAL.get(reason, "unknown") if isinstance(reason, str) else "unknown"
     if item["source"] != "codex":
         return "unknown"
-    reason = item.get("last_stop_reason")
     return reason if reason in {"complete", "aborted", "error"} else "unknown"
 
 
@@ -384,6 +425,8 @@ def render_context(path: Path, after_line: int = 0) -> str:
         )
     if item["source"] == "codex":
         body = anchored_transcript.render_codex(path)
+    elif item["source"] == "kimi":
+        body = anchored_transcript.render_kimi(path)
     else:
         body = anchored_transcript.render_claude(path)
     body = _filter_from_cursor_line(body, after_line)
