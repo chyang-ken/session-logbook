@@ -9,11 +9,12 @@ their target path, search scope, or command prefix. Successful tool-result bodie
 status and size; leading error text remains visible. Thinking, injected context, and binary
 content are reduced. An agent can use `[L#]` to recover any hidden detail from the raw jsonl.
 
-Two sources:
+Three sources:
 - `render_claude(path)` — Claude Code session jsonl (`~/.claude/projects/...`)
 - `render_codex(path)`  — Codex rollout jsonl (`~/.codex/sessions/...`)
+- `render_kimi(path)`   — Kimi Code CLI wire jsonl (`~/.kimi-code/sessions/.../agents/main/wire.jsonl`)
 
-Both produce the **same anchored-transcript format**. The module has zero heavy dependencies
+All produce the **same anchored-transcript format**. The module has zero heavy dependencies
 (only json/re) and is the single source of truth behind the server's `/anchored` download
 endpoint.
 
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 
 
 def trunc(s, n):
@@ -46,7 +48,7 @@ def digest_header(jsonl_path, source="claude") -> str:
     knowing the anchor semantics, and its "byte-for-byte identical" contract must not be broken.
     See docs/handoffs/2026-06-11-anchored-render-to-service-layer.md.
     """
-    label = "Codex" if source == "codex" else "Claude Code"
+    label = {"codex": "Codex", "kimi": "Kimi Code"}.get(source, "Claude Code")
     lines = [
         "# ┌─ COMPACT SESSION DIGEST ─────────────────────────────────────────",
         f"# │ Navigable transcript of a {label} session. User and Assistant messages",
@@ -389,4 +391,166 @@ def render_codex(path) -> str:
                 # the remaining event_msg (token_count/agent_message/user_message/task_*) are redundant with response_item, skip
             elif t == 'compacted':
                 o_lines.append(f"[L{ln}] [COMPACTED SUMMARY]")
+    return "\n".join(o_lines)
+
+
+# ───────────────────────── Kimi Code ─────────────────────────
+
+def _kimi_ts(o):
+    """Kimi rows carry `time` as epoch milliseconds; render like the other sources' ISO prefix."""
+    t = o.get('time')
+    if not isinstance(t, (int, float)):
+        return ''
+    try:
+        return datetime.fromtimestamp(t / 1000.0, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+    except (OverflowError, OSError, ValueError):
+        return ''
+
+
+def _kimi_content_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if b.get('type') == 'text':
+                out.append(b.get('text', ''))
+            elif b.get('type') in ('image', 'input_image'):
+                out.append('[image]')
+        return "\n".join(out)
+    return '' if content is None else str(content)
+
+
+def _kimi_tool_summary(ev):
+    name = ev.get('name', '?')
+    args = ev.get('args') if isinstance(ev.get('args'), dict) else {}
+    display = ev.get('display') if isinstance(ev.get('display'), dict) else {}
+    if display.get('command'):
+        return trunc(display['command'], 300)
+    if name == 'Bash':
+        return trunc(args.get('command', ''), 300)
+    if display.get('path'):
+        return trunc(display['path'], 300)
+    if name in ('Read', 'Write', 'Edit', 'ReadMediaFile'):
+        p = args.get('path') or args.get('file_path') or ''
+        if name == 'Edit':
+            return f"{p}  old:{trunc(args.get('old_string') or args.get('old_text') or '', 60)!r} new:{trunc(args.get('new_string') or args.get('new_text') or '', 60)!r}"
+        return trunc(p, 300)
+    if name == 'Grep':
+        return f"pattern={args.get('pattern', '')!r} path={args.get('path', '')}"
+    if name == 'Agent':
+        return f"[{args.get('agent_name') or args.get('subagent_type') or ''}] {trunc(args.get('description', ''), 80)} :: {trunc(args.get('prompt', ''), 200)}"
+    if name == 'AskUserQuestion':
+        qs = args.get('questions') or []
+        return " | ".join(trunc((q or {}).get('question', ''), 120) for q in qs if isinstance(q, dict))
+    keys = list(args.keys())
+    return trunc("{" + ", ".join(f"{k}={trunc(args[k], 80)!r}" for k in keys[:5]) + "}", 250)
+
+
+def _kimi_result_text(result):
+    """tool.result.result is {output: str | [{type,text}], isError?, note?}; accept a bare string too."""
+    if isinstance(result, dict):
+        out = result.get('output')
+        text = out if isinstance(out, str) else _kimi_content_text(out)
+        if not text and result.get('error'):
+            text = str(result['error'])
+        return text or ''
+    return _kimi_content_text(result)
+
+
+def render_kimi(path) -> str:
+    """Kimi Code CLI wire jsonl → anchored-transcript string in the same format as Claude/Codex.
+
+    Kimi differences: the human prompt is `turn.prompt` (origin.kind == user); the same text is
+    re-appended as `context.append_message`, which is skipped as a duplicate unless its origin is
+    an injection (then marked as filtered context). Assistant reasoning arrives as `content.part`
+    with part.type == think; visible reply as part.type == text. Tool calls/results are loop
+    events paired by toolCallId. AskUserQuestion shows as the question plus the resolved answer.
+    """
+    uturn = 0
+    o_lines = []
+    ln = 0
+    asked = set()  # toolCallIds already shown as a 🔧 AskUserQuestion line
+    with open(path, 'r', errors='replace') as f:
+        for raw in f:
+            ln += 1
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                o = json.loads(raw)
+            except Exception:
+                continue
+            t = o.get('type')
+            ts = _kimi_ts(o)
+            if t == 'metadata':
+                o_lines.append(f"[L{ln}] [SESSION_META] protocol={o.get('protocol_version', '')} {ts}")
+            elif t in ('profile.bind', 'config.update'):
+                cwd = ((o.get('environmentDisclosure') or {}).get('cwd') if t == 'profile.bind' else o.get('cwd')) or ''
+                model = o.get('modelAlias') or ''
+                if cwd or model:
+                    o_lines.append(f"[L{ln}] [SESSION_META] cwd={cwd} model={model} {ts}")
+            elif t == 'turn.prompt':
+                kind = (o.get('origin') or {}).get('kind')
+                txt = _kimi_content_text(o.get('input'))
+                if kind == 'user':
+                    uturn += 1
+                    o_lines.append("")
+                    o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts} ━━━━━━━━━━")
+                    o_lines.append(txt)
+                # non-user prompts (task / system_trigger) are re-appended as context.append_message
+                # with the same origin and are rendered there, once, as injected context
+            elif t == 'context.append_message':
+                msg = o.get('message') or {}
+                kind = (msg.get('origin') or {}).get('kind')
+                # origin user duplicates the turn.prompt above; other origins are harness injections
+                if msg.get('role') == 'user' and kind != 'user':
+                    txt = _kimi_content_text(msg.get('content'))
+                    if txt.strip():
+                        o_lines.append(f"[L{ln}]   [CONTEXT injected ({kind or 'system'}): {trunc(txt, 80)}]")
+            elif t == 'context.append_loop_event':
+                ev = o.get('event') or {}
+                et = ev.get('type')
+                if et == 'content.part':
+                    part = ev.get('part') or {}
+                    if part.get('type') == 'think':
+                        th = (part.get('think') or '').strip()
+                        if th:
+                            o_lines.append(f"[L{ln}]   💭 THINK: {trunc(th, 1400)}")
+                    elif part.get('type') == 'text':
+                        tx = (part.get('text') or '').strip()
+                        if tx:
+                            o_lines.append(f"[L{ln}] ASSISTANT: {tx}")
+                elif et == 'tool.call':
+                    nm = ev.get('name', '?')
+                    if nm == 'AskUserQuestion':
+                        asked.add(ev.get('toolCallId'))
+                    o_lines.append(f"[L{ln}]   🔧 {nm}: {_kimi_tool_summary(ev)}")
+                elif et == 'tool.result':
+                    res = ev.get('result')
+                    is_error = isinstance(res, dict) and res.get('isError') is True
+                    status = 'ERROR' if is_error else 'OK'
+                    o_lines.append(f"[L{ln}]   ⮑ RESULT {status}: {_result_index(_kimi_result_text(res), is_error)}")
+            elif t == 'interaction.request':
+                # The question text is already on the 🔧 AskUserQuestion line when the tool.call was logged
+                tcid = o.get('toolCallId') or (o.get('request') or {}).get('toolCallId')
+                if tcid in asked:
+                    continue
+                qs = ((o.get('request') or {}).get('questions')) or []
+                qtext = " | ".join(trunc((q or {}).get('question', ''), 200) for q in qs if isinstance(q, dict))
+                if qtext:
+                    o_lines.append(f"[L{ln}]   ❓ ASK USER: {qtext}")
+            elif t == 'interaction.resolved':
+                answers = ((o.get('response') or {}).get('answers')) or {}
+                if isinstance(answers, dict) and answers:
+                    atext = " | ".join(f"{trunc(q, 80)} → {trunc(a, 200)}" for q, a in answers.items())
+                    o_lines.append(f"[L{ln}]   ⮑ USER ANSWERED: {atext}")
+            elif t == 'turn.cancel':
+                o_lines.append(f"[L{ln}] ⛔ TURN CANCELLED by user (interruption signal) {ts}")
+            elif t == 'turn.ended':
+                o_lines.append(f"[L{ln}] [TURN ENDED: {o.get('reason', '')}] {ts}")
+            elif t == 'context.apply_compaction':
+                o_lines.append(f"[L{ln}] [CONTEXT COMPACTED]")
     return "\n".join(o_lines)

@@ -1,6 +1,6 @@
 # Session Logbook
 
-A minimal, local, zero-dependency dashboard for browsing and organizing your AI coding-agent sessions — **Claude Code, Codex, and Antigravity** — all in one place.
+A minimal, local, zero-dependency dashboard for browsing and organizing your AI coding-agent sessions — **Claude Code, Codex, Antigravity, and Kimi Code** — all in one place.
 
 [![CI](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@ A minimal, local, zero-dependency dashboard for browsing and organizing your AI 
 
 > Read this in other languages: [Chinese](README_zh-CN.md)
 
-Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, and `~/.gemini`. Session Logbook reads them **read-only**, lays them out on one page, and lets you star, archive, note, search, and re-read them — without leaving your machine.
+Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, `~/.gemini`, and `~/.kimi-code`. Session Logbook reads them **read-only**, lays them out on one page, and lets you star, archive, note, search, and re-read them — without leaving your machine.
 
 ![Session Logbook screenshot](docs/screenshot.png)
 
@@ -19,7 +19,7 @@ Your agents leave behind hundreds of session transcripts scattered under `~/.cla
 You run many agents, in many worktrees, across many projects, in parallel. A flat list of session files is unusable. This dashboard gives that pile structure:
 
 - **One page, four zones** — ⭐ Starred / 🔥 Recent / 🕸 Dusty / 📦 Archived. Time-decayed automatically so your working set stays clean.
-- **Multi-agent** — Claude Code, Codex, and Antigravity sessions, unified and grouped by project.
+- **Multi-agent** — Claude Code, Codex, Antigravity, and Kimi Code sessions, unified and grouped by project.
 - **Read-only and private** — it never sends a message, spawns a session, or talks to the network. Binds `127.0.0.1` only and serves its browser assets locally.
 
 ## Quickstart

@@ -80,6 +80,12 @@
     --source-antigravity-glow-2: rgba(139, 111, 196, 0.22);
     --source-antigravity-solid: #8b6fc4;  /* same as above: Antigravity violet solid */
 
+    --source-kimi-chip-bg: #c6e5df;
+    --source-kimi-chip-fg: #1f5e54;
+    --source-kimi-glow-1: rgba(58, 156, 140, 0.50);
+    --source-kimi-glow-2: rgba(58, 156, 140, 0.22);
+    --source-kimi-solid: #3a9c8c;        /* same as above: Kimi Code teal solid */
+
     /* Focus blue ring + search highlight: consolidated in one place to avoid scattered alpha values each written its own way (there was 0.12/0.15, 0.25/0.32 drift). */
     --focus-ring: rgba(47, 111, 235, 0.15);     /* 2px outer ring for input/cell focus */
     --mark-bg: rgba(251, 191, 36, 0.30);        /* search-hit highlight (yellow) — shared by card snippets + conv-find */
@@ -164,10 +170,17 @@
     color: var(--source-antigravity-chip-fg);
     box-shadow: inset 0 0 0 1px var(--source-antigravity-solid);
   }
+  .source-filter[data-source="kimi"] .source-filter-trigger,
+  .source-filter[data-source="kimi"] .source-filter-trigger:hover {
+    background: var(--source-kimi-chip-bg);
+    color: var(--source-kimi-chip-fg);
+    box-shadow: inset 0 0 0 1px var(--source-kimi-solid);
+  }
   /* caret inside the badge follows the identity color (default is --text-3 gray, which looks dirty on a colored background) */
   .source-filter[data-source="claude"] .source-filter-caret,
   .source-filter[data-source="codex"] .source-filter-caret,
-  .source-filter[data-source="antigravity"] .source-filter-caret {
+  .source-filter[data-source="antigravity"] .source-filter-caret,
+  .source-filter[data-source="kimi"] .source-filter-caret {
     color: currentColor; opacity: 0.65;
   }
   .source-filter-caret {
@@ -226,6 +239,9 @@
   }
   .source-filter-option[data-value="antigravity"]::before {
     background: var(--source-antigravity-solid);
+  }
+  .source-filter-option[data-value="kimi"]::before {
+    background: var(--source-kimi-solid);
   }
   /* Selected-state checkmark: moved to the right end, neutral gray (the identity color is already carried by the left color dot) */
   .source-filter-option.active::after {
@@ -682,6 +698,7 @@
   .card[data-source="claude"]:hover { box-shadow: 0 4px 14px var(--source-claude-glow-2), var(--shadow); border-color: var(--source-claude-solid); }
   .card[data-source="codex"]:hover { box-shadow: 0 4px 14px var(--source-codex-glow-2), var(--shadow); border-color: var(--source-codex-solid); }
   .card[data-source="antigravity"]:hover { box-shadow: 0 4px 14px var(--source-antigravity-glow-2), var(--shadow); border-color: var(--source-antigravity-solid); }
+  .card[data-source="kimi"]:hover { box-shadow: 0 4px 14px var(--source-kimi-glow-2), var(--shadow); border-color: var(--source-kimi-solid); }
 
   /* A3 left/right column register differentiation: the right column (starred/dusty/archived = archive) goes denser,
      pulling away from the left column (recent = main battlefield) so you can tell primary from secondary at a squint. */
@@ -763,6 +780,10 @@
   .source-chip.source-antigravity {
     background: var(--source-antigravity-chip-bg);
     color: var(--source-antigravity-chip-fg);
+  }
+  .source-chip.source-kimi {
+    background: var(--source-kimi-chip-bg);
+    color: var(--source-kimi-chip-fg);
   }
   /* /title custom title: at the very top of the card, truncated to 2 lines */
   .card-title {
@@ -1373,7 +1394,8 @@
      The modal interior is fully white, zero sacrifice to readability. */
   .conv-overlay[data-source="claude"],
   .conv-overlay[data-source="codex"],
-  .conv-overlay[data-source="antigravity"] {
+  .conv-overlay[data-source="antigravity"],
+  .conv-overlay[data-source="kimi"] {
     background: rgba(0, 0, 0, 0.22);
   }
   .conv-overlay[data-source="claude"] .conv-modal {
@@ -1396,6 +1418,13 @@
       0 4px 16px rgba(0,0,0,0.08),
       0 0 120px 8px var(--source-antigravity-glow-1),
       0 0 260px 30px var(--source-antigravity-glow-2);
+  }
+  .conv-overlay[data-source="kimi"] .conv-modal {
+    box-shadow:
+      0 20px 60px rgba(0,0,0,0.15),
+      0 4px 16px rgba(0,0,0,0.08),
+      0 0 120px 8px var(--source-kimi-glow-1),
+      0 0 260px 30px var(--source-kimi-glow-2);
   }
 
   .conv-head {
@@ -1437,6 +1466,10 @@
   .conv-source-pill.source-antigravity {
     background: var(--source-antigravity-chip-bg);
     color: var(--source-antigravity-chip-fg);
+  }
+  .conv-source-pill.source-kimi {
+    background: var(--source-kimi-chip-bg);
+    color: var(--source-kimi-chip-fg);
   }
   .conv-title {
     font-size: 14px; font-weight: 600; color: var(--text-1);
@@ -2190,6 +2223,7 @@
       <div class="source-filter-option" role="option" data-value="claude">Claude only</div>
       <div class="source-filter-option" role="option" data-value="codex">Codex only</div>
       <div class="source-filter-option" role="option" data-value="antigravity">Antigravity only</div>
+      <div class="source-filter-option" role="option" data-value="kimi">Kimi Code only</div>
     </div>
   </div>
   <div class="search-wrap" id="search-wrap">
@@ -2270,7 +2304,7 @@ const _saved = loadUIState();
 const RECENT_DAYS_OPTIONS = [7, 14, 21, 'all'];
 const recentDaysChipLabel = d => d === 'all' ? 'All time' : `Last ${d} days`;
 const recentDaysOptionLabel = d => d === 'all' ? 'All time' : `${d} days`;
-const SOURCE_FILTER_VALUES = ['all', 'claude', 'codex', 'antigravity'];
+const SOURCE_FILTER_VALUES = ['all', 'claude', 'codex', 'antigravity', 'kimi'];
 
 const state = {
   q: _saved?.q || '',
@@ -2292,7 +2326,7 @@ const state = {
   colLeftPct: typeof _saved?.colLeftPct === 'number' ? _saved.colLeftPct : null,
   // Hide single-turn sessions (typical claude -p noise), default true
   hideOneshot: typeof _saved?.hideOneshot === 'boolean' ? _saved.hideOneshot : true,
-  // Source filter (all | claude | codex | antigravity)
+  // Source filter (all | claude | codex | antigravity | kimi)
   sourceFilter: SOURCE_FILTER_VALUES.includes(_saved?.sourceFilter) ? _saved.sourceFilter : 'all',
 };
 
@@ -3054,6 +3088,7 @@ function renderCard(m) {
   const SRC_CHIP = {
     codex: ['CDX', 'source-codex', 'Codex'],
     antigravity: ['AGY', 'source-antigravity', 'Antigravity'],
+    kimi: ['KMI', 'source-kimi', 'Kimi Code'],
   };
   const [sourceCode, sourceClass, sourceTitle] = SRC_CHIP[m.source] || ['CC', 'source-claude', 'Claude Code'];
   const sourceChip = `<span class="source-chip ${sourceClass}" title="${sourceTitle}">${sourceCode}</span>`;
@@ -3326,7 +3361,11 @@ function openConversation(sessionId, opts = {}) {
 
   fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`)
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-    .then(data => renderConv(data, meta))
+    .then(data => {
+      renderConv(data, meta);
+      // Standalone reader: start following this session's file so a running session updates in place
+      if (_convStandalone) startConvLive(sessionId, data.fingerprint);
+    })
     .catch(err => {
       // C4 error state: explain + offer retry, not a dead end
       $conv.querySelector('.conv-body').innerHTML =
@@ -3659,7 +3698,7 @@ function renderConv(data, meta) {
   // Set data-source so the overlay switches the source glow (radial gradient around the modal)
   // meta may be empty (standalone cold start); fall back to data.source, then to claude
   const _src = (meta?.source || data.source || 'claude');
-  $conv.setAttribute('data-source', ['codex', 'antigravity'].includes(_src) ? _src : 'claude');
+  $conv.setAttribute('data-source', ['codex', 'antigravity', 'kimi'].includes(_src) ? _src : 'claude');
 
   const userCount = data.turns.filter(t => t.type === 'user').length;
   const toolTurns = data.turns.filter(t => t.type === 'tool').length;
@@ -3719,6 +3758,7 @@ function renderConv(data, meta) {
   const SRC_PILL = {
     codex: ['Codex', 'source-codex'],
     antigravity: ['Antigravity', 'source-antigravity'],
+    kimi: ['Kimi Code', 'source-kimi'],
   };
   const [sourceLabel, sourceClass] = SRC_PILL[sourceVal] || ['Claude Code', 'source-claude'];
   const sourcePillHtml = `<span class="conv-source-pill ${sourceClass}" title="${sourceLabel} session">${sourceLabel}</span>`;
@@ -4634,6 +4674,7 @@ const SOURCE_FILTER_LABELS = {
   claude: 'Claude only',
   codex: 'Codex only',
   antigravity: 'Antigravity only',
+  kimi: 'Kimi Code only',
 };
 const $sourceFilter = document.getElementById('source-filter');
 const $sourceFilterTrigger = document.getElementById('source-filter-trigger');
@@ -4822,11 +4863,94 @@ async function livePoll() {
   window.addEventListener(ev, () => { _lastInteractionAt = Date.now(); }, {passive: true});
 });
 
+// ---------- Standalone single-session live refresh ----------
+// The dashboard loop above polls the session *list*; it has nothing to say about the transcript
+// open in a standalone tab (?session=<id>). This loop follows exactly one session file instead:
+// same visibility gating and adaptive cadence, but the change signal is the file fingerprint
+// (mtime + size) the /conversation endpoint returns — the backend skips re-parsing when it matches.
+// A finished session never changes its fingerprint, so a historical transcript is never redrawn.
+let _convLiveId = null;          // session being followed (null = not in standalone mode)
+let _convLiveFingerprint = null; // last fingerprint rendered
+let _convLiveTimer = null;
+let _convLivePolling = false;
+
+function startConvLive(sessionId, fingerprint) {
+  _convLiveId = sessionId;
+  _convLiveFingerprint = fingerprint || null;
+  scheduleConvLive();
+}
+
+function scheduleConvLive() {
+  clearTimeout(_convLiveTimer);
+  _convLiveTimer = setTimeout(convLivePoll, liveInterval());
+}
+
+// Snapshot the reader's local UI state before a redraw, so new content lands without moving the
+// viewport or collapsing what the user opened. Tool blocks / foldables are matched by position:
+// the file is append-only, so existing turns keep their index and new ones arrive at the end.
+function captureConvUiState(body) {
+  const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+  const openIdx = (sel) => [...body.querySelectorAll(sel)]
+    .map((el, i) => el.classList.contains('open') ? i : -1).filter(i => i >= 0);
+  return {
+    scrollTop: body.scrollTop,
+    nearBottom,
+    openTools: openIdx('.conv-tool'),
+    openFolds: openIdx('.conv-foldable'),
+  };
+}
+
+function restoreConvUiState(body, snap) {
+  const reopen = (sel, idxs) => {
+    const els = body.querySelectorAll(sel);
+    idxs.forEach(i => els[i] && els[i].classList.add('open'));
+  };
+  reopen('.conv-tool', snap.openTools);
+  reopen('.conv-foldable', snap.openFolds);
+  // Reading the tail → keep following it; otherwise hold the exact position
+  body.scrollTop = snap.nearBottom ? body.scrollHeight : snap.scrollTop;
+}
+
+async function convLivePoll() {
+  if (!_convLiveId) return;
+  if (_convLivePolling) { scheduleConvLive(); return; }
+  const body = $conv?.querySelector('.conv-body');
+  const findInput = $conv?.querySelector('#conv-find');
+  // Skip (but keep scheduling) when the tab is hidden, an in-conversation find is active
+  // (a redraw would wipe the highlights), or the user is selecting text to copy.
+  const skip = document.visibilityState !== 'visible'
+            || !body
+            || (findInput && findInput.value.trim())
+            || (window.getSelection()?.toString().length > 0);
+  if (skip) { scheduleConvLive(); return; }
+  _convLivePolling = true;
+  try {
+    const fp = _convLiveFingerprint ? `?fingerprint=${encodeURIComponent(_convLiveFingerprint)}` : '';
+    const res = await fetch(`/api/sessions/${encodeURIComponent(_convLiveId)}/conversation${fp}`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data.unchanged && data.fingerprint !== _convLiveFingerprint) {
+      const snap = captureConvUiState(body);
+      renderConv(data, null);
+      restoreConvUiState($conv.querySelector('.conv-body'), snap);
+      _convLiveFingerprint = data.fingerprint;
+      _lastInteractionAt = Date.now();  // the session is moving → stay on the fast cadence
+    }
+  } catch {
+    // Network jitter / service restart: ignore, retry next round
+  } finally {
+    _convLivePolling = false;
+  }
+  scheduleConvLive();
+}
+
 // Tab refocus: pull immediately (don't wait for the next tick), so the first glance on return is up to date
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible'
-      && !document.body.classList.contains('standalone')) {
-    _lastInteractionAt = Date.now();
+  if (document.visibilityState !== 'visible') return;
+  _lastInteractionAt = Date.now();
+  if (document.body.classList.contains('standalone')) {
+    if (_convLiveId) convLivePoll();  // it reschedules itself internally
+  } else {
     livePoll();  // it reschedules itself internally
   }
 });
@@ -4837,10 +4961,10 @@ applyColLeftPct();
   const sid = new URLSearchParams(location.search).get('session');
   if (sid) {
     document.body.classList.add('standalone');
-    openConversation(sid, {standalone: true});
+    openConversation(sid, {standalone: true});  // starts the single-session live loop once loaded
   } else {
     load();
-    scheduleLive();  // start the live heartbeat (not started in standalone mode)
+    scheduleLive();  // start the dashboard live heartbeat (standalone has its own loop, see startConvLive)
   }
 }
 

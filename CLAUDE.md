@@ -61,6 +61,7 @@ DATA (read-only)
   ~/.claude/projects/*/*.jsonl           (Claude Code)
   ~/.codex/sessions/YYYY/MM/DD/*.jsonl   (Codex)
   ~/.gemini/antigravity/.../*.jsonl      (Antigravity)
+  ~/.kimi-code/sessions/*/*/agents/main/wire.jsonl   (Kimi Code; $KIMI_CODE_HOME overrides the root)
     └─► server.py: scan_sessions()       [incremental, by mtime]
         └─► _cache {jsonl_path: meta}
             └─► enriched_sessions()      [meta + state + scope]
@@ -81,7 +82,7 @@ UI (browser-only)
 ```
 
 Each agent's on-disk format is adapted to a common shape by a module under `sources/`
-(`codex.py`, `antigravity.py`); Claude Code is read directly in `server.py`.
+(`codex.py`, `antigravity.py`, `kimi.py`); Claude Code is read directly in `server.py`.
 
 ## 2. Cross-layer contracts
 
@@ -100,7 +101,7 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 | `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, scope, archived, archived_at, starred, starred_at, note}]` |
 | `GET /api/search?q=…` | multi-word = AND; session ID matches too | `[{id, snippets:[{text, role, term}]}]` |
 | `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` |
-| `GET /api/sessions/:id/conversation` | — | `{id, project_path, custom_title, total_lines, turns:[…]}` |
+| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
 | `GET /api/sessions/:id/anchored` | — | Plain-text transcript with `[L#]` original-line anchors (for agents to read / download) |
 | `GET /api/recent-files` / `GET /api/find-files` | Files panel | recent-changed / `fd` name search |
 | `POST /api/sessions/:id/star` | `{starred: bool}` | `{id, …entry}` |
@@ -114,7 +115,7 @@ A POST body missing `starred` / `archived` defaults to `True`.
 | URL | Mode | Notes |
 |---|---|---|
 | `/` | dashboard | list view (default) |
-| `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text |
+| `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text; follows a running session in place (`startConvLive` polls `/conversation?fingerprint=…`, redraws only on change, keeps scroll / open state) |
 
 ## 5. Agent-facing CLI and Skill
 
@@ -159,7 +160,8 @@ State lives at `~/.session-logbook/state.json`, with rotating backups under
 | `server.py` `list_recent_files` / `find_files_by_name` | Files panel backends |
 | `sources/codex.py` `is_codex_path` / `CODEX_ARCHIVED_ROOT` | Codex (`~/.codex`) data source; `is_codex_path` is the centralized dual-root predicate (active `sessions` + `archived_sessions`) |
 | `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source |
-| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex`); the single source of truth behind the `/anchored` endpoint |
+| `sources/kimi.py` `is_kimi_path` / `find_wire_by_session_id` | Kimi Code (`$KIMI_CODE_HOME`, default `~/.kimi-code`) data source; scans `sessions/*/*/agents/main/wire.jsonl` only (other agents are sub-agents); `is_kimi_path` is the directory-boundary-safe predicate |
+| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex` / `render_kimi`); the single source of truth behind the `/anchored` endpoint |
 | `session_logbook_cli.py` | read-only Agent access: resolve, search, anchored handoff, incremental follow, status, and evidence expansion |
 | `skills/session-logbook/` | the single Agent-facing Skill; thin routing layer over `session_logbook_cli.py` |
 | `index.html` `<style>` | all CSS (custom props in `:root`) |

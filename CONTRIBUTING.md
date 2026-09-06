@@ -6,7 +6,7 @@ Thanks for your interest in Session Logbook. It's a small, deliberately-scoped t
 
 - **Backend:** a single `server.py` (Python 3.9+, standard library only — no third-party dependencies).
 - **Frontend:** a single `index.html` (vanilla HTML/CSS/JS, no framework, **no build step**).
-- **Sources:** `sources/` adapts each agent's on-disk format (Claude Code, Codex, Antigravity) into a common shape.
+- **Sources:** `sources/` adapts each agent's on-disk format (Claude Code, Codex, Antigravity, Kimi Code) into a common shape.
 - **Tests:** `tests/` (Python `unittest`) with synthetic fixtures.
 
 There is no bundler, transpiler, or package manager. The dev loop is: edit a file, restart `server.py` (for backend changes) or refresh the browser (for `index.html`).
