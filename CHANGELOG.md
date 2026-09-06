@@ -7,6 +7,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- The standalone single-session reader (`/?session=<id>`) now follows a running session in place: it polls the session file's fingerprint and redraws only when the file changed, keeping the scroll position and expanded blocks. Finished sessions are never redrawn.
 - Add a server-independent, read-only Agent CLI for locating, handing off, following, auditing, and searching Claude Code and Codex Sessions.
 - Ship one `session-logbook` Skill as the Agent-facing entry point, including opt-in subagent discovery and line-anchored incremental reads with a one-line overlap.
 

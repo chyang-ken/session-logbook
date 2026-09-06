@@ -1104,6 +1104,16 @@ def _format_qa_preview(qa_unit, max_chars):
     return _truncate('\n\n'.join(parts), max_chars)
 
 
+def file_fingerprint(path) -> str:
+    """Cheap change signal for a session file: mtime (ns) + size.
+
+    Taken *before* the file is parsed, so a write that lands mid-parse is still reported as a
+    change on the next poll — the fingerprint can lag behind the content, never run ahead of it.
+    """
+    st = os.stat(path)
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
 def extract_conversation(jsonl_path):
     """Read the full JSONL and extract conversation content, filtering metadata/thinking/image and pairing tool_use with result."""
     turns = []
@@ -2538,12 +2548,20 @@ class Handler(BaseHTTPRequestHandler):
             if not jsonl:
                 return self._send_json(404, {"error": "Session not found"})
             try:
+                # File fingerprint (mtime + size) is the backend-authoritative "did anything change" signal
+                # for the standalone reader's live refresh. When the caller passes the fingerprint it last
+                # saw and the file is untouched, answer without re-parsing the whole JSONL.
+                fingerprint = file_fingerprint(jsonl)
+                seen = (qs.get('fingerprint') or [''])[0]
+                if seen and seen == fingerprint:
+                    return self._send_json(200, {'id': sid, 'unchanged': True, 'fingerprint': fingerprint})
                 if codex_source.is_codex_path(jsonl):
                     conv = codex_source.extract_conversation(jsonl)
                 elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
                     conv = ag_source.extract_conversation(jsonl)
                 else:
                     conv = extract_conversation(jsonl)
+                conv['fingerprint'] = fingerprint
                 return self._send_json(200, conv)
             except Exception as e:
                 return self._send_json(500, {"error": str(e)})
