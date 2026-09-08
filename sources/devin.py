@@ -5,6 +5,7 @@ They identify database records, never generated transcript files. N anchors refe
 to message_nodes.row_id; follow returns a full snapshot because branches can change.
 """
 import json
+import hashlib
 import os
 import sqlite3
 from contextlib import closing
@@ -189,7 +190,11 @@ def _turns(chain):
 def extract_conversation(path):
     meta, chain = read_session(path)
     info = _metadata(path, meta, chain)
-    return {**info, 'total_lines': len(chain), 'record_unit': 'database nodes', 'turns': _turns(chain)}
+    identity = [meta.get('title'), meta.get('working_directory'), meta.get('model'),
+                [(n['row_id'], n['chat_message']) for n in chain]]
+    fingerprint = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+    return {**info, 'total_lines': len(chain), 'record_unit': 'database nodes',
+            'fingerprint': fingerprint, 'turns': _turns(chain)}
 
 
 def digest_header(path):

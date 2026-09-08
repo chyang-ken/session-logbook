@@ -42,14 +42,16 @@ The identity markers for a session's source form **their own palette**, delibera
 --source-claude-chip-bg/-fg   /* apricot-cream background + dark-gold text: card chip, modal pill, switcher badge fill */
 --source-codex-chip-bg/-fg    /* slate-blue background + deep-blue text: same as above */
 --source-antigravity-chip-bg/-fg /* violet background + deep-purple text: third source, Antigravity */
+--source-kimi-chip-bg/-fg     /* teal background + deep-teal text: fourth source, Kimi Code */
 --source-*-glow-1/-2          /* the two-layer glow of the modal's rectangular light band (rgba) */
---source-*-solid              /* opaque version of the glow (claude #d9a550 / codex #6491af / antigravity #8b6fc4): color dots / badge outlines, more vivid than the chip */
+--source-*-solid              /* opaque version of the glow (claude #d9a550 / codex #6491af / antigravity #8b6fc4 / kimi #3a9c8c): color dots / badge outlines, more vivid than the chip */
 ```
 
 Devin Local reuses neutral `--bg-hover`, `--text-1`, `--text-3`, and `--border` tokens; its DEV / Devin Local labels distinguish the source without another hue.
 
 Where it lands: the card `.source-chip`, the conversation modal's `.conv-source-pill` + glow, and the top-left `.source-filter` switcher.
-**Iron rule**: a given source uses this same palette in every component — warm = Claude / cool = Codex / purple = Antigravity, never swapped. For a stronger statement use `-solid` (filled); don't reach for `--gold` / `--accent`.
+**Iron rule**: a given source uses this same palette in every component — warm = Claude / cool = Codex / purple = Antigravity / teal = Kimi, never swapped.
+Teal was chosen for Kimi because it is the remaining hue that reads apart from the three source colors and from the three semantic colors; it is bluer than the emerald user-turn tint (§1.2), and the two never appear on the same element. For a stronger statement use `-solid` (filled); don't reach for `--gold` / `--accent`.
 **source-filter trigger**: the All state is **neutral chrome** (plain text, hover → `--text-1`, **does not flip to gold** — gold belongs to star, and on a source switcher it would clash with Claude's amber identity color and mislead). Once a specific source is selected, the whole trigger fills with that source's identity badge.
 
 ### 1.2 Conversation role colors (shared by card-preview `.msg-*` and conversation view `.conv-*`)

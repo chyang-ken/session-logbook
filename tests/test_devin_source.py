@@ -128,6 +128,7 @@ class DevinSourceTests(unittest.TestCase):
         with mock.patch.object(server, 'PROJECTS_DIR', self.root/'missing'), \
              mock.patch.object(server.codex_source, 'scan_sessions', return_value=[]), \
              mock.patch.object(server.ag_source, 'scan_sessions', return_value=[]), \
+             mock.patch.object(server.kimi_source, 'scan_sessions', return_value=[]), \
              mock.patch.object(server, '_cache', {}), \
              mock.patch.object(server, 'save_scan_cache'):
             first = server.scan_sessions()
@@ -162,6 +163,28 @@ class DevinSourceTests(unittest.TestCase):
             self.assertEqual(handler.do_POST()[0], 200)
             self.assertTrue(server._state['devin:alpha']['starred'])
             self.assertNotIn('devin%3Aalpha', server._state)
+
+    def test_live_fingerprint_tracks_only_this_selected_chain(self):
+        handler = server.Handler.__new__(server.Handler)
+        handler._request_is_trusted = lambda: True
+        handler._send_json = lambda status, value: (status, value)
+        handler.path = '/api/sessions/devin%3Aalpha/conversation'
+        with mock.patch.object(server, '_cache', {str(self.ref): devin.extract_metadata(self.ref)}), \
+             mock.patch.object(server, 'load_state'):
+            status, first = handler.do_GET()
+            self.assertEqual(status, 200)
+            handler.path += '?fingerprint=' + first['fingerprint']
+            self.assertTrue(handler.do_GET()[1]['unchanged'])
+            self.node(99, 1, None, {'role': 'user', 'content': 'another session'}, session='hidden')
+            self.conn.commit()
+            self.assertTrue(handler.do_GET()[1]['unchanged'])
+            self.conn.execute('UPDATE message_nodes SET chat_message=? WHERE row_id=2',
+                              (json.dumps({'role': 'user', 'content': 'edited payment'}),))
+            self.conn.commit()
+            status, edited = handler.do_GET()
+            self.assertEqual(status, 200)
+            self.assertNotIn('unchanged', edited)
+            self.assertNotEqual(edited['fingerprint'], first['fingerprint'])
 
     def test_brief_cache_tracks_changed_text_without_external_model(self):
         with mock.patch.object(server, '_state', {}), \

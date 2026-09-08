@@ -1,7 +1,7 @@
 ---
 name: session-logbook
 description: >
-  Use local Claude Code, Codex, and Devin Local session records when the user wants an Agent to absorb
+  Use local Claude Code, Codex, Kimi Code, and Devin Local session records when the user wants an Agent to absorb
   another Session, follow new work, inspect evidence, locate a past Session, or mine patterns
   across Session history. Read-only: never modify, move, resume, message, or spawn Sessions.
 ---
@@ -53,7 +53,7 @@ python3 scripts/session_logbook.py evidence '<target>' --line 427 --context 1
 python3 scripts/session_logbook.py search 'payment retry' --role user --project my-app
 ```
 
-Useful search filters are `--source claude|codex|devin`, `--project <substring>`, `--since 7d`
+Useful search filters are `--source claude|codex|kimi|devin`, `--project <substring>`, `--since 7d`
 or an ISO date, and `--include-subagents`.
 
 ## Devin Local anchors

@@ -25,7 +25,8 @@ and would weaken direct evidence provenance.
 The implementation uses Python's standard library and existing neutral UI tokens.
 Only metadata previews use the dashboard's existing warm cache. Its invalidation
 includes both the database and WAL file signatures, separate from session activity
-used for recency. No new service or dependency is needed.
+used for recency. The standalone reader hashes only its selected chain, so updates
+to another session do not redraw it and edits to earlier messages remain visible. No new service or dependency is needed.
 
 ## Evidence and references
 

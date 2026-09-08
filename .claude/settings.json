@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/release_flow.py check --quiet",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

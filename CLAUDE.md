@@ -61,6 +61,7 @@ DATA (read-only)
   ~/.claude/projects/*/*.jsonl           (Claude Code)
   ~/.codex/sessions/YYYY/MM/DD/*.jsonl   (Codex)
   ~/.gemini/antigravity/.../*.jsonl      (Antigravity)
+  ~/.kimi-code/sessions/*/*/agents/main/wire.jsonl   (Kimi Code; $KIMI_CODE_HOME overrides the root)
     └─► server.py: scan_sessions()       [incremental, by mtime]
         └─► _cache {jsonl_path: meta}
             └─► enriched_sessions()      [meta + state + scope]
@@ -81,7 +82,7 @@ UI (browser-only)
 ```
 
 Each agent's on-disk format is adapted to a common shape by a module under `sources/`
-(`codex.py`, `antigravity.py`); Claude Code is read directly in `server.py`.
+(`codex.py`, `antigravity.py`, `kimi.py`); Claude Code is read directly in `server.py`.
 
 ## 2. Cross-layer contracts
 
@@ -100,7 +101,7 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 | `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, scope, archived, archived_at, starred, starred_at, note}]` |
 | `GET /api/search?q=…` | multi-word = AND; session ID matches too | `[{id, snippets:[{text, role, term}]}]` |
 | `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` |
-| `GET /api/sessions/:id/conversation` | — | `{id, project_path, custom_title, total_lines, turns:[…]}` |
+| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
 | `GET /api/sessions/:id/anchored` | — | Plain-text transcript with `[L#]` original-line anchors (for agents to read / download) |
 | `GET /api/recent-files` / `GET /api/find-files` | Files panel | recent-changed / `fd` name search |
 | `POST /api/sessions/:id/star` | `{starred: bool}` | `{id, …entry}` |
@@ -114,7 +115,7 @@ A POST body missing `starred` / `archived` defaults to `True`.
 | URL | Mode | Notes |
 |---|---|---|
 | `/` | dashboard | list view (default) |
-| `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text |
+| `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text; follows a running session in place (`startConvLive` polls `/conversation?fingerprint=…`, redraws only on change, keeps scroll / open state) |
 
 ## 5. Agent-facing CLI and Skill
 
@@ -159,7 +160,8 @@ State lives at `~/.session-logbook/state.json`, with rotating backups under
 | `server.py` `list_recent_files` / `find_files_by_name` | Files panel backends |
 | `sources/codex.py` `is_codex_path` / `CODEX_ARCHIVED_ROOT` | Codex (`~/.codex`) data source; `is_codex_path` is the centralized dual-root predicate (active `sessions` + `archived_sessions`) |
 | `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source |
-| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex`); the single source of truth behind the `/anchored` endpoint |
+| `sources/kimi.py` `is_kimi_path` / `find_wire_by_session_id` | Kimi Code (`$KIMI_CODE_HOME`, default `~/.kimi-code`) data source; scans `sessions/*/*/agents/main/wire.jsonl` only (other agents are sub-agents); `is_kimi_path` is the directory-boundary-safe predicate |
+| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex` / `render_kimi`); the single source of truth behind the `/anchored` endpoint |
 | `session_logbook_cli.py` | read-only Agent access: resolve, search, anchored handoff, incremental follow, status, and evidence expansion |
 | `skills/session-logbook/` | the single Agent-facing Skill; thin routing layer over `session_logbook_cli.py` |
 | `index.html` `<style>` | all CSS (custom props in `:root`) |
@@ -187,11 +189,58 @@ python3 scripts/check_no_cjk.py
 `tests/` uses Python `unittest` with synthetic fixtures. All tests must pass before merge;
 CI runs the same command on every push and PR.
 
+CI's floor is Python 3.9 and its runners have no git identity. Before pushing, run the suite once
+under a 3.9 interpreter too (on macOS, `/usr/bin/python3` is 3.9), and never let a test rely on
+the developer's global git config — the `Z` timezone suffix and `git tag -a` without an identity
+have both bitten here.
+
+To smoke a pre-merge build against real local session data, start it through a launcher that
+rebinds `server.STATE_FILE`, `server.SCAN_CACHE_FILE` and `server.SCAN_CACHE_BACKUP_DIR` to a temp
+directory first; otherwise the unreleased build writes into the production `~/.session-logbook/`
+state and cache.
+
 `scripts/check_no_cjk.py` enforces the English-first rule over every tracked file and runs as
 its own CI job. Run it before you commit — a local pre-commit hook is optional and easy to
 bypass, so CI is the gate that actually holds.
 
-## 10. Decision log
+## 10. Branch model and release flow
+
+`main` is what the public gets. It is never edited directly; it only ever moves *forward along
+`staging`* to a commit that has already been in daily use for a soak period.
+
+```
+feature branch ──PR──► staging ──deploy──► maintainer's machine ──14 days──► main ──(optional)──► vX.Y.Z release
+```
+
+- **`staging` is a one-way river.** Every change, hotfixes included, enters through a pull request
+  into `staging`. CI runs on the PR and again on the `staging` push. Its history is never rewritten
+  (no rebase, no force-push): the soak arithmetic below depends on commit order.
+- **Deploying = recording.** On the machine that hosts the resident dashboard,
+  `python3 scripts/release_flow.py deploy` fast-forwards the checkout to `staging`, restarts the
+  service, reads it back over HTTP, and only then pushes an annotated `deployed/<date>-<sha>` tag.
+  That tag date is when the soak clock starts for that commit and everything before it. The
+  restart command and health URL are machine-specific and live in git-ignored `_private/deploy.json`
+  (shape documented at the top of the script).
+- **Checking = the session-start hook.** `.claude/settings.json` runs
+  `scripts/release_flow.py check --quiet` whenever an agent session starts here, so "is anything
+  ready for `main`?" is asked automatically when work resumes. It prints only when something is
+  actionable: undeployed `staging` commits, a soaked commit `main` is behind, or a broken river.
+- **Releasing to `main` = a pull request, merged by a human.** `python3 scripts/release_flow.py release`
+  creates `release/<date>` at the newest deploy that has soaked ≥ 14 days and opens a PR into
+  `main`. Commits deployed later stay on `staging` and keep soaking. The script never merges;
+  `main` is branch-protected and merging it is a separate decision.
+- **Versioned GitHub releases** (`vX.Y.Z`, see CONTRIBUTING "Maintainer releases") remain a
+  separate, optional step taken from `main` after a promotion.
+
+Rollback is per layer: the local machine goes back by checking out an earlier `deployed/*` tag and
+restarting; a bad feature on `staging` is reverted with a new commit through a PR (never by
+rewriting history); nothing on `main` is ever force-moved.
+
+The pieces are deliberately split into a portable part (this section, the script, the hook — all
+git-only) and a per-repository part (soak days, restart command, health URL), so another project
+can adopt the same flow by copying the former and filling in the latter.
+
+## 11. Decision log
 
 Decisions backed by an experiment / comparison / measurement are recorded under
 [`docs/decisions/`](docs/decisions/) — see that directory's README for the format.

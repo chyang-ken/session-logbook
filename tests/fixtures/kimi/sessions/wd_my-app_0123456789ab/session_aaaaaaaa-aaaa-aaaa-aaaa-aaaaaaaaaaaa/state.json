@@ -1,0 +1,18 @@
+{
+  "createdAt": "2026-09-01T10:00:00.000Z",
+  "updatedAt": "2026-09-01T10:05:00.000Z",
+  "title": "Explain the project",
+  "isCustomTitle": false,
+  "workDir": "/Users/alice/my-app",
+  "lastPrompt": "Thanks, summarize in one line",
+  "agents": {
+    "main": {
+      "agentId": "main"
+    },
+    "agent-0": {
+      "agentId": "agent-0",
+      "parentAgentId": "main"
+    }
+  },
+  "custom": {}
+}
