@@ -7,6 +7,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Read Devin Local sessions directly from SQLite, including selected message chains, search, conversation/export, organizing controls, and database-node evidence through the Agent CLI.
 - Add a server-independent, read-only Agent CLI for locating, handing off, following, auditing, and searching Claude Code and Codex Sessions.
 - Ship one `session-logbook` Skill as the Agent-facing entry point, including opt-in subagent discovery and line-anchored incremental reads with a one-line overlap.
 

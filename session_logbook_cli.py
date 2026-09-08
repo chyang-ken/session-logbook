@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only command-line access to local Claude Code and Codex sessions.
+"""Read-only command-line access to local Claude Code, Codex, and Devin Local sessions.
 
 This is the stable Agent-facing surface for Session Logbook. It reuses the
 dashboard's source adapters and anchored renderer, but does not require the web
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import re
 import sys
 from datetime import datetime, timezone
@@ -19,9 +20,10 @@ from typing import Iterable, Optional
 import server
 from sources import anchored_transcript
 from sources import codex as codex_source
+from sources import devin as devin_source
 
 
-SUPPORTED_SOURCES = ("claude", "codex")
+SUPPORTED_SOURCES = ("claude", "codex", "devin")
 ANCHOR_RE = re.compile(r"\[L(\d+)\]")
 
 
@@ -50,6 +52,8 @@ def _under(path: Path, root: Path) -> bool:
 
 def detect_source(path: Path) -> Optional[str]:
     """Identify a supported transcript by root first, then by its first records."""
+    if devin_source.is_devin_path(path):
+        return "devin"
     if codex_source.is_codex_path(path):
         return "codex"
     if _under(path, server.PROJECTS_DIR):
@@ -95,6 +99,8 @@ def _claude_slug(path: Path) -> Optional[str]:
 
 
 def _relationship(path: Path, source: str) -> tuple[bool, Optional[str]]:
+    if source == "devin":
+        return False, None
     if source == "claude":
         if path.parent.name == "subagents":
             return True, path.parent.parent.name
@@ -118,7 +124,12 @@ def session_metadata(path: Path) -> dict:
     if source not in SUPPORTED_SOURCES:
         raise SessionLookupError(f"unsupported or unrecognized session transcript: {path}")
 
-    if source == "codex":
+    if source == "devin":
+        try:
+            meta = devin_source.extract_metadata(path)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            raise SessionLookupError(str(exc)) from exc
+    elif source == "codex":
         meta = codex_source.extract_metadata(path)
     else:
         meta = server.extract_metadata(path)
@@ -148,6 +159,14 @@ def iter_session_paths(
             yield from project_dir.glob("*.jsonl")
             if include_subagents:
                 yield from project_dir.glob("*/subagents/*.jsonl")
+
+    if source in (None, "devin"):
+        try:
+            yield from devin_source.scan_sessions()
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            if source == "devin":
+                raise SessionLookupError("Devin database unavailable") from exc
+            print("[warn] Devin database unavailable; searching other sources", file=sys.stderr)
 
     if source in (None, "codex"):
         for root in (codex_source.CODEX_ROOT, codex_source.CODEX_ARCHIVED_ROOT):
@@ -182,6 +201,21 @@ def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
     if role not in {"user", "assistant"}:
         return None, ""
     return role, codex_source._extract_text_from_message_content(payload.get("content"))
+
+
+def iter_messages(path, source):
+    if source == "devin":
+        _, chain = devin_source.read_session(path)
+        for node in chain:
+            yield node["row_id"], *devin_source.message_text(node)
+        return
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line_number, raw in enumerate(handle, 1):
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                continue
+            yield line_number, *_message_from_row(row, source)
 
 
 def _parse_since(value: Optional[str]) -> Optional[float]:
@@ -224,7 +258,7 @@ def search_sessions(
     prefiltered = server._rg_prefilter(terms, paths)
     results = []
     for path in paths:
-        if prefiltered is not None and str(path) not in prefiltered:
+        if not devin_source.is_devin_path(path) and prefiltered is not None and str(path) not in prefiltered:
             continue
         try:
             item = session_metadata(path)
@@ -248,34 +282,25 @@ def search_sessions(
         found = set(metadata_terms)
         snippets = []
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                for line_number, raw in enumerate(handle, start=1):
-                    raw_lower = raw.lower()
-                    if not any(term in raw_lower for term in terms):
-                        continue
-                    try:
-                        row = json.loads(raw)
-                    except Exception:
-                        continue
-                    message_role, text = _message_from_row(row, item["source"])
-                    if not text or message_role is None:
-                        continue
-                    if role != "any" and role != message_role:
-                        continue
-                    text_lower = text.lower()
-                    line_terms = [term for term in terms if term in text_lower]
-                    found.update(line_terms)
-                    if line_terms and len(snippets) < 3:
-                        first = min(text_lower.find(term) for term in line_terms)
-                        start = max(0, first - 90)
-                        end = min(len(text), first + 260)
-                        excerpt = re.sub(r"\s+", " ", text[start:end]).strip()
-                        snippets.append({
-                            "role": message_role,
-                            "line": line_number,
-                            "text": ("…" if start else "") + excerpt + ("…" if end < len(text) else ""),
-                        })
-        except OSError:
+            for line_number, message_role, text in iter_messages(path, item["source"]):
+                if not text or message_role is None:
+                    continue
+                if role != "any" and role != message_role:
+                    continue
+                text_lower = text.lower()
+                line_terms = [term for term in terms if term in text_lower]
+                found.update(line_terms)
+                if line_terms and len(snippets) < 3:
+                    first = min(text_lower.find(term) for term in line_terms)
+                    start = max(0, first - 90)
+                    end = min(len(text), first + 260)
+                    excerpt = re.sub(r"\s+", " ", text[start:end]).strip()
+                    snippets.append({
+                        "role": message_role, "line": line_number,
+                        "anchor_kind": "N" if item["source"] == "devin" else "L",
+                        "text": ("…" if start else "") + excerpt + ("…" if end < len(text) else ""),
+                    })
+        except (OSError, ValueError, sqlite3.Error):
             continue
 
         if len(found) < len(terms):
@@ -314,6 +339,9 @@ def resolve_target(
     include_subagents: bool = False,
 ) -> Path:
     candidate = Path(target).expanduser()
+    if devin_source.is_devin_path(candidate):
+        session_metadata(candidate)
+        return candidate.resolve()
     if candidate.is_file():
         session_metadata(candidate)
         return candidate.resolve()
@@ -377,6 +405,8 @@ def _observed_terminal(item: dict) -> str:
 
 def render_context(path: Path, after_line: int = 0) -> str:
     item = session_metadata(path)
+    if item["source"] == "devin":
+        return devin_source.render_context(path, after_line)
     total_lines = _line_count(path)
     if after_line > total_lines:
         raise SessionLookupError(
@@ -403,6 +433,11 @@ def render_context(path: Path, after_line: int = 0) -> str:
 
 
 def read_evidence(path: Path, line: int, context: int = 1, max_chars: int = 12_000) -> str:
+    if devin_source.is_devin_path(path):
+        try:
+            return devin_source.read_evidence(path, line, context, max_chars)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            raise SessionLookupError(str(exc)) from exc
     if line < 1:
         raise SessionLookupError("line must be at least 1")
     start = max(1, line - max(0, context))
@@ -425,6 +460,12 @@ def read_evidence(path: Path, line: int, context: int = 1, max_chars: int = 12_0
 
 def status_for(path: Path) -> dict:
     item = session_metadata(path)
+    if item["source"] == "devin":
+        _, chain = devin_source.read_session(path)
+        return {**item, "total_nodes": len(chain), "anchor_kind": "N",
+                "next_cursor": f"N{chain[-1]['row_id'] if chain else 0}",
+                "follow_mode": "full-snapshot", "liveness": "unknown",
+                "explicit_terminal": "unknown"}
     total_lines = _line_count(path)
     return {
         "id": item.get("id"),
@@ -445,7 +486,7 @@ def status_for(path: Path) -> dict:
 
 
 def _add_target_filters(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("target", help="session ID, exact JSONL path, or search query")
+    parser.add_argument("target", help="session ID, source reference, or search query")
     parser.add_argument("--source", choices=SUPPORTED_SOURCES)
     parser.add_argument("--project", help="project-path substring")
     parser.add_argument("--include-subagents", action="store_true")
@@ -468,13 +509,13 @@ def parse_args(argv=None):
     _add_target_filters(follow)
     follow.add_argument(
         "--cursor-line", "--after-line", dest="after_line", type=int, required=True,
-        help="previous NEXT_CURSOR; that line is deliberately returned again",
+        help="numeric part of NEXT_CURSOR; Devin returns a full snapshot",
     )
 
     status = sub.add_parser("status", help="report observed transcript state")
     _add_target_filters(status)
 
-    evidence = sub.add_parser("evidence", help="read raw source lines around an anchor")
+    evidence = sub.add_parser("evidence", help="read source lines or Devin database nodes around an anchor")
     _add_target_filters(evidence)
     evidence.add_argument("--line", type=int, required=True)
     evidence.add_argument("--context", type=int, default=1)
@@ -541,7 +582,7 @@ def main(argv=None) -> int:
             "candidates": exc.candidates,
         }, ensure_ascii=False, indent=2), file=sys.stderr)
         return 2
-    except SessionLookupError as exc:
+    except (SessionLookupError, ValueError, OSError, sqlite3.Error) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
 

@@ -46,6 +46,8 @@ The identity markers for a session's source form **their own palette**, delibera
 --source-*-solid              /* opaque version of the glow (claude #d9a550 / codex #6491af / antigravity #8b6fc4): color dots / badge outlines, more vivid than the chip */
 ```
 
+Devin Local reuses neutral `--bg-hover`, `--text-1`, `--text-3`, and `--border` tokens; its DEV / Devin Local labels distinguish the source without another hue.
+
 Where it lands: the card `.source-chip`, the conversation modal's `.conv-source-pill` + glow, and the top-left `.source-filter` switcher.
 **Iron rule**: a given source uses this same palette in every component — warm = Claude / cool = Codex / purple = Antigravity, never swapped. For a stronger statement use `-solid` (filled); don't reach for `--gold` / `--accent`.
 **source-filter trigger**: the All state is **neutral chrome** (plain text, hover → `--text-1`, **does not flip to gold** — gold belongs to star, and on a source switcher it would clash with Claude's amber identity color and mislead). Once a specific source is selected, the whole trigger fills with that source's identity badge.

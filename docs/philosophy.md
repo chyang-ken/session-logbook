@@ -84,3 +84,13 @@ quiet transcript proves liveness or completion.
 | Cross-machine sync / mobile support | The work environment is right here on this machine |
 
 Before adding a feature: run it past this table first, then past the three negations under "What the Dashboard is."
+
+## Database-backed source coordinates
+
+Devin Local uses its selected SQLite message chain as the original evidence.
+`[N#]` addresses `message_nodes.row_id` within the identified session; it never
+pretends that a generated transcript line is an original source line. Context and
+HTTP anchored export share the Devin renderer. Follow returns the full current
+chain because edits and compaction can replace prior nodes. Evidence can still
+expand an old node belonging to that session. See
+[the Devin Local decision](decisions/2026-09-08-devin-local.md).

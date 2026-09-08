@@ -1,6 +1,6 @@
 # Session Logbook
 
-A minimal, local, zero-dependency dashboard for browsing and organizing your AI coding-agent sessions — **Claude Code, Codex, and Antigravity** — all in one place.
+A minimal, local, zero-dependency dashboard for browsing and organizing your AI coding-agent sessions — **Claude Code, Codex, Antigravity, and Devin Local** — all in one place.
 
 [![CI](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@ A minimal, local, zero-dependency dashboard for browsing and organizing your AI 
 
 > Read this in other languages: [Chinese](README_zh-CN.md)
 
-Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, and `~/.gemini`. Session Logbook reads them **read-only**, lays them out on one page, and lets you star, archive, note, search, and re-read them — without leaving your machine.
+Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, `~/.gemini`, and the Devin Local database. Session Logbook reads them **read-only**, lays them out on one page, and lets you star, archive, note, search, and re-read them — without leaving your machine.
 
 ![Session Logbook screenshot](docs/screenshot.png)
 
@@ -19,7 +19,7 @@ Your agents leave behind hundreds of session transcripts scattered under `~/.cla
 You run many agents, in many worktrees, across many projects, in parallel. A flat list of session files is unusable. This dashboard gives that pile structure:
 
 - **One page, four zones** — ⭐ Starred / 🔥 Recent / 🕸 Dusty / 📦 Archived. Time-decayed automatically so your working set stays clean.
-- **Multi-agent** — Claude Code, Codex, and Antigravity sessions, unified and grouped by project.
+- **Multi-agent** — Claude Code, Codex, Antigravity, and Devin Local sessions, unified and grouped by project.
 - **Read-only and private** — it never sends a message, spawns a session, or talks to the network. Binds `127.0.0.1` only and serves its browser assets locally.
 
 ## Quickstart
@@ -35,6 +35,26 @@ python3 server.py          # → http://127.0.0.1:47821
 Open <http://127.0.0.1:47821>. The first scan takes 10–30s depending on how many sessions you have; after that it only re-reads files whose `mtime` changed.
 
 That's it. There is no build step, no `pip install`, and no browser-side CDN fetch — editing `index.html` and refreshing the browser is the entire dev loop.
+
+## Devin Local
+
+Devin Local sessions are read directly from `~/.local/share/devin/cli/sessions.db`,
+including committed WAL updates. `XDG_DATA_HOME` changes the data-home base;
+`DEVIN_DATA_DIR` overrides the Devin data directory itself. No export, IDE plugin,
+or extra Python package is required. This supports Devin Local's database format,
+not legacy Windsurf Cascade or cloud Devin sessions. The default path has been
+verified on macOS; other installations can point `DEVIN_DATA_DIR` at their data.
+
+The selected message chain is shown; hidden sessions and abandoned retry branches
+are excluded. A broken or unsupported chain is reported rather than blended with
+other branches. IDs are prefixed with `devin:` to avoid collisions with other sources.
+
+For Agent access, use `--source devin`. Devin anchors are `[N#]` database row IDs,
+not JSONL line numbers. `evidence --line 42` expands `[N42]`. `follow --cursor-line 42`
+returns a **full current snapshot**, because editing or compaction can replace
+messages before that cursor. Compare node IDs and content; do not treat it as an
+append-only delta. Copied source references have the form
+`<sessions.db>/<encoded-session-id>` and are accepted by the CLI; they are not files.
 
 ## Give a Session to another Agent
 

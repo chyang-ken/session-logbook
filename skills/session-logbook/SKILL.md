@@ -1,7 +1,7 @@
 ---
 name: session-logbook
 description: >
-  Use local Claude Code and Codex session records when the user wants an Agent to absorb
+  Use local Claude Code, Codex, and Devin Local session records when the user wants an Agent to absorb
   another Session, follow new work, inspect evidence, locate a past Session, or mine patterns
   across Session history. Read-only: never modify, move, resume, message, or spawn Sessions.
 ---
@@ -53,8 +53,16 @@ python3 scripts/session_logbook.py evidence '<target>' --line 427 --context 1
 python3 scripts/session_logbook.py search 'payment retry' --role user --project my-app
 ```
 
-Useful search filters are `--source claude|codex`, `--project <substring>`, `--since 7d`
+Useful search filters are `--source claude|codex|devin`, `--project <substring>`, `--since 7d`
 or an ISO date, and `--include-subagents`.
+
+## Devin Local anchors
+
+Devin uses `[N#]` database row IDs. Pass the numeric part to `evidence --line` or
+`follow --cursor-line`. Unlike JSONL follow, Devin follow returns the complete
+selected chain because edits and compaction can replace earlier messages. Compare
+the new snapshot with the previous one, including removed or changed nodes.
+Source references identify a database session and are not physical transcript files.
 
 ## Output discipline
 
@@ -65,5 +73,5 @@ or an ISO date, and `--include-subagents`.
   visible. Expand any hidden detail by source line with `evidence`.
 - If a query returns several candidates, do not silently pick one. Use recent message snippets,
   project, source, and time to identify the intended Session.
-- Never write to the source JSONL. Resume or message a Session only when the user separately
+- Never write to source transcripts or databases. Resume or message a Session only when the user separately
   requests that external action.
