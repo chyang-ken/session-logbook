@@ -773,6 +773,15 @@
     background: var(--source-claude-chip-bg);
     color: var(--source-claude-chip-fg);
   }
+  /* Devin uses existing neutral tokens; its text label carries source identity. */
+  .source-chip.source-devin, .conv-source-pill.source-devin,
+  .source-filter[data-source="devin"] .source-filter-trigger {
+    background: var(--bg-hover);
+    color: var(--text-1);
+    box-shadow: inset 0 0 0 1px var(--border);
+  }
+  .source-filter-option[data-value="devin"]::before { background: var(--text-3); }
+  .card[data-source="devin"]:hover { border-color: var(--text-3); }
   .source-chip.source-codex {
     background: var(--source-codex-chip-bg);
     color: var(--source-codex-chip-fg);
@@ -2224,6 +2233,7 @@
       <div class="source-filter-option" role="option" data-value="codex">Codex only</div>
       <div class="source-filter-option" role="option" data-value="antigravity">Antigravity only</div>
       <div class="source-filter-option" role="option" data-value="kimi">Kimi Code only</div>
+      <div class="source-filter-option" role="option" data-value="devin">Devin Local only</div>
     </div>
   </div>
   <div class="search-wrap" id="search-wrap">
@@ -2304,7 +2314,7 @@ const _saved = loadUIState();
 const RECENT_DAYS_OPTIONS = [7, 14, 21, 'all'];
 const recentDaysChipLabel = d => d === 'all' ? 'All time' : `Last ${d} days`;
 const recentDaysOptionLabel = d => d === 'all' ? 'All time' : `${d} days`;
-const SOURCE_FILTER_VALUES = ['all', 'claude', 'codex', 'antigravity', 'kimi'];
+const SOURCE_FILTER_VALUES = ['all', 'claude', 'codex', 'antigravity', 'kimi', 'devin'];
 
 const state = {
   q: _saved?.q || '',
@@ -3086,6 +3096,7 @@ function renderCard(m) {
     ? `<button class="btn btn-files-inline" data-act="files" data-tooltip="Recently modified files" aria-label="Files">${filesSvg}</button>`
     : '';
   const SRC_CHIP = {
+    devin: ['DEV', 'source-devin', 'Devin Local'],
     codex: ['CDX', 'source-codex', 'Codex'],
     antigravity: ['AGY', 'source-antigravity', 'Antigravity'],
     kimi: ['KMI', 'source-kimi', 'Kimi Code'],
@@ -3104,7 +3115,7 @@ function renderCard(m) {
         <span class="card-sid-wrap">
           ${sourceChip}
           <span class="card-sid" data-act="copy-id" data-tooltip="Click to copy session ID">${escapeHtml(m.id)}</span>
-          <button class="sid-link-btn" data-act="copy-path" data-tooltip="Copy JSONL path" aria-label="Copy JSONL path">${ICONS.link}</button>
+          <button class="sid-link-btn" data-act="copy-path" data-tooltip="Copy source reference" aria-label="Copy source reference">${ICONS.link}</button>
           <button class="sid-link-btn" data-act="copy-link" data-tooltip="Copy shareable link" aria-label="Copy shareable link">${ICONS.share}</button>
         </span>
         <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(m.mtime_iso || '')}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(m.mtime_iso)}</span>
@@ -3244,13 +3255,13 @@ function bindCardEvents() {
       e.stopPropagation();
       navigator.clipboard.writeText(id).then(() => toast('Copied session ID'), () => toast('Copy failed'));
     });
-    // Copy JSONL path (link icon), needs stopPropagation to avoid triggering the card's whole-card open
+    // Copy source reference (link icon), needs stopPropagation to avoid triggering the card's whole-card open
     card.querySelector('[data-act="copy-path"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
       const m = state.items.find(x => x.id === id);
       const path = m?.jsonl_path;
-      if (!path) { toast('No JSONL path'); return; }
-      navigator.clipboard.writeText(path).then(() => toast('Copied JSONL path'), () => toast('Copy failed'));
+      if (!path) { toast('No source reference'); return; }
+      navigator.clipboard.writeText(path).then(() => toast('Copied source reference'), () => toast('Copy failed'));
     });
     // Copy a shareable direct link (/?session=<id>), using location.origin to capture the current host:port
     card.querySelector('[data-act="copy-link"]')?.addEventListener('click', (e) => {
@@ -3698,7 +3709,7 @@ function renderConv(data, meta) {
   // Set data-source so the overlay switches the source glow (radial gradient around the modal)
   // meta may be empty (standalone cold start); fall back to data.source, then to claude
   const _src = (meta?.source || data.source || 'claude');
-  $conv.setAttribute('data-source', ['codex', 'antigravity', 'kimi'].includes(_src) ? _src : 'claude');
+  $conv.setAttribute('data-source', ['codex', 'antigravity', 'kimi', 'devin'].includes(_src) ? _src : 'claude');
 
   const userCount = data.turns.filter(t => t.type === 'user').length;
   const toolTurns = data.turns.filter(t => t.type === 'tool').length;
@@ -3756,6 +3767,7 @@ function renderConv(data, meta) {
   // Source pill: modal identity tag, on the same line as conv-title
   const sourceVal = (meta?.source || data.source || 'claude');
   const SRC_PILL = {
+    devin: ['Devin Local', 'source-devin'],
     codex: ['Codex', 'source-codex'],
     antigravity: ['Antigravity', 'source-antigravity'],
     kimi: ['Kimi Code', 'source-kimi'],
@@ -3766,7 +3778,7 @@ function renderConv(data, meta) {
   // Historically this section sat at the top of body and scrolled away with the turns, so the user lost sight of the ID once scrolled into the middle
   const sizeKB = meta ? (meta.size / 1024).toFixed(1) + ' KB' : '';
   const pathBtnHtml = meta?.jsonl_path
-    ? `<button class="conv-link-btn" data-copy-path="${escapeHtml(meta.jsonl_path)}" data-tooltip="Copy JSONL path" aria-label="Copy JSONL path">${ICONS.link}</button>`
+    ? `<button class="conv-link-btn" data-copy-path="${escapeHtml(meta.jsonl_path)}" data-tooltip="Copy source reference" aria-label="Copy source reference">${ICONS.link}</button>`
     : '';
   const detailHtml = `
     <div class="conv-detail">
@@ -3784,7 +3796,7 @@ function renderConv(data, meta) {
           <div class="conv-title" title="${escapeHtml(headTitle)}">${escapeHtml(headTitle)}</div>
         </div>
         ${subtitleHtml}
-        <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} raw lines</div>
+        <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} ${data.source === 'devin' ? 'database nodes' : 'raw lines'}</div>
       </div>
       ${actionsHtml}
       ${shareHtml}
@@ -3994,7 +4006,7 @@ function renderConv(data, meta) {
   // Bind the JSONL path copy button
   head.querySelector('[data-copy-path]')?.addEventListener('click', (e) => {
     e.stopPropagation();
-    navigator.clipboard.writeText(e.currentTarget.dataset.copyPath).then(() => toast('Copied JSONL path'), () => toast('Copy failed'));
+    navigator.clipboard.writeText(e.currentTarget.dataset.copyPath).then(() => toast('Copied source reference'), () => toast('Copy failed'));
   });
 
   // Bind tool collapse events
@@ -4672,6 +4684,7 @@ if (state.q) {
 const SOURCE_FILTER_LABELS = {
   all: 'All Sessions',
   claude: 'Claude only',
+  devin: 'Devin Local only',
   codex: 'Codex only',
   antigravity: 'Antigravity only',
   kimi: 'Kimi Code only',
