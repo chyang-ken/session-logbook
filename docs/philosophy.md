@@ -94,3 +94,18 @@ HTTP anchored export share the Devin renderer. Follow returns the full current
 chain because edits and compaction can replace prior nodes. Evidence can still
 expand an old node belonging to that session. See
 [the Devin Local decision](decisions/2026-09-08-devin-local.md).
+
+
+## Session selection is shared metadata
+
+Session Logbook owns source relationships and selection hints for downstream clients.
+The CLI and HTTP selector reuse `sources/session_identity.py`; clients must not infer
+parentage or maintain a second classification registry. The selection endpoint returns
+recent primary and single-turn groups separately so a burst of automated work cannot
+crowd all other candidates out. A single user turn is useful evidence for folding likely
+automation, not proof: `interaction_kind` stays unknown, and clients can reveal the
+other group. Names and stars are not required. Explicit children are linked to their
+parent by the CLI and omitted from standalone selector candidates. Search and source
+records remain available; selection never archives, deletes, or grants permission.
+Large Claude logs are checked for a second user turn instead of treating file size as
+evidence of a conversation. The existing preview count remains backward compatible.

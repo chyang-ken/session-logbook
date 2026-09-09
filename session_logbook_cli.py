@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import server
-from sources import anchored_transcript
+from sources import anchored_transcript, session_identity
 from sources import codex as codex_source
 from sources import devin as devin_source
 from sources import kimi as kimi_source
@@ -103,32 +103,7 @@ def _claude_slug(path: Path) -> Optional[str]:
     return None
 
 
-def _relationship(path: Path, source: str) -> tuple[bool, Optional[str]]:
-    if source == "devin":
-        return False, None
-    if source == "claude":
-        if path.parent.name == "subagents":
-            return True, path.parent.parent.name
-        return False, None
-
-    if source == "kimi":
-        # <session>/agents/<agent>/wire.jsonl: any agent other than "main" is a sub-agent of that session
-        if kimi_source.is_subagent_path(path):
-            return True, kimi_source.session_id_for_path(path)
-        return False, None
-
-    meta = codex_source._read_session_meta(path) or {}
-    parent = meta.get("parent_thread_id")
-    source_info = meta.get("source")
-    is_subagent = codex_source._is_subagent(meta, path)
-    if isinstance(source_info, dict):
-        subagent = source_info.get("subagent")
-        if isinstance(subagent, dict):
-            spawn = subagent.get("thread_spawn")
-            if isinstance(spawn, dict):
-                parent = parent or spawn.get("parent_thread_id")
-    return is_subagent, parent
-
+_relationship = session_identity.relationship
 
 def session_metadata(path: Path) -> dict:
     source = detect_source(path)
@@ -155,6 +130,7 @@ def session_metadata(path: Path) -> dict:
     is_subagent, parent_id = _relationship(path, source)
     item["is_subagent"] = is_subagent
     item["parent_session_id"] = parent_id
+    item.update(session_identity.selection_metadata(item))
     if source == "claude":
         item["slug"] = _claude_slug(path)
     return item
