@@ -38,7 +38,7 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 4
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 SCAN_CACHE_BACKUP_DIR = Path.home() / ".session-logbook" / "scan-cache-backups"
 
@@ -693,6 +693,20 @@ def _extract_custom_title(jsonl_path: Path):
     return last
 
 
+def _selection_user_turn(record):
+    """Match the preview's user-turn rules without counting tool/system traffic."""
+    if record.get("type") != "user" or record.get("isMeta"):
+        return False
+    content = record.get("message", {}).get("content")
+    if isinstance(content, str):
+        return bool(content.strip()) and not _is_system_user_string(content.lstrip())
+    if isinstance(content, list):
+        return any(isinstance(b, dict) and b.get("type") == "text"
+                   and isinstance(b.get("text"), str) and b["text"].strip()
+                   and not _is_system_user_string(b["text"].lstrip()) for b in content)
+    return False
+
+
 def extract_metadata(jsonl_path: Path):
     """Read jsonl head (first user message) plus tail, then merge a conversation preview.
 
@@ -750,23 +764,28 @@ def extract_metadata(jsonl_path: Path):
     for line in lines:
         try:
             d = json.loads(line)
-        except Exception:
+        except ValueError:
             continue
-        if d.get("type") != "user":
-            continue
-        msg_content = d.get("message", {}).get("content")
-        if isinstance(msg_content, str):
-            stripped = msg_content.lstrip()
-            if stripped and not _is_system_user_string(stripped):
-                user_turn_count += 1
-        elif isinstance(msg_content, list):
-            for b in msg_content:
-                if isinstance(b, dict) and b.get("type") == "text":
-                    txt = (b.get("text") or "").lstrip()
-                    if txt and not txt.startswith("<system-reminder>"):
-                        user_turn_count += 1
-                        break
+        if _selection_user_turn(d):
+            user_turn_count += 1
+    single_turn = user_turn_count == 1
     if size > TAIL_BUFFER:
+        if user_turn_count < 2:
+            observed = 0
+            try:
+                with jsonl_path.open(encoding="utf-8", errors="replace") as full:
+                    for raw in full:
+                        try:
+                            record = json.loads(raw)
+                        except ValueError:
+                            continue
+                        if _selection_user_turn(record):
+                            observed += 1
+                            if observed >= 2:
+                                break
+                single_turn = observed == 1
+            except OSError:
+                single_turn = None
         user_turn_count = max(user_turn_count, 2)
 
     # Track separately: take the last N user and assistant messages independently
@@ -885,6 +904,7 @@ def extract_metadata(jsonl_path: Path):
         "recent_msgs": recent_msgs,
         "last_stop_reason": last_stop_reason,
         "user_turn_count": user_turn_count,
+        "single_turn": single_turn,
         "custom_title": _extract_custom_title(jsonl_path),
     }
 
@@ -2601,6 +2621,11 @@ class Handler(BaseHTTPRequestHandler):
                 _vendor_content_type(vendor_path),
                 extra_headers={"Cache-Control": "no-cache"},
             )
+
+        if path == "/api/session-choices":
+            from sources.session_identity import session_choices
+            source = (qs.get("source") or [None])[0]
+            return self._send_json(200, session_choices(enriched_sessions(), source=source))
 
         if path == "/api/sessions":
             return self._send_json(200, enriched_sessions())
