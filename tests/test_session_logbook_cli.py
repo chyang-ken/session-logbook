@@ -28,6 +28,7 @@ class SessionLogbookCliTests(unittest.TestCase):
         self.codex_root = root / "codex-sessions"
         self.codex_archived = root / "codex-archived"
         self.kimi_root = root / "kimi-home" / "sessions"
+        self.devin_root = root / "devin-data"
 
         project = self.claude_root / "-Users-alice-my-app"
         self.claude = _write_jsonl(project / "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl", [
@@ -92,6 +93,7 @@ class SessionLogbookCliTests(unittest.TestCase):
             mock.patch.object(server, "PROJECTS_DIR", self.claude_root),
             mock.patch.object(codex_source, "CODEX_ROOT", self.codex_root),
             mock.patch.object(codex_source, "CODEX_ARCHIVED_ROOT", self.codex_archived),
+            mock.patch.object(cli.devin_source, "DEVIN_ROOT", self.devin_root),
             mock.patch.object(kimi_source, "KIMI_SESSIONS_ROOT", self.kimi_root),
             mock.patch.object(kimi_source, "SESSION_INDEX_PATH", self.kimi_root.parent / "session_index.jsonl"),
             mock.patch.object(kimi_source, "_INDEX_CACHE", {"mtime": 0.0, "data": {}}),

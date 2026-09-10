@@ -40,6 +40,8 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
 CACHE_SCHEMA_VERSION = 4
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
+# Legacy timestamped backups are pruned for backward compatibility. New backups are not
+# created because this cache is derived entirely from the original session sources.
 SCAN_CACHE_BACKUP_DIR = Path.home() / ".session-logbook" / "scan-cache-backups"
 
 DASHBOARD_DIR = Path(__file__).resolve().parent
@@ -76,6 +78,10 @@ RIPGREP_FALLBACK_PATHS = (
     Path("/opt/homebrew/bin/rg"),  # Apple Silicon Homebrew GUI/background services
     Path("/usr/local/bin/rg"),    # Intel Homebrew and common local installs
 )
+# Keep explicit path arguments well below the operating system's exec limit. The session
+# corpus can contain thousands of long absolute paths; one giant argv eventually crosses
+# macOS ARG_MAX and silently forces the much slower full-Python scan.
+RIPGREP_ARG_CHUNK_BYTES = 256 * 1024 if os.name != "nt" else 24 * 1024
 
 # ---------- In-memory state ----------
 _cache = {}   # jsonl_path_str -> session meta dict
@@ -222,18 +228,16 @@ def _mark_scan_cache_dirty():
     _scan_cache_dirty = True
 
 
-def _backup_scan_cache_file():
-    """Copy the scan cache into the backup directory with a timestamp suffix and prune old backups.
+def _prune_legacy_scan_cache_backups():
+    """Age out legacy cache backups without creating more derived copies.
 
-    Same discipline as state backups: backup failure does not affect the main write, but it
-    must be reported to stderr.
+    The scan cache is fully rebuildable from original session sources, unlike state.json.
+    Timestamping every valid cache write caused active sessions to create gigabytes of copies.
+    Keep the existing 30-day expiry for already-created files, but stop write amplification.
     """
-    if not SCAN_CACHE_FILE.exists():
+    if not SCAN_CACHE_BACKUP_DIR.exists():
         return
     try:
-        SCAN_CACHE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        shutil.copy2(SCAN_CACHE_FILE, SCAN_CACHE_BACKUP_DIR / f"scan-cache-{ts}.json")
         cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
         for p in SCAN_CACHE_BACKUP_DIR.glob("scan-cache-*.json"):
             try:
@@ -242,7 +246,7 @@ def _backup_scan_cache_file():
             except OSError:
                 pass
     except Exception as e:
-        print(f"[warn] backup failed (scan cache still saved): {e}", file=sys.stderr)
+        print(f"[warn] legacy scan-cache backup cleanup failed: {e}", file=sys.stderr)
 
 
 def _scan_cache_payload():
@@ -331,7 +335,7 @@ def save_scan_cache():
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(SCAN_CACHE_FILE)
         _scan_cache_dirty = False
-        _backup_scan_cache_file()
+        _prune_legacy_scan_cache_backups()
         return True
     except Exception as e:
         print(f"[warn] failed to save scan cache to {SCAN_CACHE_FILE}: {e}", file=sys.stderr)
@@ -2043,21 +2047,41 @@ def _rg_prefilter(terms, paths):
     candidate = None  # None = unconstrained so far; intersect per term to implement AND
     for term in terms:
         # -i is case-insensitive and -F is literal matching, aligned with _search_session lower()+substring semantics
-        cmd = [rg_executable, "-l", "-i", "-F", "--no-messages", "--", term, *path_strs]
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=20)
-        except subprocess.TimeoutExpired:
-            _warn_search_fallback("ripgrep prefilter timed out")
-            return None
-        except (FileNotFoundError, OSError) as e:
-            _warn_search_fallback(f"ripgrep prefilter could not start ({type(e).__name__})")
-            return None  # includes ARG_MAX overflow (E2BIG); fall back to full scan
-        # rg exit codes: 0=matches, 1=no matches (both normal), >=2=real error
-        if r.returncode not in (0, 1):
-            _warn_search_fallback(f"ripgrep prefilter exited with status {r.returncode}")
-            return None
-        hit = {ln for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln}
-        candidate = hit if candidate is None else (candidate & hit)
+        fixed = [rg_executable, "-l", "-i", "-F", "--no-messages", "--", term]
+        fixed_bytes = sum(len(os.fsencode(arg)) + 1 for arg in fixed)
+        batches = []
+        batch = []
+        batch_bytes = fixed_bytes
+        for path_str in path_strs:
+            arg_bytes = len(os.fsencode(path_str)) + 1
+            if batch and batch_bytes + arg_bytes > RIPGREP_ARG_CHUNK_BYTES:
+                batches.append(batch)
+                batch = []
+                batch_bytes = fixed_bytes
+            batch.append(path_str)
+            batch_bytes += arg_bytes
+        if batch:
+            batches.append(batch)
+
+        term_hits = set()
+        for path_batch in batches:
+            cmd = [*fixed, *path_batch]
+            try:
+                r = subprocess.run(cmd, capture_output=True, timeout=20)
+            except subprocess.TimeoutExpired:
+                _warn_search_fallback("ripgrep prefilter timed out")
+                return None
+            except (FileNotFoundError, OSError) as e:
+                _warn_search_fallback(f"ripgrep prefilter could not start ({type(e).__name__})")
+                return None
+            # rg exit codes: 0=matches, 1=no matches (both normal), >=2=real error
+            if r.returncode not in (0, 1):
+                _warn_search_fallback(f"ripgrep prefilter exited with status {r.returncode}")
+                return None
+            term_hits.update(
+                ln for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln
+            )
+        candidate = term_hits if candidate is None else (candidate & term_hits)
         if not candidate:
             break  # one term already has no intersection, so AND result is empty
     return candidate or set()
