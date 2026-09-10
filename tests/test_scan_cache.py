@@ -79,6 +79,7 @@ class TestScanCachePersistence(ScanCacheTestCase):
 
                 server._scan_cache_dirty = True
                 self.assertTrue(server.save_scan_cache())
+                self.assertFalse((root / "backups").exists())
 
                 server._cache.clear()
                 server._CWD_TRUTH_MAP.clear()

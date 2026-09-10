@@ -40,6 +40,8 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
 CACHE_SCHEMA_VERSION = 4
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
+# Legacy timestamped backups are pruned for backward compatibility. New backups are not
+# created because this cache is derived entirely from the original session sources.
 SCAN_CACHE_BACKUP_DIR = Path.home() / ".session-logbook" / "scan-cache-backups"
 
 DASHBOARD_DIR = Path(__file__).resolve().parent
@@ -226,18 +228,16 @@ def _mark_scan_cache_dirty():
     _scan_cache_dirty = True
 
 
-def _backup_scan_cache_file():
-    """Copy the scan cache into the backup directory with a timestamp suffix and prune old backups.
+def _prune_legacy_scan_cache_backups():
+    """Age out legacy cache backups without creating more derived copies.
 
-    Same discipline as state backups: backup failure does not affect the main write, but it
-    must be reported to stderr.
+    The scan cache is fully rebuildable from original session sources, unlike state.json.
+    Timestamping every valid cache write caused active sessions to create gigabytes of copies.
+    Keep the existing 30-day expiry for already-created files, but stop write amplification.
     """
-    if not SCAN_CACHE_FILE.exists():
+    if not SCAN_CACHE_BACKUP_DIR.exists():
         return
     try:
-        SCAN_CACHE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        shutil.copy2(SCAN_CACHE_FILE, SCAN_CACHE_BACKUP_DIR / f"scan-cache-{ts}.json")
         cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
         for p in SCAN_CACHE_BACKUP_DIR.glob("scan-cache-*.json"):
             try:
@@ -246,7 +246,7 @@ def _backup_scan_cache_file():
             except OSError:
                 pass
     except Exception as e:
-        print(f"[warn] backup failed (scan cache still saved): {e}", file=sys.stderr)
+        print(f"[warn] legacy scan-cache backup cleanup failed: {e}", file=sys.stderr)
 
 
 def _scan_cache_payload():
@@ -335,7 +335,7 @@ def save_scan_cache():
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(SCAN_CACHE_FILE)
         _scan_cache_dirty = False
-        _backup_scan_cache_file()
+        _prune_legacy_scan_cache_backups()
         return True
     except Exception as e:
         print(f"[warn] failed to save scan cache to {SCAN_CACHE_FILE}: {e}", file=sys.stderr)
