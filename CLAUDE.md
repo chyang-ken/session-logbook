@@ -232,6 +232,11 @@ feature branch ──PR──► staging ──deploy──► maintainer's mach
   `main` is branch-protected and merging it is a separate decision.
 - **Versioned GitHub releases** (`vX.Y.Z`, see CONTRIBUTING "Maintainer releases") remain a
   separate, optional step taken from `main` after a promotion.
+- **Planning is a local human-decision overlay.** Before proposing or taking a release action,
+  read `_private/RELEASE-PLAN.md` when it exists. It records only the current intent, exclusions,
+  temporary exceptions, and next human gate. Git refs, deployed tags, pull requests, and
+  `release_flow.py` remain the sources for live facts. A missing or stale plan grants no authority,
+  and updating the plan never authorizes a release action.
 
 Rollback is per layer: the local machine goes back by checking out an earlier `deployed/*` tag and
 restarting; a bad feature on `staging` is reverted with a new commit through a PR (never by
