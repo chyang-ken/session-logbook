@@ -27,6 +27,7 @@ class SessionLogbookCliTests(unittest.TestCase):
         self.claude_root = root / "claude-projects"
         self.codex_root = root / "codex-sessions"
         self.codex_archived = root / "codex-archived"
+        self.codex_index = root / "session_index.jsonl"
         self.kimi_root = root / "kimi-home" / "sessions"
         self.devin_root = root / "devin-data"
 
@@ -62,6 +63,14 @@ class SessionLogbookCliTests(unittest.TestCase):
                     "type": "task_complete"}},
             ],
         )
+        self.codex_index.write_text(
+            json.dumps({
+                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "thread_name": "Codex Launch Review",
+                "updated_at": "2026-08-20T10:00:04Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
 
         kimi_session = self.kimi_root / "wd_third-app_0123456789ab" / "session_cccccccc-cccc-cccc-cccc-cccccccccccc"
         (kimi_session).mkdir(parents=True)
@@ -93,6 +102,8 @@ class SessionLogbookCliTests(unittest.TestCase):
             mock.patch.object(server, "PROJECTS_DIR", self.claude_root),
             mock.patch.object(codex_source, "CODEX_ROOT", self.codex_root),
             mock.patch.object(codex_source, "CODEX_ARCHIVED_ROOT", self.codex_archived),
+            mock.patch.object(codex_source, "SESSION_INDEX_PATH", self.codex_index),
+            mock.patch.object(codex_source, "_INDEX_CACHE", {"mtime_ns": None, "data": {}}),
             mock.patch.object(cli.devin_source, "DEVIN_ROOT", self.devin_root),
             mock.patch.object(kimi_source, "KIMI_SESSIONS_ROOT", self.kimi_root),
             mock.patch.object(kimi_source, "SESSION_INDEX_PATH", self.kimi_root.parent / "session_index.jsonl"),
@@ -184,6 +195,12 @@ class SessionLogbookCliTests(unittest.TestCase):
         self.assertEqual(status["next_cursor"], "L4")
         self.assertEqual(status["explicit_terminal"], "complete")
         self.assertEqual(status["liveness"], "unknown")
+
+    def test_codex_title_search_uses_external_index_metadata(self):
+        hits = cli.search_sessions("Codex Launch Review", source="codex")
+        self.assertEqual([hit["id"] for hit in hits],
+                         ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"])
+        self.assertEqual(hits[0]["snippets"][0]["role"], "title")
 
     def test_kimi_search_status_and_context(self):
         hits = cli.search_sessions("rotation scheduled", source="kimi")

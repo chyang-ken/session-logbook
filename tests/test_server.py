@@ -144,6 +144,32 @@ class TestRipgrepDiscovery(unittest.TestCase):
             self.assertIsNone(server._rg_prefilter(["needle"], [Path("session.jsonl")]))
         self.assertIn("exited with status 2", stderr.getvalue())
 
+class TestSessionSearch(unittest.TestCase):
+    def test_title_only_metadata_hit_bypasses_transcript_prefilter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(
+                json.dumps({
+                    "type": "user",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {"content": "unrelated transcript text"},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            meta = {
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "jsonl_path": str(path),
+                "mtime": path.stat().st_mtime,
+                "custom_title": "Codex Launch Review",
+            }
+            with mock.patch.object(server, "_cache", {str(path): meta}), \
+                    mock.patch.object(server, "_rg_prefilter", return_value=set()):
+                results = server.search_sessions("Codex Launch Review")
+
+        self.assertEqual([result["id"] for result in results], [meta["id"]])
+        self.assertEqual(results[0]["snippets"][0]["text"],
+                         "Session title: Codex Launch Review")
+
 
 class TestComputeScope(unittest.TestCase):
     def setUp(self):

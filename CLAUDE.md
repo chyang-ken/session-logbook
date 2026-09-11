@@ -100,7 +100,7 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 |---|---|---|
 | `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, scope, archived, archived_at, starred, starred_at, note}]` |
 | `GET /api/session-choices?source=claude` | optional source | Recent primary and single-turn candidates (up to 100 each); shared relationship and selection hints, title and recent user preview. No authorization changes. |
-| `GET /api/search?q=…` | multi-word = AND; session ID matches too | `[{id, snippets:[{text, role, term}]}]` |
+| `GET /api/search?q=…` | multi-word = AND; session title and ID match too | `[{id, snippets:[{text, role, term}]}]` |
 | `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` |
 | `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
 | `GET /api/sessions/:id/anchored` | — | Plain-text transcript with `[L#]` original-line anchors (for agents to read / download) |

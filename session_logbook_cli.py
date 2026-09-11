@@ -257,9 +257,31 @@ def search_sessions(
     paths = _candidate_paths(source, include_subagents)
 
     prefiltered = server._rg_prefilter(terms, paths)
+    # Codex titles usually live outside transcript files, so ripgrep cannot see them.
+    # Resolve only title-matching Codex IDs here; all other paths retain the cheap transcript
+    # prefilter and avoid full metadata parsing.
+    codex_title_ids = set()
+    if role == "any" and source in (None, "codex"):
+        codex_title_ids = {
+            session_id
+            for session_id, title in codex_source.session_index_titles().items()
+            if any(term in title.lower() for term in terms)
+        }
+    title_prefiltered = set()
+    if codex_title_ids:
+        for path in paths:
+            if not codex_source.is_codex_path(path):
+                continue
+            session_id = (codex_source._read_session_meta(path) or {}).get("id")
+            if session_id in codex_title_ids:
+                title_prefiltered.add(str(path))
+
     results = []
     for path in paths:
-        if not devin_source.is_devin_path(path) and prefiltered is not None and str(path) not in prefiltered:
+        if (not devin_source.is_devin_path(path)
+                and prefiltered is not None
+                and str(path) not in prefiltered
+                and str(path) not in title_prefiltered):
             continue
         try:
             item = session_metadata(path)
@@ -282,6 +304,9 @@ def search_sessions(
 
         found = set(metadata_terms)
         snippets = []
+        custom_title = str(item.get("custom_title") or "")
+        if role == "any" and any(term in custom_title.lower() for term in terms):
+            snippets.append({"role": "title", "line": None, "text": custom_title})
         try:
             for line_number, message_role, text in iter_messages(path, item["source"]):
                 if not text or message_role is None:

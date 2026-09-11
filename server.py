@@ -38,7 +38,7 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 4
+CACHE_SCHEMA_VERSION = 5
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -73,6 +73,8 @@ BRIEF_TIMEOUT_SEC = 180  # claude -p call timeout; measured ~10-15s, leaving 12x
 # Search
 SEARCH_SNIPPET_CONTEXT = 60   # how many characters to take on each side of a match
 SEARCH_MAX_SNIPPETS = 3       # max snippets returned per session
+# Keep each ripgrep argv comfortably below macOS ARG_MAX. Session paths can be long, and
+# several thousand of them otherwise make subprocess startup fail with E2BIG.
 MAX_JSON_BODY = 1024 * 1024   # local state updates should never need more than 1 MiB
 RIPGREP_FALLBACK_PATHS = (
     Path("/opt/homebrew/bin/rg"),  # Apple Silicon Homebrew GUI/background services
@@ -99,6 +101,10 @@ _state_loaded = False
 _CWD_TRUTH_MAP = {}    # encoded_dir_name -> real_cwd
 _CWD_INDEX_SEEN = set()  # jsonl_path_str values already peeked; reused by incremental scanning
 _CWD_SEQ = {}  # jsonl_path_str -> list[str] order-preserving deduped cwd sequence for pick_project_path
+# Codex stores most session titles outside each transcript. Persist the index version with
+# the scan cache so a rename can invalidate cached metadata even when the transcript mtime
+# itself does not change.
+_codex_session_index_mtime_ns = None
 # Mark dirty only when scanning actually changes the cache; frequent /api/sessions polling must not write repeatedly.
 _scan_cache_dirty = False
 
@@ -256,6 +262,7 @@ def _scan_cache_payload():
         "cwd_truth_map": _CWD_TRUTH_MAP,
         "cwd_index_seen": sorted(_CWD_INDEX_SEEN),
         "cwd_seq": _CWD_SEQ,
+        "codex_session_index_mtime_ns": _codex_session_index_mtime_ns,
     }
 
 
@@ -268,6 +275,7 @@ def _validate_scan_cache_payload(payload):
     truth = payload.get("cwd_truth_map")
     seen = payload.get("cwd_index_seen")
     seq = payload.get("cwd_seq")
+    codex_index_mtime = payload.get("codex_session_index_mtime_ns")
     if not isinstance(cache, dict):
         return False, "cache is not an object"
     if not isinstance(truth, dict) or not all(
@@ -283,12 +291,15 @@ def _validate_scan_cache_payload(payload):
         for k, v in seq.items()
     ):
         return False, "cwd_seq is not a string-list map"
+    if codex_index_mtime is not None and not isinstance(codex_index_mtime, int):
+        return False, "codex_session_index_mtime_ns is not an integer or null"
     return True, ""
 
 
 def load_scan_cache():
     """Restore the warm scan cache from disk. Any failure returns False so the caller falls back to a full scan."""
-    global _cache, _CWD_TRUTH_MAP, _CWD_INDEX_SEEN, _CWD_SEQ, _scan_cache_dirty
+    global _cache, _CWD_TRUTH_MAP, _CWD_INDEX_SEEN, _CWD_SEQ
+    global _codex_session_index_mtime_ns, _scan_cache_dirty
     if not SCAN_CACHE_FILE.exists():
         return False
     try:
@@ -314,6 +325,7 @@ def load_scan_cache():
     _CWD_TRUTH_MAP = dict(payload["cwd_truth_map"])
     _CWD_INDEX_SEEN = set(payload["cwd_index_seen"])
     _CWD_SEQ = {k: list(v) for k, v in payload["cwd_seq"].items()}
+    _codex_session_index_mtime_ns = payload["codex_session_index_mtime_ns"]
     _DECODE_DIR_CACHE.clear()
     _scan_cache_dirty = False
     return True
@@ -1669,6 +1681,7 @@ def compute_scope(session_meta, state_entry, now=None):
 # ---------- Scanning ----------
 def scan_sessions(force=False):
     """Scan all Claude + Codex sessions, update cache incrementally, and return items by descending mtime."""
+    global _codex_session_index_mtime_ns
     if force:
         if _cache or _CWD_TRUTH_MAP or _CWD_INDEX_SEEN or _CWD_SEQ:
             _mark_scan_cache_dirty()
@@ -1705,6 +1718,9 @@ def scan_sessions(force=False):
                         _mark_scan_cache_dirty()
 
     # --- Codex paths ---
+    current_codex_index_mtime_ns = codex_source.session_index_mtime_ns()
+    codex_titles_changed = current_codex_index_mtime_ns != _codex_session_index_mtime_ns
+    codex_index_titles = codex_source.session_index_titles() if codex_titles_changed else {}
     codex_seen = set()
     for jsonl_path in codex_source.scan_sessions():
         key = str(jsonl_path)
@@ -1719,6 +1735,20 @@ def scan_sessions(force=False):
             if meta and _cache.get(key) != meta:
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
+
+        # Most Codex titles live only in session_index.jsonl. Refresh just that cached field
+        # when the roster changes instead of reparsing every transcript on every new title.
+        cached = _cache.get(key)
+        indexed_title = codex_index_titles.get((cached or {}).get("id"))
+        if indexed_title and cached.get("custom_title") != indexed_title:
+            updated = dict(cached)
+            updated["custom_title"] = indexed_title
+            _cache[key] = updated
+            _mark_scan_cache_dirty()
+
+    if codex_titles_changed:
+        _codex_session_index_mtime_ns = current_codex_index_mtime_ns
+        _mark_scan_cache_dirty()
 
     # --- Antigravity paths ---
     ag_seen = set()
@@ -1900,7 +1930,7 @@ def _find_ripgrep():
     return None
 
 
-def _search_session(jsonl_path: Path, terms: list[str]):
+def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = None):
     """Full-text search one session by scanning user/assistant messages and returning snippets.
 
     terms is a lowercase search-term list with AND semantics: every term must appear in the
@@ -1937,9 +1967,17 @@ def _search_session(jsonl_path: Path, terms: list[str]):
     id_lower = session_id.lower()
     id_hit = any(t in id_lower for t in terms)
 
-    # 2) Scan JSONL and collect all text lines
+    # 2) Titles are metadata, and Codex commonly stores them only in the separate
+    # session_index.jsonl roster. Seed the match before scanning transcript messages.
+    custom_title = str((session_meta or {}).get("custom_title") or "")
+    title_lower = custom_title.lower()
+    title_terms = {term for term in terms if term in title_lower}
     snippets = []
-    term_found = set()  # track which terms were found
+    if title_terms:
+        snippets.append({"text": f"Session title: {custom_title}", "role": "", "term": ""})
+    term_found = set(title_terms)  # track terms found in title or message text
+    if len(term_found) == len(terms):
+        return snippets
 
     # Cheap line-level prefilter: substring-match the raw line first and skip expensive
     # json.loads for lines that cannot match. Body text is contained in the raw line, so if
@@ -2118,9 +2156,10 @@ def search_sessions(query: str):
             # (id=stem) and Codex (id in meta). Prefer one extra downstream check over skipping
             # a true hit.
             id_blob = (meta.get("id", "") + " " + jsonl_path.stem).lower()
-            if not any(t in id_blob for t in terms):
+            title_blob = str(meta.get("custom_title") or "").lower()
+            if not any(t in id_blob or t in title_blob for t in terms):
                 continue
-        snippets = _search_session(jsonl_path, terms)
+        snippets = _search_session(jsonl_path, terms, meta)
         if snippets:
             results.append({"id": meta["id"], "snippets": snippets})
 
