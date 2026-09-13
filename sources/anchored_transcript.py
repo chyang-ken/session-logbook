@@ -12,10 +12,11 @@ content are reduced. An agent can use `[L#]` to recover any hidden detail from t
 Two sources:
 - `render_claude(path)` — Claude Code session jsonl (`~/.claude/projects/...`)
 - `render_codex(path)`  — Codex rollout jsonl (`~/.codex/sessions/...`)
+- `render_hermes(pseudo_path)` — Hermes Agent session (`~/.hermes/state.db#<session id>`)
 
-Both produce the **same anchored-transcript format**. The module has zero heavy dependencies
-(only json/re) and is the single source of truth behind the server's `/anchored` download
-endpoint.
+All produce the **same anchored-transcript format**. The module has zero heavy dependencies
+(only json/re; sqlite3 is imported lazily for the Hermes store) and is the single source of
+truth behind the server's `/anchored` download endpoint.
 
 ⚠ Note when changing this: any downstream that reads the anchored transcript depends on its
 **verbatim output** (truncation constants, anchor format, injection-filtering rules). Verify
@@ -47,17 +48,28 @@ def digest_header(jsonl_path, source="claude") -> str:
     See docs/handoffs/2026-06-11-anchored-render-to-service-layer.md.
     """
     label = "Codex" if source == "codex" else "Claude Code"
+    source_line = f"# │ SOURCE (full, authoritative): {jsonl_path}"
+    expand_line = "# │ To expand any point, open that file at the cited [L#] line."
+    anchor_line = "# │   [L<n>]                 line <n> in the SOURCE jsonl above — go there for full content"
+    if source == "hermes":
+        # Hermes has no jsonl: the authoritative source is a SQLite store, and [L#]
+        # cites the messages row id (Hermes' stable per-message coordinate).
+        db_str, sid = _hermes_source_ref(jsonl_path)
+        label = "Hermes Agent"
+        source_line = f"# │ SOURCE (full, authoritative): {db_str} — SQLite store, session {sid}, messages table"
+        expand_line = "# │ To expand any point, read the messages row with the cited id [L#] from that store."
+        anchor_line = "# │   [L<n>]                 messages row id <n> in the SOURCE store — go there for full content"
     lines = [
         "# ┌─ COMPACT SESSION DIGEST ─────────────────────────────────────────",
         f"# │ Navigable transcript of a {label} session. User and Assistant messages",
         "# │ are complete. Tool targets and command prefixes stay visible; successful",
         "# │ result bodies collapse to status/size and remain expandable by [L#].",
         "# │",
-        f"# │ SOURCE (full, authoritative): {jsonl_path}",
-        "# │ To expand any point, open that file at the cited [L#] line.",
+        source_line,
+        expand_line,
         "# │",
         "# │ ANCHORS",
-        "# │   [L<n>]                 line <n> in the SOURCE jsonl above — go there for full content",
+        anchor_line,
         "# │   [U<n>]                 the <n>-th real user turn",
         "# │   …[+N chars truncated]  N more chars exist at that [L<n>] in the source",
         "# │ MARKERS",
@@ -389,4 +401,67 @@ def render_codex(path) -> str:
                 # the remaining event_msg (token_count/agent_message/user_message/task_*) are redundant with response_item, skip
             elif t == 'compacted':
                 o_lines.append(f"[L{ln}] [COMPACTED SUMMARY]")
+    return "\n".join(o_lines)
+
+
+# ───────────────────────── Hermes Agent ─────────────────────────
+
+def _hermes_source_ref(pseudo_path):
+    """Split a Hermes pseudo-path into (state.db path, session id). Never raises."""
+    from sources import hermes as hermes_source
+    parsed = hermes_source.split_pseudo(pseudo_path)
+    if parsed is None:
+        return str(pseudo_path), ""
+    return str(parsed[0]), parsed[1]
+
+
+def render_hermes(pseudo_path) -> str:
+    """Hermes Agent session (state.db#id) → anchored-transcript string in the same format.
+
+    Hermes differences: messages live in one SQLite store in chat-completions shape
+    (assistant `tool_calls` JSON, `tool` rows carrying results); there are no physical
+    lines, so [L#] cites the messages row id — the stable coordinate the `evidence`
+    command expands from. Reasoning keeps the leading 1400 chars, like Claude's think
+    lines.
+    """
+    from sources import hermes as hermes_source
+
+    rows = hermes_source.read_rows(pseudo_path)
+    if rows is None:
+        return ""
+    uturn = 0
+    o_lines = []
+    for row in rows:
+        lid = row.get("id")
+        ts = (hermes_source._ts_iso(row.get("timestamp")) or "")[:19]
+        role = row.get("role")
+        content = row.get("content")
+        if role == "user":
+            text = str(content or "").strip()
+            if not text:
+                continue
+            uturn += 1
+            o_lines.append("")
+            o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{lid}] USER {ts} ━━━━━━━━━━")
+            o_lines.append(text)
+        elif role == "assistant":
+            text = str(content or "").strip()
+            if text:
+                o_lines.append(f"[L{lid}] ASSISTANT: {text}")
+            think = row.get("reasoning")
+            if isinstance(think, str) and think.strip():
+                o_lines.append(f"[L{lid}]   💭 THINK: {trunc(think.strip(), 1400)}")
+            for call in hermes_source._parse_tool_calls(row.get("tool_calls")):
+                nm = call["name"]
+                o_lines.append(
+                    f"[L{lid}]   🔧 {nm}: "
+                    f"{hermes_source._tool_input_summary(nm, call['arguments'])}"
+                )
+        elif role == "tool":
+            body = hermes_source._normalize_tool_content(content)
+            is_error = hermes_source._result_is_error(content)
+            status = 'ERROR' if is_error else 'OK'
+            o_lines.append(
+                f"[L{lid}]   ⮑ TOOL_RESULT {status}: {_result_index(body, is_error)}"
+            )
     return "\n".join(o_lines)

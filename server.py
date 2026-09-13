@@ -16,6 +16,7 @@ from pathlib import Path
 from sources import antigravity as ag_source
 from sources import anchored_transcript
 from sources import codex as codex_source
+from sources import hermes as hermes_source
 
 # ---------- Config ----------
 HOST = "127.0.0.1"
@@ -1539,12 +1540,17 @@ def _find_jsonl(session_id):
     order can otherwise open the wrong modal. See _dedup_by_id.
 
     Codex fallback covers standalone-tab cold starts (`/?session=<id>`) where _cache has not
-    been populated yet but the Codex session can be found on disk.
+    been populated yet but the Codex session can be found on disk. Hermes sessions have no
+    file: they resolve to a `state.db#id` pseudo-path whose "existence" is a row in the store.
     """
     candidates = [m for m in _cache.values() if m.get('id') == session_id]
     candidates.sort(key=lambda m: m.get('size', 0), reverse=True)
     for meta in candidates:
         p = Path(meta['jsonl_path'])
+        if hermes_source.is_hermes_path(p):
+            if hermes_source.pseudo_exists(p):
+                return p
+            continue
         if p.exists():
             return p
     # Claude filesystem fallback
@@ -1573,6 +1579,11 @@ def _find_jsonl(session_id):
     ag_tp = ag_source.AG_BRAIN / session_id / ".system_generated" / "logs" / "transcript.jsonl"
     if ag_tp.exists():
         return ag_tp
+    # Hermes store fallback: resolve the id directly against state.db (and profile
+    # stores), so a cold start with an empty cache still works.
+    hermes_pseudo = hermes_source.find_pseudo_by_id(session_id)
+    if hermes_pseudo is not None:
+        return Path(hermes_pseudo)
     return None
 
 
@@ -1580,16 +1591,18 @@ def _find_jsonl(session_id):
 def _effective_archived(session_meta, state_entry):
     """Final archived decision for a session.
 
-    Priority: explicit archived value in dashboard state > codex_archived derived from Codex
-    file location. If the user never touched archive state in the dashboard, fall back to
-    codex_archived so sessions archived in Codex land in Archived by default. If the user
-    manually archives or unarchives in the dashboard, the explicit True/False state overrides
-    the derived value, so manually unarchiving a Codex-archived session keeps it active.
+    Priority: explicit archived value in dashboard state > source-derived archived
+    (Codex file location / Hermes archive flag). If the user never touched archive state
+    in the dashboard, fall back to the derived value so sessions archived in their agent
+    land in Archived by default. If the user manually archives or unarchives in the
+    dashboard, the explicit True/False state overrides the derived value, so manually
+    unarchiving a source-archived session keeps it active.
     """
     entry = state_entry or {}
     if "archived" in entry:
         return bool(entry["archived"])
-    return bool((session_meta or {}).get("codex_archived"))
+    meta = session_meta or {}
+    return bool(meta.get("codex_archived")) or bool(meta.get("hermes_archived"))
 
 
 def compute_scope(session_meta, state_entry, now=None):
@@ -1614,7 +1627,7 @@ def compute_scope(session_meta, state_entry, now=None):
 
 # ---------- Scanning ----------
 def scan_sessions(force=False):
-    """Scan all Claude + Codex sessions, update cache incrementally, and return items by descending mtime."""
+    """Scan all Claude + Codex + Antigravity + Hermes sessions, update cache incrementally, and return items by descending mtime."""
     if force:
         if _cache or _CWD_TRUTH_MAP or _CWD_INDEX_SEEN or _CWD_SEQ:
             _mark_scan_cache_dirty()
@@ -1682,6 +1695,29 @@ def scan_sessions(force=False):
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
 
+    # --- Hermes store (SQLite; see sources/hermes.py). There are no files to walk:
+    # the listing query yields one entry per session with its own mtime, and only
+    # changed sessions are re-extracted. A failed scan (missing or locked store)
+    # must not look like "every Hermes session disappeared", so stale-key cleanup
+    # below is gated on hermes_scan_ok.
+    hermes_seen = set()
+    hermes_scan_ok = False
+    try:
+        hermes_listings = hermes_source.list_sessions()
+        hermes_scan_ok = True
+    except Exception as e:
+        hermes_listings = []
+        print(f"[warn] Hermes scan failed: {e}", file=sys.stderr)
+    for listing in hermes_listings:
+        key = listing["jsonl_path"]
+        hermes_seen.add(key)
+        cached = _cache.get(key)
+        if force or cached is None or cached.get("mtime") != listing.get("mtime"):
+            meta = hermes_source.extract_metadata(key)
+            if meta and _cache.get(key) != meta:
+                _cache[key] = meta
+                _mark_scan_cache_dirty()
+
     # --- Clean stale cache keys per root prefix so sources do not delete each other. ---
     # Codex uses is_codex_path to recognize both roots (sessions + archived_sessions); otherwise
     # stale keys under the archived root would never be removed because they are not under CODEX_ROOT.
@@ -1697,6 +1733,9 @@ def scan_sessions(force=False):
             del _cache[p]
             _mark_scan_cache_dirty()
         elif p.startswith(ag_root_str) and p not in ag_seen:
+            del _cache[p]
+            _mark_scan_cache_dirty()
+        elif hermes_scan_ok and hermes_source.is_hermes_path(p) and p not in hermes_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
     for p in list(_CWD_SEQ.keys()):
@@ -1966,14 +2005,33 @@ def search_sessions(query: str):
     # (key, meta) list matching the original traversal order
     ordered = sorted(_cache.items(), key=lambda kv: kv[1].get("mtime", 0), reverse=True)
 
-    # ripgrep prefilter: select files whose content contains every term and skip expensive
-    # per-line JSON parsing for the rest. prefiltered=None means rg is unavailable, so scan
-    # every file as before.
-    prefiltered = _rg_prefilter(terms, [Path(m["jsonl_path"]) for _, m in ordered])
+    # ripgrep prefilter: file-backed sources only. Hermes rows live inside SQLite, so
+    # those sessions are searched with SQL LIKE in hermes_source.search_session().
+    file_paths = [
+        Path(m["jsonl_path"])
+        for _, m in ordered
+        if not hermes_source.is_hermes_path(m["jsonl_path"])
+    ]
+    prefiltered = _rg_prefilter(terms, file_paths)
 
     results = []
     for key, meta in ordered:
         jsonl_path = Path(meta["jsonl_path"])
+        if hermes_source.is_hermes_path(jsonl_path):
+            hits = hermes_source.search_session(jsonl_path, terms)
+            if hits["snippets"]:
+                results.append({
+                    "id": meta["id"],
+                    "snippets": [
+                        {
+                            "text": h["text"],
+                            "role": "you" if h["role"] == "user" else "",
+                            "term": h["term"],
+                        }
+                        for h in hits["snippets"]
+                    ],
+                })
+            continue
         if not jsonl_path.exists():
             continue
         if prefiltered is not None and str(jsonl_path) not in prefiltered:
@@ -2542,6 +2600,8 @@ class Handler(BaseHTTPRequestHandler):
                     conv = codex_source.extract_conversation(jsonl)
                 elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
                     conv = ag_source.extract_conversation(jsonl)
+                elif hermes_source.is_hermes_path(jsonl):
+                    conv = hermes_source.extract_conversation(jsonl)
                 else:
                     conv = extract_conversation(jsonl)
                 return self._send_json(200, conv)
@@ -2559,21 +2619,29 @@ class Handler(BaseHTTPRequestHandler):
                     text = codex_source.extract_transcript(jsonl)
                 elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
                     text = ag_source.extract_transcript(jsonl)
+                elif hermes_source.is_hermes_path(jsonl):
+                    text = hermes_source.extract_transcript(jsonl)
                 else:
                     text = extract_transcript(jsonl)
                 brief_param = (qs.get('brief') or ['0'])[0].lower()
                 headers = {}
                 if brief_param in ('1', 'true', 'yes'):
-                    brief, status, when = get_or_generate_brief(sid, jsonl, text)
-                    text = (
-                        "=== HANDOFF BRIEFING (generated by claude -p) ===\n"
-                        f"{brief}\n"
-                        "=== /BRIEFING ===\n\n"
-                        "=== RAW TRANSCRIPT (compact) ===\n"
-                        f"{text}"
-                    )
-                    headers['X-Brief-Status'] = status
-                    headers['X-Brief-Generated-At'] = when
+                    if hermes_source.is_hermes_path(jsonl):
+                        # The brief generator keys its cache on the source file's
+                        # size/mtime; a Hermes session has no file to stat, so serve
+                        # the raw transcript and tell the caller no briefing was added.
+                        headers['X-Brief-Status'] = 'unsupported'
+                    else:
+                        brief, status, when = get_or_generate_brief(sid, jsonl, text)
+                        text = (
+                            "=== HANDOFF BRIEFING (generated by claude -p) ===\n"
+                            f"{brief}\n"
+                            "=== /BRIEFING ===\n\n"
+                            "=== RAW TRANSCRIPT (compact) ===\n"
+                            f"{text}"
+                        )
+                        headers['X-Brief-Status'] = status
+                        headers['X-Brief-Generated-At'] = when
                 return self._send_bytes(
                     200, text, "text/plain; charset=utf-8",
                     extra_headers=headers,
@@ -2600,6 +2668,9 @@ class Handler(BaseHTTPRequestHandler):
                 if codex_source.is_codex_path(jsonl):
                     src = "codex"
                     body = anchored_transcript.render_codex(jsonl)
+                elif hermes_source.is_hermes_path(jsonl):
+                    src = "hermes"
+                    body = anchored_transcript.render_hermes(jsonl)
                 else:
                     src = "claude"
                     body = anchored_transcript.render_claude(jsonl)

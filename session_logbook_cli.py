@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only command-line access to local Claude Code and Codex sessions.
+"""Read-only command-line access to local Claude Code, Codex, and Hermes sessions.
 
 This is the stable Agent-facing surface for Session Logbook. It reuses the
 dashboard's source adapters and anchored renderer, but does not require the web
@@ -19,9 +19,10 @@ from typing import Iterable, Optional
 import server
 from sources import anchored_transcript
 from sources import codex as codex_source
+from sources import hermes as hermes_source
 
 
-SUPPORTED_SOURCES = ("claude", "codex")
+SUPPORTED_SOURCES = ("claude", "codex", "hermes")
 ANCHOR_RE = re.compile(r"\[L(\d+)\]")
 
 
@@ -50,6 +51,8 @@ def _under(path: Path, root: Path) -> bool:
 
 def detect_source(path: Path) -> Optional[str]:
     """Identify a supported transcript by root first, then by its first records."""
+    if hermes_source.is_hermes_path(path):
+        return "hermes"
     if codex_source.is_codex_path(path):
         return "codex"
     if _under(path, server.PROJECTS_DIR):
@@ -100,6 +103,11 @@ def _relationship(path: Path, source: str) -> tuple[bool, Optional[str]]:
             return True, path.parent.parent.name
         return False, None
 
+    if source == "hermes":
+        # Delegated work runs inside the parent session's message stream, so there is
+        # no separate subagent transcript to relate; no lineage is exposed yet.
+        return False, None
+
     meta = codex_source._read_session_meta(path) or {}
     parent = meta.get("parent_thread_id")
     source_info = meta.get("source")
@@ -120,6 +128,8 @@ def session_metadata(path: Path) -> dict:
 
     if source == "codex":
         meta = codex_source.extract_metadata(path)
+    elif source == "hermes":
+        meta = hermes_source.extract_metadata(path)
     else:
         meta = server.extract_metadata(path)
     if not meta:
@@ -127,7 +137,9 @@ def session_metadata(path: Path) -> dict:
 
     item = dict(meta)
     item["source"] = source
-    item["jsonl_path"] = str(path.resolve())
+    # Hermes sessions are addressed by a `state.db#id` pseudo-path; it is already
+    # absolute, so there is no file path to resolve.
+    item["jsonl_path"] = str(path) if source == "hermes" else str(path.resolve())
     is_subagent, parent_id = _relationship(path, source)
     item["is_subagent"] = is_subagent
     item["parent_session_id"] = parent_id
@@ -160,6 +172,12 @@ def iter_session_paths(
                 if not include_subagents and codex_source._is_subagent(meta, path):
                     continue
                 yield path
+
+    if source in (None, "hermes"):
+        # Hermes sessions are addressed as `state.db#id` pseudo-paths (they are not
+        # files); the store listing provides one entry per visible session.
+        for pseudo in hermes_source.iter_pseudo_paths():
+            yield Path(pseudo)
 
 
 def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
@@ -221,10 +239,15 @@ def search_sessions(
     since_ts = _parse_since(since)
     paths = _candidate_paths(source, include_subagents)
 
-    prefiltered = server._rg_prefilter(terms, paths)
+    # ripgrep prefilter covers file-backed sources only; Hermes rows live inside
+    # SQLite and are matched with SQL in the adapter.
+    prefiltered = server._rg_prefilter(
+        terms, [p for p in paths if not hermes_source.is_hermes_path(p)]
+    )
     results = []
     for path in paths:
-        if prefiltered is not None and str(path) not in prefiltered:
+        is_hermes = hermes_source.is_hermes_path(path)
+        if prefiltered is not None and not is_hermes and str(path) not in prefiltered:
             continue
         try:
             item = session_metadata(path)
@@ -247,36 +270,44 @@ def search_sessions(
 
         found = set(metadata_terms)
         snippets = []
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                for line_number, raw in enumerate(handle, start=1):
-                    raw_lower = raw.lower()
-                    if not any(term in raw_lower for term in terms):
-                        continue
-                    try:
-                        row = json.loads(raw)
-                    except Exception:
-                        continue
-                    message_role, text = _message_from_row(row, item["source"])
-                    if not text or message_role is None:
-                        continue
-                    if role != "any" and role != message_role:
-                        continue
-                    text_lower = text.lower()
-                    line_terms = [term for term in terms if term in text_lower]
-                    found.update(line_terms)
-                    if line_terms and len(snippets) < 3:
-                        first = min(text_lower.find(term) for term in line_terms)
-                        start = max(0, first - 90)
-                        end = min(len(text), first + 260)
-                        excerpt = re.sub(r"\s+", " ", text[start:end]).strip()
-                        snippets.append({
-                            "role": message_role,
-                            "line": line_number,
-                            "text": ("…" if start else "") + excerpt + ("…" if end < len(text) else ""),
-                        })
-        except OSError:
-            continue
+        if is_hermes:
+            hits = hermes_source.search_session(path, terms, role=role)
+            found.update(hits["found_terms"])
+            snippets = [
+                {"role": hit["role"], "line": hit["line"], "text": hit["text"]}
+                for hit in hits["snippets"][:3]
+            ]
+        else:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    for line_number, raw in enumerate(handle, start=1):
+                        raw_lower = raw.lower()
+                        if not any(term in raw_lower for term in terms):
+                            continue
+                        try:
+                            row = json.loads(raw)
+                        except Exception:
+                            continue
+                        message_role, text = _message_from_row(row, item["source"])
+                        if not text or message_role is None:
+                            continue
+                        if role != "any" and role != message_role:
+                            continue
+                        text_lower = text.lower()
+                        line_terms = [term for term in terms if term in text_lower]
+                        found.update(line_terms)
+                        if line_terms and len(snippets) < 3:
+                            first = min(text_lower.find(term) for term in line_terms)
+                            start = max(0, first - 90)
+                            end = min(len(text), first + 260)
+                            excerpt = re.sub(r"\s+", " ", text[start:end]).strip()
+                            snippets.append({
+                                "role": message_role,
+                                "line": line_number,
+                                "text": ("…" if start else "") + excerpt + ("…" if end < len(text) else ""),
+                            })
+            except OSError:
+                continue
 
         if len(found) < len(terms):
             continue
@@ -314,6 +345,17 @@ def resolve_target(
     include_subagents: bool = False,
 ) -> Path:
     candidate = Path(target).expanduser()
+    # Hermes pseudo-path (`<state.db>#<session id>`): not a file, so validate it
+    # against the store instead of the filesystem.
+    if hermes_source.is_hermes_path(candidate):
+        if not hermes_source.pseudo_exists(candidate):
+            raise SessionNotFound(f"Hermes session not found: {candidate}")
+        item = session_metadata(candidate)
+        if source and item["source"] != source:
+            raise SessionNotFound(f"session {target!r} is not from source {source!r}")
+        if project and project.lower() not in (item.get("project_path") or "").lower():
+            raise SessionNotFound(f"session {target!r} is not in project {project!r}")
+        return candidate
     if candidate.is_file():
         session_metadata(candidate)
         return candidate.resolve()
@@ -327,7 +369,9 @@ def resolve_target(
             raise SessionNotFound(f"session {target!r} is not from source {source!r}")
         if project and project.lower() not in (item.get("project_path") or "").lower():
             raise SessionNotFound(f"session {target!r} is not in project {project!r}")
-        return direct.resolve()
+        # Hermes pseudo-paths are addresses, not files: resolving them would rewrite
+        # the store prefix through filesystem symlinks (e.g. /var -> /private/var).
+        return direct if hermes_source.is_hermes_path(direct) else direct.resolve()
 
     matches = search_sessions(
         target,
@@ -377,17 +421,23 @@ def _observed_terminal(item: dict) -> str:
 
 def render_context(path: Path, after_line: int = 0) -> str:
     item = session_metadata(path)
-    total_lines = _line_count(path)
+    # Hermes anchors are message ids, so the cursor-space top is the newest id.
+    is_hermes = item["source"] == "hermes"
+    total_lines = hermes_source.max_anchor(path) if is_hermes else _line_count(path)
     if after_line > total_lines:
         raise SessionLookupError(
             f"cursor L{after_line} is beyond current end L{total_lines}; restart from line 0"
         )
     if item["source"] == "codex":
         body = anchored_transcript.render_codex(path)
+    elif is_hermes:
+        body = anchored_transcript.render_hermes(path)
     else:
         body = anchored_transcript.render_claude(path)
     body = _filter_from_cursor_line(body, after_line)
-    header = anchored_transcript.digest_header(path.resolve(), item["source"])
+    header = anchored_transcript.digest_header(
+        str(path) if is_hermes else path.resolve(), item["source"]
+    )
     observation = "\n".join([
         f"# SESSION_ID: {item.get('id')}",
         f"# PROJECT: {item.get('project_path') or ''}",
@@ -405,6 +455,17 @@ def render_context(path: Path, after_line: int = 0) -> str:
 def read_evidence(path: Path, line: int, context: int = 1, max_chars: int = 12_000) -> str:
     if line < 1:
         raise SessionLookupError("line must be at least 1")
+    if hermes_source.is_hermes_path(path):
+        # [L#] cites a messages row id; read the raw store rows around it.
+        rows = hermes_source.evidence_lines(path, line, context)
+        if not rows:
+            raise SessionLookupError(f"line L{line} does not exist in {path}")
+        selected = []
+        for text in rows:
+            if max_chars and len(text) > max_chars:
+                text = text[:max_chars] + f" …[{len(text) - max_chars} chars omitted]"
+            selected.append(text)
+        return "\n".join(selected)
     start = max(1, line - max(0, context))
     end = line + max(0, context)
     selected = []
@@ -425,7 +486,9 @@ def read_evidence(path: Path, line: int, context: int = 1, max_chars: int = 12_0
 
 def status_for(path: Path) -> dict:
     item = session_metadata(path)
-    total_lines = _line_count(path)
+    total_lines = (
+        hermes_source.max_anchor(path) if item["source"] == "hermes" else _line_count(path)
+    )
     return {
         "id": item.get("id"),
         "slug": item.get("slug"),

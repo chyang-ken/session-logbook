@@ -81,7 +81,9 @@ UI (browser-only)
 ```
 
 Each agent's on-disk format is adapted to a common shape by a module under `sources/`
-(`codex.py`, `antigravity.py`); Claude Code is read directly in `server.py`.
+(`codex.py`, `antigravity.py`, `hermes.py`); Claude Code is read directly in `server.py`.
+Hermes has no per-session file: its sessions are addressed as `state.db#<session id>`
+pseudo-paths and read read-only from the SQLite store.
 
 ## 2. Cross-layer contracts
 
@@ -109,6 +111,9 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 
 A POST body missing `starred` / `archived` defaults to `True`.
 
+For Hermes sessions, `jsonl_path` is a `state.db#<id>` pseudo-path — there is no jsonl file;
+the SQLite row is the authoritative source.
+
 ## 4. Frontend routes
 
 | URL | Mode | Notes |
@@ -132,6 +137,7 @@ dashboard server. Its commands are:
 
 The single packaged Skill is `skills/session-logbook/`. It routes Agent requests to this CLI;
 do not add separate find/read/compress Skills or duplicate source parsing in Skill instructions.
+CLI sources are Claude Code, Codex, and Hermes (Antigravity remains dashboard-only).
 
 ## 6. Key constants (top of `server.py`)
 
@@ -153,13 +159,14 @@ State lives at `~/.session-logbook/state.json`, with rotating backups under
 |---|---|
 | `server.py` `extract_metadata` | card preview (first user + tailed user/assistant) + turn counts + custom title |
 | `server.py` `extract_conversation` | conversation view (pairs tool_use/tool_result, filters thinking, detects skill injection) |
-| `server.py` `compute_scope` / `_effective_archived` | backend scope (pure function, unit-tested); `_effective_archived` derives archived state (explicit state > Codex file location) |
+| `server.py` `compute_scope` / `_effective_archived` | backend scope (pure function, unit-tested); `_effective_archived` derives archived state (explicit state > source-derived: Codex file location / Hermes archive flag) |
 | `server.py` `load_scan_cache` / `save_scan_cache` / `CACHE_SCHEMA_VERSION` | persistent warm scan cache (`~/.session-logbook/scan-cache.json`): load on start + incremental scan. Bump the schema version on any meta-shape change, or stale caches break |
 | `server.py` `search_sessions` / `_rg_prefilter` / `_search_session` | full-text search (ripgrep prefilter → per-session AND match; pure-Python fallback) |
 | `server.py` `list_recent_files` / `find_files_by_name` | Files panel backends |
 | `sources/codex.py` `is_codex_path` / `CODEX_ARCHIVED_ROOT` | Codex (`~/.codex`) data source; `is_codex_path` is the centralized dual-root predicate (active `sessions` + `archived_sessions`) |
 | `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source |
-| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex`); the single source of truth behind the `/anchored` endpoint |
+| `sources/hermes.py` | Hermes (`~/.hermes/state.db`) data source: read-only SQLite adapter; sessions keyed by `state.db#id` pseudo-paths, anchors are message ids |
+| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex` / `render_hermes`); the single source of truth behind the `/anchored` endpoint |
 | `session_logbook_cli.py` | read-only Agent access: resolve, search, anchored handoff, incremental follow, status, and evidence expansion |
 | `skills/session-logbook/` | the single Agent-facing Skill; thin routing layer over `session_logbook_cli.py` |
 | `index.html` `<style>` | all CSS (custom props in `:root`) |

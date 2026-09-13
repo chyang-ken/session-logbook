@@ -1,6 +1,6 @@
 # Session Logbook
 
-A minimal, local, zero-dependency dashboard for browsing and organizing your AI coding-agent sessions — **Claude Code, Codex, and Antigravity** — all in one place.
+A minimal, local, zero-dependency dashboard for browsing and organizing your AI coding-agent sessions — **Claude Code, Codex, Antigravity, and Hermes** — all in one place.
 
 [![CI](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@ A minimal, local, zero-dependency dashboard for browsing and organizing your AI 
 
 > Read this in other languages: [Chinese](README_zh-CN.md)
 
-Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, and `~/.gemini`. Session Logbook reads them **read-only**, lays them out on one page, and lets you star, archive, note, search, and re-read them — without leaving your machine.
+Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, `~/.gemini`, and `~/.hermes`. Session Logbook reads them **read-only**, lays them out on one page, and lets you star, archive, note, search, and re-read them — without leaving your machine.
 
 ![Session Logbook screenshot](docs/screenshot.png)
 
@@ -19,7 +19,7 @@ Your agents leave behind hundreds of session transcripts scattered under `~/.cla
 You run many agents, in many worktrees, across many projects, in parallel. A flat list of session files is unusable. This dashboard gives that pile structure:
 
 - **One page, four zones** — ⭐ Starred / 🔥 Recent / 🕸 Dusty / 📦 Archived. Time-decayed automatically so your working set stays clean.
-- **Multi-agent** — Claude Code, Codex, and Antigravity sessions, unified and grouped by project.
+- **Multi-agent** — Claude Code, Codex, Antigravity, and Hermes sessions, unified and grouped by project.
 - **Read-only and private** — it never sends a message, spawns a session, or talks to the network. Binds `127.0.0.1` only and serves its browser assets locally.
 
 ## Quickstart
@@ -73,7 +73,7 @@ ln -s "$PWD/skills/session-logbook" ~/.codex/skills/session-logbook
 - **Full-text search** — multi-word AND; matched snippets highlighted; session IDs match too. Backed by `ripgrep` when available, with a pure-Python fallback.
 - **Star / Archive / Note** — lightweight organizing that persists to `~/.session-logbook/state.json`.
 - **Files panel** — browse a project's recently-changed files or fuzzy-find by name (`fd`-backed).
-- **Downloadable anchored transcript** — export a compact, navigable transcript with line-number anchors back to the original JSONL (useful for feeding a session to an agent for analysis).
+- **Downloadable anchored transcript** — export a compact, navigable transcript with anchors back to the original session source (JSONL line number, or Hermes message id) — useful for feeding a session to an agent for analysis.
 - **One read-only Agent interface** — resolve a known Session, hand it to another Agent, retrieve only later additions, expand exact source lines, or search bounded history without running the dashboard.
 
 ## Where to go next

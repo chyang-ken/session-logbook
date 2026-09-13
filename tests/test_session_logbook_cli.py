@@ -9,6 +9,8 @@ from unittest import mock
 import server
 import session_logbook_cli as cli
 from sources import codex as codex_source
+from sources import hermes as hermes_source
+from tests.test_hermes_source import build_store
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> Path:
@@ -60,10 +62,28 @@ class SessionLogbookCliTests(unittest.TestCase):
             ],
         )
 
+        # Synthetic Hermes store (state.db), addressed by a pseudo-path
+        self.hermes_home = root / "hermes-home"
+        self.hermes_id = "20260820_120000_abcdef"
+        self.hermes_db = build_store(
+            self.hermes_home / "state.db",
+            [{"id": self.hermes_id, "title": "Hermes layout pass",
+              "cwd": "/Users/alice/my-app"}],
+            [
+                {"id": 1, "session_id": self.hermes_id, "role": "user",
+                 "content": "tidy the side panel"},
+                {"id": 2, "session_id": self.hermes_id, "role": "assistant",
+                 "content": "panel tidied", "finish_reason": "stop"},
+            ],
+        )
+        self.hermes_pseudo = f"{self.hermes_db}#{self.hermes_id}"
+
         self.patches = [
             mock.patch.object(server, "PROJECTS_DIR", self.claude_root),
             mock.patch.object(codex_source, "CODEX_ROOT", self.codex_root),
             mock.patch.object(codex_source, "CODEX_ARCHIVED_ROOT", self.codex_archived),
+            mock.patch.object(hermes_source, "HERMES_HOME", self.hermes_home),
+            mock.patch.object(hermes_source, "_LISTING_CACHE", {"stamp": None, "data": []}),
             mock.patch.object(server, "_cache", {}),
             mock.patch.object(server, "_CWD_TRUTH_MAP", {}),
             mock.patch.object(server, "_CWD_INDEX_SEEN", set()),
@@ -161,6 +181,39 @@ class SessionLogbookCliTests(unittest.TestCase):
     def test_ambiguous_query_does_not_silently_choose(self):
         with self.assertRaises(cli.SessionAmbiguous):
             cli.resolve_target("retry", include_subagents=True)
+
+    def test_hermes_locate_context_and_status(self):
+        path = cli.resolve_target(self.hermes_id)
+        self.assertEqual(str(path), self.hermes_pseudo)
+        item = cli.session_metadata(path)
+        self.assertEqual(item["source"], "hermes")
+        self.assertEqual(item["jsonl_path"], self.hermes_pseudo)
+        rendered = cli.render_context(path)
+        self.assertIn("[U1] [L1] USER", rendered)
+        self.assertIn("SQLite store", rendered)
+        self.assertIn("NEXT_CURSOR: L2", rendered)
+        status = cli.status_for(Path(self.hermes_pseudo))
+        self.assertEqual(status["source"], "hermes")
+        self.assertEqual(status["next_cursor"], "L2")
+        self.assertEqual(status["liveness"], "unknown")
+
+    def test_hermes_follow_repeats_cursor_anchor(self):
+        rendered = cli.render_context(Path(self.hermes_pseudo), after_line=2)
+        self.assertIn("REPEATED_CURSOR_LINE: L2", rendered)
+        self.assertIn("panel tidied", rendered)
+        self.assertNotIn("tidy the side panel", rendered)
+
+    def test_hermes_evidence_and_search(self):
+        evidence = cli.read_evidence(Path(self.hermes_pseudo), line=2, context=0)
+        self.assertTrue(evidence.startswith("[L2]"))
+        self.assertIn("panel tidied", evidence)
+        hits = cli.search_sessions("tidy panel", source="hermes")
+        self.assertEqual([hit["id"] for hit in hits], [self.hermes_id])
+        self.assertEqual(hits[0]["snippets"][0]["role"], "user")
+
+    def test_hermes_unknown_id_is_not_found(self):
+        with self.assertRaises(cli.SessionNotFound):
+            cli.resolve_target("20260820_999999_zzzzzz")
 
 
 if __name__ == "__main__":

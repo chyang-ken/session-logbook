@@ -9,6 +9,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - Add a server-independent, read-only Agent CLI for locating, handing off, following, auditing, and searching Claude Code and Codex Sessions.
 - Ship one `session-logbook` Skill as the Agent-facing entry point, including opt-in subagent discovery and line-anchored incremental reads with a one-line overlap.
+- Add Hermes Agent as a fourth data source: sessions are read read-only from `~/.hermes/state.db` (SQLite), addressed as `state.db#<id>` pseudo-paths, exported with message-id anchors, and searchable from the dashboard and the Agent CLI (`--source hermes`).
 
 ## [0.1.1] - 2026-08-09
 
