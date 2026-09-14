@@ -48,7 +48,7 @@ def digest_header(jsonl_path, source="claude") -> str:
     knowing the anchor semantics, and its "byte-for-byte identical" contract must not be broken.
     See docs/handoffs/2026-06-11-anchored-render-to-service-layer.md.
     """
-    label = {"codex": "Codex", "kimi": "Kimi Code"}.get(source, "Claude Code")
+    label = {"codex": "Codex", "kimi": "Kimi Code", "pi": "Pi"}.get(source, "Claude Code")
     lines = [
         "# ┌─ COMPACT SESSION DIGEST ─────────────────────────────────────────",
         f"# │ Navigable transcript of a {label} session. User and Assistant messages",
@@ -154,6 +154,29 @@ def _codex_output_is_error(output):
         return True
     exit_code = value.get("exit_code")
     return isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0
+
+
+def render_pi(path) -> str:
+    """Render Pi's selected branch with physical-file anchors, not synthetic rows."""
+    from sources import pi
+    output, user = [], 0
+    for turn in pi.collect_turns(pi.read_session(path)[2]):
+        line = turn["line"]
+        kind = turn["type"]
+        if kind == "user":
+            user += 1
+            output.append(f"\n[U{user}] [L{line}] USER {turn['ts']}\n{turn['text']}")
+        elif kind == "assistant":
+            output.append(f"[L{line}] ASSISTANT: {turn['text']}")
+        elif kind == "tool":
+            output.append(f"[L{line}] TOOL {turn['name']}: {turn['summary']}")
+            if "result_line" in turn:
+                status = "ERROR" if turn["is_error"] else "OK"
+                result = _result_index(turn["result"], turn["is_error"])
+                output.append(f"[L{turn['result_line']}] TOOL_RESULT {status}: {result}")
+        else:
+            output.append(f"[L{line}] [SYSTEM]: {trunc(turn['text'], 300)}")
+    return "\n".join(output)
 
 
 def render_claude(path) -> str:

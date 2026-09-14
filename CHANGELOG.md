@@ -7,6 +7,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Read Pi sessions from local JSONL: selected-branch search, reader, exports, and Agent CLI, with original-line evidence and existing local metadata controls.
 - Browse sessions across projects in a default, newest-first timeline; the project view remains available.
 - Hide suspected automated runs with an explicit, reversible filter. Single-turn sessions are the initial signal; users can confirm their participation to keep a session visible.
 - Give sessions personal titles without changing source records, and search both personal and source titles.

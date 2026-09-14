@@ -21,6 +21,7 @@ from sources import codex as codex_source
 from sources import devin as devin_source
 
 from sources import kimi as kimi_source
+from sources import pi as pi_source
 
 # ---------- Config ----------
 HOST = "127.0.0.1"
@@ -1639,7 +1640,7 @@ def _find_jsonl(session_id):
     kimi_wire = kimi_source.find_wire_by_session_id(session_id)
     if kimi_wire is not None:
         return kimi_wire
-    return None
+    return pi_source.find_session(session_id)
 
 
 # ---------- Scope model (v2) ----------
@@ -1803,6 +1804,22 @@ def scan_sessions(force=False):
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
 
+    # --- Pi paths ---
+    pi_seen = set()
+    for path in pi_source.scan_sessions():
+        key = str(path)
+        pi_seen.add(key)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        cached = _cache.get(key)
+        if force or cached is None or cached.get("mtime") != mtime:
+            meta = pi_source.extract_metadata(path)
+            if meta:
+                _cache[key] = meta
+                _mark_scan_cache_dirty()
+
     # --- Clean stale cache keys per root prefix so sources do not delete each other. ---
     # Codex uses is_codex_path to recognize both roots (sessions + archived_sessions); otherwise
     # stale keys under the archived root would never be removed because they are not under CODEX_ROOT.
@@ -1824,6 +1841,9 @@ def scan_sessions(force=False):
             del _cache[p]
             _mark_scan_cache_dirty()
         elif kimi_source.is_kimi_path(p) and p not in kimi_seen:
+            del _cache[p]
+            _mark_scan_cache_dirty()
+        elif pi_source.is_pi_path(p) and p not in pi_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
     for p in list(_CWD_SEQ.keys()):
@@ -1939,6 +1959,10 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     terms is a lowercase search-term list with AND semantics: every term must appear in the
     same session to count as a hit. Return [] for no match.
     """
+    if pi_source.is_pi_path(jsonl_path):
+        meta = session_meta or pi_source.extract_metadata(jsonl_path) or {}
+        return pi_source.search(jsonl_path, terms, meta,
+                                str(_state.get(meta.get("id"), {}).get("title_override") or ""))
     # Claude filename = session id (jsonl_path.stem is the UUID). Codex filenames are
     # rollout-<date>-<uuid>.jsonl, so stem is not the ID shown on the card. Read it from
     # session_meta.payload.id, otherwise pasted Codex card IDs miss id_hit and fallback
@@ -2516,7 +2540,7 @@ def open_file_in_system(file_path: str, root: str, reveal: bool = False) -> tupl
 PWA_MANIFEST = json.dumps({
     "name": "Session Logbook",
     "short_name": "Logbook",
-    "description": "Find and re-read local Claude Code, Codex, Antigravity, Kimi Code, and Devin Local agent sessions.",
+    "description": "Find and re-read local Claude Code, Codex, Antigravity, Kimi Code, Devin Local, and Pi agent sessions.",
     "start_url": "/",
     "scope": "/",
     "display": "standalone",
@@ -2754,6 +2778,8 @@ class Handler(BaseHTTPRequestHandler):
                     conv = ag_source.extract_conversation(jsonl)
                 elif kimi_source.is_kimi_path(jsonl):
                     conv = kimi_source.extract_conversation(jsonl)
+                elif pi_source.is_pi_path(jsonl):
+                    conv = pi_source.extract_conversation(jsonl)
                 else:
                     conv = extract_conversation(jsonl)
                 st = _state.get(sid, {})
@@ -2780,6 +2806,8 @@ class Handler(BaseHTTPRequestHandler):
                     text = ag_source.extract_transcript(jsonl)
                 elif kimi_source.is_kimi_path(jsonl):
                     text = kimi_source.extract_transcript(jsonl)
+                elif pi_source.is_pi_path(jsonl):
+                    text = pi_source.extract_transcript(jsonl)
                 else:
                     text = extract_transcript(jsonl)
                 brief_param = (qs.get('brief') or ['0'])[0].lower()
@@ -2827,6 +2855,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif kimi_source.is_kimi_path(jsonl):
                     src = "kimi"
                     body = anchored_transcript.render_kimi(jsonl)
+                elif pi_source.is_pi_path(jsonl):
+                    src = "pi"
+                    body = anchored_transcript.render_pi(jsonl)
                 else:
                     src = "claude"
                     body = anchored_transcript.render_claude(jsonl)

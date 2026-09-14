@@ -1,6 +1,6 @@
 # Session Logbook
 
-一个极简、本地、零依赖的 Session 找回工具，把 **Claude Code、Codex、Antigravity、Kimi Code 和 Devin Local** 的 session 汇聚到一处，帮助你找到并重读过去的工作。
+一个极简、本地、零依赖的 Session 找回工具，把 **Claude Code、Codex、Antigravity、Kimi Code、Devin Local 和 Pi** 的 session 汇聚到一处，帮助你找到并重读过去的工作。
 
 [![CI](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@
 
 > Other languages: [English](README.md)
 
-你的 agent 在 `~/.claude`、`~/.codex`、`~/.gemini`、`~/.kimi-code` 和 Devin Local 数据库里留下了成百上千份 session 记录。Session Logbook **只读**地扫描它们，让你按时间或文字找到过去的工作、打开完整详情并继续利用，全程不离开本机。
+你的 agent 在 `~/.claude`、`~/.codex`、`~/.gemini`、`~/.kimi-code`、`~/.pi/agent/sessions` 和 Devin Local 数据库里留下了成百上千份 session 记录。Session Logbook **只读**地扫描它们，让你按时间或文字找到过去的工作、打开完整详情并继续利用，全程不离开本机。
 
 ## 为什么
 
@@ -16,7 +16,7 @@ Session 多到一定程度后，逐个手动管理就不再可持续。Session L
 
 - **找回过去的工作** —— 按时间浏览，或搜索你还记得的词。
 - **在完整上下文中重读** —— 直接打开 Session Detail，不靠文件名和摘要猜当时做了什么。
-- **跨 agent 汇聚** —— Claude Code、Codex、Antigravity、Kimi Code 和 Devin Local 共用一个本地入口。
+- **跨 agent 汇聚** —— Claude Code、Codex、Antigravity、Kimi Code、Devin Local 和 Pi 共用一个本地入口。
 - **只读且私密** —— 永不发消息、永不 spawn session、不连网络，只绑 `127.0.0.1`，浏览器资源也从本机提供。
 
 ## 快速开始
@@ -57,6 +57,10 @@ ln -s "$PWD/skills/session-logbook" ~/.codex/skills/session-logbook
 ```
 
 ## 功能
+
+Pi 默认读取 `~/.pi/agent/sessions`，支持 `PI_CODING_AGENT_DIR` 和
+`PI_CODING_AGENT_SESSION_DIR` 环境变量。读取最后保存的对话分支，并保留压缩前的原始消息；
+fork 不会被当作 sub-agent。暂不自动发现扩展专用的子任务目录或逐项目的目录设置。
 
 - **全文搜索** —— 多词 AND、片段高亮，匹配原始标题、自定义标题和 session ID（`ripgrep` 加速，纯 Python 兜底）。
 - **跨项目时间流** —— 默认按最近活动倒序，不再需要逐个展开项目。
