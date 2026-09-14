@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Session Logbook - a minimal, zero-dependency, local dashboard for AI-agent sessions."""
+"""Session Logbook - a minimal local retrieval layer for AI-agent sessions."""
 import argparse
 import json
 import hashlib
@@ -2458,7 +2458,7 @@ def open_file_in_system(file_path: str, root: str, reveal: bool = False) -> tupl
 PWA_MANIFEST = json.dumps({
     "name": "Session Logbook",
     "short_name": "Logbook",
-    "description": "A minimal, local dashboard for browsing your Claude Code, Codex, Antigravity, and Kimi Code agent sessions.",
+    "description": "Find and re-read local Claude Code, Codex, Antigravity, Kimi Code, and Devin Local agent sessions.",
     "start_url": "/",
     "scope": "/",
     "display": "standalone",

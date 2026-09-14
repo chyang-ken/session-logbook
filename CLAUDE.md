@@ -48,9 +48,10 @@ verified it. Purely mechanical changes (rename, format) only need the subject + 
 "what" line.
 
 ### Stay in scope
-Before adding a feature, check [`docs/philosophy.md`](docs/philosophy.md). The dashboard
-is a **read-only cockpit**: "send a message", "spawn a session", "multi-user auth", and
-"live push" are explicit non-goals.
+Before adding a feature, check [`docs/philosophy.md`](docs/philosophy.md). Session Logbook
+is a **read-only retrieval layer**, not an agent client or lifecycle manager: "send a message",
+"spawn a Session", "manage client Session state", "multi-user auth", and "live push" are
+explicit non-goals.
 
 ---
 

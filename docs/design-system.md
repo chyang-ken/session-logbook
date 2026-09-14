@@ -209,11 +209,11 @@ When the same **logical component** appears across different surfaces (the card,
 
 ### 5.6 State / feedback / wayfinding patterns (make core semantics scannable while at rest)
 
-The cockpit principle: make core semantics like "time decay / source identity / the dashboard being alive" **scannable by peripheral vision without adding noise** — not reliant on hover, not relying on docs as a backstop. Patterns already in place (reuse them, don't invent your own):
+The interface principle: make important state such as "time decay / source identity / the dashboard being alive" **scannable by peripheral vision without adding noise** — not reliant on hover, not relying on docs as a backstop. Patterns already in place (reuse them, don't invent your own):
 
 - **Source wayfinding (A1)**: list cards are fully neutral at rest, and **the source identity color glows through only on hover** — `.card[data-source=x]:hover` uses `--source-*-glow-2` (extremely faint) for a box-shadow plus a `-solid` outline. Card rendering must carry `data-source`. Don't give cards a persistent source color (it turns into a Christmas tree).
 - **Freshness (A2)**: mtime within the last 1h → `.time-tag.fresh` (bold; if there's no stop_reason color, it also turns `--text-1`). No new color is added, and it doesn't fight the stop_reason palette.
-- **Time-decay threshold made explicit (A2)**: the Dusty section title carries `.section-title-note` showing the currently-effective `Nd+`, linked live to recentDays. It drags the bet hidden in the docs out onto the surface.
+- **Time-decay threshold made explicit (A2)**: the Dusty section title carries `.section-title-note` showing the currently-effective `Nd+`, linked live to recentDays. This keeps the current project-view threshold visible without making it the product's primary navigation model.
 - **Live heartbeat (B1)**: the top-bar `.live-dot` — normally an extremely faint sage static dot (= alive), and when data actually changes it adds `.beat` to pulse once; `markLive()` updates the "checked HH:MM:SS" tooltip. Manual ↻ adds `.spinning` for one rotation.
 - **Background updates made perceptible (B2)**: live polling only flashes cards that are **genuinely new / had their mtime move forward** (`flashLiveCards`, reusing `card-flash`, ≤10 of them, and **not** scrollIntoView — it doesn't hijack the user's viewport). Don't flash the whole page.
 - **Persistent state markers (D2)**: a card with a note → the foot carries a persistent `.card-has-note` micro-marker (shown in the collapsed state too), so you don't need hover to see which cards were annotated.
