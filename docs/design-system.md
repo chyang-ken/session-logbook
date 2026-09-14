@@ -126,11 +126,11 @@ font-mono:  self-hosted JetBrains Mono / Fira Code / SF Mono / Menlo / PingFang 
 |---|---|
 | 9 | tiny chip / label (`.source-chip`, `.conv-qa-other-tag`) |
 | 10 | detail mono (id, size, time, `.btn` label, `.conv-ts`) |
-| 11 | small UI / secondary mono (count, search-match, inline code, fold-hint) |
+| 11 | small UI / secondary mono (header filters, count, search-match, inline code, fold-hint) |
 | 12 | group header, recent-days, QA text, empty-state hint, conv table |
 | 13 | tight-leading list body (`.msgs`, `.conv-text`, conv h3) |
 | 14 | body (`html,body`), card title (weight 600), conv markdown h2 |
-| 15 | standalone body (reading mode +2), source-filter trigger |
+| 15 | standalone body (reading mode +2) |
 | 16 | conv markdown h1, standalone h2, modal close `✕` |
 | 18 | largest heading (standalone h1) |
 
@@ -157,6 +157,15 @@ Spacing values come from a limited scale — don't just type a number: **2 / 4 /
 ---
 
 ## 5. Component patterns
+
+### Dashboard header
+
+Keep search and its utility buttons on the first row. Source, view, and suspected-run
+filters share a compact second row, with count and live status aligned to its end.
+Filters wrap together on narrow windows without shrinking the search field. Search
+syntax belongs in its help tooltip, not a long placeholder. A checked box carries
+selection while its explicit filter label stays neutral. The content area fills the
+remaining viewport instead of assuming a fixed header height.
 
 ### 5.1 Card top-right / right-side icon buttons (hover affordance)
 
