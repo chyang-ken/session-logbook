@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import server
+from sources.activity import activity_time
 from sources import anchored_transcript, session_identity
 from sources import codex as codex_source
 from sources import devin as devin_source
@@ -257,9 +258,46 @@ def search_sessions(
     paths = _candidate_paths(source, include_subagents)
 
     prefiltered = server._rg_prefilter(terms, paths)
+    # Codex titles usually live outside transcript files, so ripgrep cannot see them.
+    # Resolve only title-matching Codex IDs here; all other paths retain the cheap transcript
+    # prefilter and avoid full metadata parsing.
+    codex_title_ids = set()
+    if role == "any" and source in (None, "codex"):
+        codex_title_ids = {
+            session_id
+            for session_id, title in codex_source.session_index_titles().items()
+            if any(term in title.lower() for term in terms)
+        }
+    title_prefiltered = set()
+    if codex_title_ids:
+        for path in paths:
+            if not codex_source.is_codex_path(path):
+                continue
+            session_id = (codex_source._read_session_meta(path) or {}).get("id")
+            if session_id in codex_title_ids:
+                title_prefiltered.add(str(path))
+
+    # User-defined titles live in the Logbook state file rather than transcripts.
+    # Resolve only matching title IDs so the common search path keeps its cheap prefilter.
+    server.load_state()
+    local_title_ids = {
+        session_id
+        for session_id, entry in server._state.items()
+        if any(term in str(entry.get("title_override") or "").lower() for term in terms)
+    }
+    local_title_paths = set()
+    for session_id in local_title_ids:
+        path = server._find_jsonl(session_id)
+        if path is not None:
+            local_title_paths.add(str(path))
+
     results = []
     for path in paths:
-        if not devin_source.is_devin_path(path) and prefiltered is not None and str(path) not in prefiltered:
+        if (not devin_source.is_devin_path(path)
+                and prefiltered is not None
+                and str(path) not in prefiltered
+                and str(path) not in title_prefiltered
+                and str(path) not in local_title_paths):
             continue
         try:
             item = session_metadata(path)
@@ -267,21 +305,27 @@ def search_sessions(
             continue
         if project and project.lower() not in (item.get("project_path") or "").lower():
             continue
-        if since_ts is not None and item.get("mtime", 0) < since_ts:
+        if since_ts is not None and activity_time(item) < since_ts:
             continue
 
         # Metadata can identify a target during ordinary discovery, but a role-filtered
         # historical search must be satisfied by that role's real messages only.
         metadata_terms = set()
+        title_override = str(server._state.get(item.get("id"), {}).get("title_override") or "")
         if role == "any":
             metadata_blob = " ".join(
                 str(item.get(key) or "")
                 for key in ("id", "slug", "custom_title", "project_path", "jsonl_path")
-            ).lower()
+            ) + " " + title_override
+            metadata_blob = metadata_blob.lower()
             metadata_terms = {term for term in terms if term in metadata_blob}
 
         found = set(metadata_terms)
         snippets = []
+        custom_title = str(item.get("custom_title") or "")
+        display_title = title_override or custom_title
+        if role == "any" and any(term in f"{custom_title} {title_override}".lower() for term in terms):
+            snippets.append({"role": "title", "line": None, "text": display_title})
         try:
             for line_number, message_role, text in iter_messages(path, item["source"]):
                 if not text or message_role is None:
@@ -313,6 +357,8 @@ def search_sessions(
             "project_path": item.get("project_path"),
             "jsonl_path": item["jsonl_path"],
             "mtime_iso": item.get("mtime_iso"),
+            "activity_at": activity_time(item),
+            "activity_at_iso": item.get("activity_at_iso") or item.get("mtime_iso"),
             "size": item.get("size"),
             "is_subagent": item["is_subagent"],
             "parent_session_id": item["parent_session_id"],
@@ -328,7 +374,7 @@ def search_sessions(
         if previous is None or (entry.get("size") or 0) > (previous.get("size") or 0):
             winners[sid] = entry
     deduped = list(winners.values())
-    deduped.sort(key=lambda entry: entry.get("mtime_iso") or "", reverse=True)
+    deduped.sort(key=activity_time, reverse=True)
     return deduped[:limit]
 
 

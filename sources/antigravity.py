@@ -30,6 +30,7 @@ drop a result and drift the pending FIFO (mis-pairing later results with earlier
 Hence the fallback rule: "anything that isn't skip/user/planner is a result."
 """
 import json
+from sources.activity import activity_fields
 import os
 import re
 import urllib.parse
@@ -437,6 +438,7 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
         "jsonl_path": str(jsonl_path),
         "mtime": stat.st_mtime,
         "mtime_iso": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        **activity_fields((ts for ts, _, text in raw if text), stat.st_mtime),
         "size": stat.st_size,
         "source": "antigravity",
         "model": model,

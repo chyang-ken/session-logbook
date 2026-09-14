@@ -55,6 +55,8 @@ class ConversationFingerprintEndpointTests(unittest.TestCase):
             mock.patch.object(server, "PROJECTS_DIR", self.projects),
             mock.patch.object(server, "STATE_FILE", root / "state.json"),
             mock.patch.object(server, "SCAN_CACHE_FILE", root / "scan-cache.json"),
+            mock.patch.object(server, "_state", {}),
+            mock.patch.object(server, "_state_loaded", True),
             mock.patch.object(server.codex_source, "scan_sessions", return_value=[]),
             mock.patch.object(server.ag_source, "scan_sessions", return_value=[]),
             mock.patch.dict(server._cache, {}, clear=True),
@@ -82,6 +84,16 @@ class ConversationFingerprintEndpointTests(unittest.TestCase):
         with urllib.request.urlopen(url, timeout=5) as r:
             return r.status, json.loads(r.read().decode("utf-8"))
 
+    def _post(self, action, body):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/sessions/{SID}/{action}",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+
     def test_fingerprint_roundtrip(self):
         status, first = self._get()
         self.assertEqual(status, 200)
@@ -103,6 +115,25 @@ class ConversationFingerprintEndpointTests(unittest.TestCase):
         self.assertNotEqual(grown["fingerprint"], first["fingerprint"])
         self.assertEqual(len(grown["turns"]), 3)
         self.assertEqual(grown["total_lines"], 3)
+
+    def test_personal_title_and_human_confirmation_roundtrip(self):
+        status, title = self._post("title", {"title_override": "My recovery Session"})
+        self.assertEqual(status, 200)
+        self.assertEqual(title["title_override"], "My recovery Session")
+
+        status, human = self._post("human", {"human_confirmed": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(human["human_confirmed"])
+
+        status, conversation = self._get()
+        self.assertEqual(status, 200)
+        self.assertEqual(conversation["display_title"], "My recovery Session")
+        self.assertTrue(conversation["human_confirmed"])
+
+        self._post("title", {"title_override": ""})
+        self._post("human", {"human_confirmed": False})
+        self.assertNotIn("title_override", server._state[SID])
+        self.assertNotIn("human_confirmed", server._state[SID])
 
 
 if __name__ == "__main__":

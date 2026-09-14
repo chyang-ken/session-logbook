@@ -126,11 +126,11 @@ font-mono:  self-hosted JetBrains Mono / Fira Code / SF Mono / Menlo / PingFang 
 |---|---|
 | 9 | tiny chip / label (`.source-chip`, `.conv-qa-other-tag`) |
 | 10 | detail mono (id, size, time, `.btn` label, `.conv-ts`) |
-| 11 | small UI / secondary mono (count, search-match, inline code, fold-hint) |
+| 11 | small UI / secondary mono (header filters, count, search-match, inline code, fold-hint) |
 | 12 | group header, recent-days, QA text, empty-state hint, conv table |
 | 13 | tight-leading list body (`.msgs`, `.conv-text`, conv h3) |
 | 14 | body (`html,body`), card title (weight 600), conv markdown h2 |
-| 15 | standalone body (reading mode +2), source-filter trigger |
+| 15 | standalone body (reading mode +2) |
 | 16 | conv markdown h1, standalone h2, modal close `✕` |
 | 18 | largest heading (standalone h1) |
 
@@ -157,6 +157,15 @@ Spacing values come from a limited scale — don't just type a number: **2 / 4 /
 ---
 
 ## 5. Component patterns
+
+### Dashboard header
+
+Keep search and its utility buttons on the first row. Source, view, and suspected-run
+filters share a compact second row, with count and live status aligned to its end.
+Filters wrap together on narrow windows without shrinking the search field. Search
+syntax belongs in its help tooltip, not a long placeholder. A checked box carries
+selection while its explicit filter label stays neutral. The content area fills the
+remaining viewport instead of assuming a fixed header height.
 
 ### 5.1 Card top-right / right-side icon buttons (hover affordance)
 
@@ -209,11 +218,11 @@ When the same **logical component** appears across different surfaces (the card,
 
 ### 5.6 State / feedback / wayfinding patterns (make core semantics scannable while at rest)
 
-The cockpit principle: make core semantics like "time decay / source identity / the dashboard being alive" **scannable by peripheral vision without adding noise** — not reliant on hover, not relying on docs as a backstop. Patterns already in place (reuse them, don't invent your own):
+The interface principle: make important state such as "time decay / source identity / the dashboard being alive" **scannable by peripheral vision without adding noise** — not reliant on hover, not relying on docs as a backstop. Patterns already in place (reuse them, don't invent your own):
 
 - **Source wayfinding (A1)**: list cards are fully neutral at rest, and **the source identity color glows through only on hover** — `.card[data-source=x]:hover` uses `--source-*-glow-2` (extremely faint) for a box-shadow plus a `-solid` outline. Card rendering must carry `data-source`. Don't give cards a persistent source color (it turns into a Christmas tree).
 - **Freshness (A2)**: mtime within the last 1h → `.time-tag.fresh` (bold; if there's no stop_reason color, it also turns `--text-1`). No new color is added, and it doesn't fight the stop_reason palette.
-- **Time-decay threshold made explicit (A2)**: the Dusty section title carries `.section-title-note` showing the currently-effective `Nd+`, linked live to recentDays. It drags the bet hidden in the docs out onto the surface.
+- **Time-decay threshold made explicit (A2)**: the Dusty section title carries `.section-title-note` showing the currently-effective `Nd+`, linked live to recentDays. This keeps the current project-view threshold visible without making it the product's primary navigation model.
 - **Live heartbeat (B1)**: the top-bar `.live-dot` — normally an extremely faint sage static dot (= alive), and when data actually changes it adds `.beat` to pulse once; `markLive()` updates the "checked HH:MM:SS" tooltip. Manual ↻ adds `.spinning` for one rotation.
 - **Background updates made perceptible (B2)**: live polling only flashes cards that are **genuinely new / had their mtime move forward** (`flashLiveCards`, reusing `card-flash`, ≤10 of them, and **not** scrollIntoView — it doesn't hijack the user's viewport). Don't flash the whole page.
 - **Persistent state markers (D2)**: a card with a note → the foot carries a persistent `.card-has-note` micro-marker (shown in the collapsed state too), so you don't need hover to see which cards were annotated.

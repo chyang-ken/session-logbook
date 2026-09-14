@@ -6,7 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- Order sessions and show recency by conversation time rather than file rewrites; rebuild cached metadata for existing sessions.
+- Preserve genuine Claude user text appended after desktop handoff reminders in search, previews, the reader, and exports; refresh cached metadata for existing sessions.
+
 ### Added
+- Browse sessions across projects in a default, newest-first timeline; the project view remains available.
+- Hide suspected automated runs with an explicit, reversible filter. Single-turn sessions are the initial signal; users can confirm their participation to keep a session visible.
+- Give sessions personal titles without changing source records, and search both personal and source titles.
 - Read Devin Local sessions directly from SQLite, including selected message chains, search, conversation/export, organizing controls, and database-node evidence through the Agent CLI.
 - Introduce the `staging` → local soak → `main` release flow: `scripts/release_flow.py` (`check` / `deploy` / `release`), a project session-start hook that reports when something is ready for `main`, and CI on `staging` pushes. Documented in CLAUDE.md "Branch model and release flow".
 - Add Kimi Code CLI (`$KIMI_CODE_HOME`, default `~/.kimi-code`) as a fourth session source: dashboard cards, conversation view (including AskUserQuestion as Q&A turns), markdown export, anchored transcript, full-text search, and the Agent CLI. Sub-agent streams are skipped like Codex sub-agents.

@@ -6,6 +6,7 @@ The interface mirrors the existing Claude path in server.py:
 - extract_conversation(jsonl_path): returns a list of turns
 """
 import json
+from sources.activity import activity_fields
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +48,7 @@ TRANSCRIPT_TOOL_RESULT_MAX = 200
 HEAD_BUFFER = 64 * 1024
 TAIL_BUFFER = 300 * 1024   # tail 300KB to find recent_msgs / stop_reason / thread_name
 
-_INDEX_CACHE = {"mtime": 0.0, "data": {}}
+_INDEX_CACHE = {"mtime_ns": None, "data": {}}
 
 
 def _under_root(path, root) -> bool:
@@ -72,13 +73,26 @@ def is_codex_path(path) -> bool:
     return _under_root(path, CODEX_ROOT) or _under_root(path, CODEX_ARCHIVED_ROOT)
 
 
+def session_index_mtime_ns() -> Optional[int]:
+    """Return the title index version used to invalidate cached Codex metadata."""
+    try:
+        return SESSION_INDEX_PATH.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def session_index_titles() -> dict:
+    """Return the current Codex session-title roster."""
+    return dict(_load_session_index())
+
+
 def _load_session_index() -> dict:
     """Read session_index.jsonl -> {id: thread_name}. Cached by mtime to avoid re-reading on every scan."""
     try:
         st = SESSION_INDEX_PATH.stat()
     except OSError:
         return _INDEX_CACHE["data"]
-    if st.st_mtime == _INDEX_CACHE["mtime"]:
+    if st.st_mtime_ns == _INDEX_CACHE["mtime_ns"]:
         return _INDEX_CACHE["data"]
     data = {}
     try:
@@ -97,7 +111,7 @@ def _load_session_index() -> dict:
                     data[sid] = name
     except OSError:
         return _INDEX_CACHE["data"]
-    _INDEX_CACHE["mtime"] = st.st_mtime
+    _INDEX_CACHE["mtime_ns"] = st.st_mtime_ns
     _INDEX_CACHE["data"] = data
     return data
 
@@ -339,6 +353,7 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
         "jsonl_path": str(jsonl_path),
         "mtime": mtime,
         "mtime_iso": mtime_iso,
+        **activity_fields((ts for ts, _, text in raw if text), mtime),
         "size": size,
         "source": "codex",
         # Archived status is derived from file location: under archived_sessions/ means

@@ -131,8 +131,15 @@
     backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
     padding: 10px 28px;
-    display: flex; align-items: center; gap: 16px;
+    display: flex; flex-direction: column; gap: 10px;
   }
+  .head-search-row, .head-filter-row {
+    display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0;
+  }
+  .head-filter-row { flex-wrap: wrap; }
+  .head-status { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .head-search-row .refresh-btn { flex-shrink: 0; background: none; border-color: transparent; }
+  .head-search-row .refresh-btn:hover { background: var(--bg-hover); }
   /* Source filter dropdown: replaces the original title, showing the current filter state + ▾.
      Semantics: which side's sessions are currently shown (All/Claude/Codex). */
   .source-filter {
@@ -141,9 +148,9 @@
   .source-filter-trigger {
     display: flex; align-items: center; gap: 5px;
     background: none; border: none;
-    padding: 3px 9px; margin-left: -9px;  /* negative margin offsets the padding so the label's left edge aligns with the all state and doesn't jump */
+    padding: 6px 8px;
     border-radius: 7px;
-    font-size: 15px; font-weight: 700; color: var(--text-1);
+    font-size: 11px; font-weight: 500; color: var(--text-1);
     cursor: pointer; user-select: none;
     font-family: var(--font-mono);  /* top-bar filter trigger uses the mono chrome language (consistent with count / recent-days chip) */
     white-space: nowrap;
@@ -253,7 +260,7 @@
     font-size: 11px;
   }
   .search-wrap {
-    position: relative; flex: 1; min-width: 180px;
+    position: relative; flex: 1; min-width: 0;
   }
   .search {
     width: 100%;
@@ -262,7 +269,7 @@
     border-radius: 6px;
     color: var(--text-1);
     font: inherit; font-size: 13px;
-    padding: 6px 28px 6px 12px;
+    height: 36px; padding: 6px 28px 6px 12px;
     outline: none;
     transition: border-color 0.2s;
   }
@@ -314,18 +321,33 @@
     letter-spacing: 0.06em;
     white-space: nowrap;
   }
+  .view-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .view-toggle button {
+    border: 0; border-right: 1px solid var(--border);
+    background: var(--bg-card); color: var(--text-3);
+    padding: 5px 9px;
+    font-family: var(--font-mono); font-size: 11px;
+    cursor: pointer;
+  }
+  .view-toggle button:last-child { border-right: 0; }
+  .view-toggle button:hover { color: var(--text-1); background: var(--bg-hover); }
+  .view-toggle button.active { color: var(--text-1); background: var(--bg-hover); font-weight: 600; }
   .oneshot-toggle {
     display: inline-flex; align-items: center; gap: 6px;
     font-family: var(--font-mono);  /* control label uses the mono chrome language (consistent with the adjacent count) */
-    font-size: 12px; color: var(--text-3);
+    font-size: 11px; color: var(--text-2);
     white-space: nowrap; user-select: none; cursor: pointer;
   }
   .oneshot-toggle input { margin: 0; cursor: pointer; }
   .oneshot-toggle:hover { color: var(--text-1); }
-  /* When checked (currently hiding one-shots) the label turns accent, consistent with .files-toggle.on — visually unifying the active state of similar toggles,
-     while also hinting that "some sessions are currently hidden". */
-  .oneshot-toggle:has(input:checked) { color: var(--accent); }
-  .oneshot-toggle:has(input:checked):hover { color: var(--text-1); }
+  /* The checkbox carries selection; the explicit label stays quiet and readable. */
+  .oneshot-toggle input { accent-color: var(--accent); }
   /* Top-bar icon-only square buttons (collapse all / refresh): flex-centered + square, ensuring the SVG is strictly centered and both buttons are the same size.
      Previously used padding:5px 12px (set for buttons with text) + display:block + inline SVG → icon sat too high, looked crooked. */
   .refresh-btn {
@@ -356,13 +378,18 @@
   }
 
   /* ---------- Two-column layout ---------- */
+  body:not(.standalone) { display: flex; flex-direction: column; height: 100vh; }
+  .page-head { flex-shrink: 0; }
   main {
     display: flex;
     gap: 0;
     padding: 20px 28px 60px;
-    height: calc(100vh - 49px);
+    flex: 1; min-height: 0;
     --col-left-pct: 57.5%;
   }
+  main.timeline { display: block; overflow-y: auto; }
+  .timeline-list { max-width: 920px; margin: 0 auto; }
+  .timeline-list .card { margin-bottom: 10px; }
   .col {
     overflow-y: auto;
     min-width: 0;
@@ -804,6 +831,15 @@
     -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden; word-break: break-word;
   }
+  .suspected-badge, .conv-identity-label {
+    display: inline-flex; align-items: center;
+    font-family: var(--font-mono); font-size: 9px; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-3); background: var(--bg-hover);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 6px;
+  }
+  .suspected-badge { margin-bottom: 6px; }
   /* worktree suffix on its own row: appears only for worktree sessions; main-repo sessions don't render this element */
   .card-pathrow {
     display: flex; align-items: center; gap: 8px;
@@ -951,7 +987,7 @@
     display: flex; flex-direction: column; gap: 10px;
     font-family: var(--font-mono);
   }
-  .note-dialog textarea, .note-dialog button {
+  .note-dialog textarea, .note-dialog input, .note-dialog button {
     font-family: inherit;
   }
   .note-dialog-title {
@@ -960,9 +996,8 @@
     letter-spacing: 0.1em; text-transform: uppercase;
     color: var(--text-3);
   }
-  .note-dialog textarea {
+  .note-dialog textarea, .note-dialog input {
     width: 100%; box-sizing: border-box;
-    min-height: 90px; resize: vertical;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -972,7 +1007,9 @@
     outline: none;
     transition: border-color 0.15s;
   }
-  .note-dialog textarea:focus { border-color: var(--accent); }
+  .note-dialog textarea { min-height: 90px; resize: vertical; }
+  .note-dialog input { height: 38px; }
+  .note-dialog textarea:focus, .note-dialog input:focus { border-color: var(--accent); }
   .note-dialog-foot {
     display: flex; justify-content: flex-end; gap: 8px;
   }
@@ -1494,6 +1531,13 @@
   .conv-meta {
     font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
   }
+  .conv-identity { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
+  .conv-identity button {
+    border: 0; background: none; color: var(--accent);
+    padding: 0; font-family: var(--font-mono); font-size: 10px;
+    cursor: pointer;
+  }
+  .conv-identity button:hover { text-decoration: underline; }
   .conv-actions {
     display: flex; gap: 0; flex-shrink: 0;
   }
@@ -2206,22 +2250,31 @@
      where the card footer row (sid+time+actions) and group-header buttons no longer fit and get clipped.
      960px guarantees the narrow column is ≥ ~370px in two-column mode; any narrower switches to single-column full width. */
   @media (max-width: 960px) {
+    body:not(.standalone) { height: auto; min-height: 100vh; }
     main { flex-direction: column; gap: 24px; height: auto; }
     .col-left, .col-right { flex: 1 1 auto; overflow-y: visible; }
     .col-left { flex-basis: auto; }
     .col-divider { display: none; }
-    .page-head { padding: 10px 16px; flex-wrap: wrap; }
+    .page-head { padding: 10px 16px; }
   }
-  /* The top bar doesn't fit below ~656px (search has hit its min-width yet still pushes out refresh).
-     Promote search to a full-width input on its own row, leaving filter/toggles/count/refresh on another row. */
   @media (max-width: 680px) {
-    .page-head { row-gap: 10px; column-gap: 12px; }
-    .search-wrap { order: -1; flex-basis: 100%; min-width: 0; }
+    .head-filter-row { gap: 8px 12px; }
+    .head-status { margin-left: 0; }
   }
 </style>
 </head>
 <body>
 <header class="page-head">
+  <div class="head-search-row">
+    <div class="search-wrap" id="search-wrap">
+      <input class="search" id="search" aria-label="Search sessions" placeholder="Search sessions" title="Search titles, messages, or session IDs. Multiple words must all match.">
+      <span class="search-spinner" aria-hidden="true"></span>
+      <button class="search-clear" id="search-clear" type="button" title="Clear search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <button class="refresh-btn" id="collapse-all" type="button" title="Collapse all cards" aria-label="Collapse all cards"></button>
+    <button class="refresh-btn" id="refresh" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+  </div>
+  <div class="head-filter-row">
   <div class="source-filter" id="source-filter" data-open="false">
     <button class="source-filter-trigger" id="source-filter-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
       <span id="source-filter-label">All Sessions</span>
@@ -2236,19 +2289,19 @@
       <div class="source-filter-option" role="option" data-value="devin">Devin Local only</div>
     </div>
   </div>
-  <div class="search-wrap" id="search-wrap">
-    <input class="search" id="search" placeholder="Full-text search · multiple words = AND · supports session ID">
-    <span class="search-spinner" aria-hidden="true"></span>
-    <button class="search-clear" id="search-clear" type="button" title="Clear search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+  <div class="view-toggle" id="view-toggle" aria-label="Session view">
+    <button type="button" data-view="timeline">Timeline</button>
+    <button type="button" data-view="projects">Projects</button>
   </div>
-  <label class="oneshot-toggle" title="Hide single-turn sessions (typical claude -p noise)">
+  <label class="oneshot-toggle" title="Single-turn sessions are treated as suspected automated runs until you confirm otherwise">
     <input type="checkbox" id="hide-oneshot">
-    <span>Hide 1-round</span>
+    <span id="suspected-filter-label">Suspected runs hidden</span>
   </label>
-  <span class="live-dot" id="live-dot" data-tooltip="Live — auto-refreshing"></span>
-  <span class="count" id="count">—</span>
-  <button class="refresh-btn" id="collapse-all" type="button" title="Collapse all cards" aria-label="Collapse all cards"></button>
-  <button class="refresh-btn" id="refresh" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+    <div class="head-status">
+      <span class="live-dot" id="live-dot" data-tooltip="Live — auto-refreshing"></span>
+      <span class="count" id="count">—</span>
+    </div>
+  </div>
 </header>
 <main id="list"></main>
 <div class="toast" id="toast"></div>
@@ -2290,6 +2343,7 @@ function saveUIState() {
       sourceFilter: state.sourceFilter,
       colLeftPct: state.colLeftPct,
       hideOneshot: state.hideOneshot,
+      viewMode: state.viewMode,
     }));
   } catch {}
 }
@@ -2315,6 +2369,7 @@ const RECENT_DAYS_OPTIONS = [7, 14, 21, 'all'];
 const recentDaysChipLabel = d => d === 'all' ? 'All time' : `Last ${d} days`;
 const recentDaysOptionLabel = d => d === 'all' ? 'All time' : `${d} days`;
 const SOURCE_FILTER_VALUES = ['all', 'claude', 'codex', 'antigravity', 'kimi', 'devin'];
+const VIEW_MODES = ['timeline', 'projects'];
 
 const state = {
   q: _saved?.q || '',
@@ -2334,8 +2389,10 @@ const state = {
   recentDays: RECENT_DAYS_OPTIONS.includes(_saved?.recentDays) ? _saved.recentDays : 7,
   // Left column width percentage; null means follow the CSS default (57.5%); a number is written after the user drags
   colLeftPct: typeof _saved?.colLeftPct === 'number' ? _saved.colLeftPct : null,
-  // Hide single-turn sessions (typical claude -p noise), default true
+  // Hide suspected automated runs (currently: single-turn and not human-confirmed), default true
   hideOneshot: typeof _saved?.hideOneshot === 'boolean' ? _saved.hideOneshot : true,
+  // Cross-project reverse chronology is the primary view; the old project layout remains available.
+  viewMode: VIEW_MODES.includes(_saved?.viewMode) ? _saved.viewMode : 'timeline',
   // Source filter (all | claude | codex | antigravity | kimi)
   sourceFilter: SOURCE_FILTER_VALUES.includes(_saved?.sourceFilter) ? _saved.sourceFilter : 'all',
 };
@@ -2498,8 +2555,8 @@ function groupItems(items) {
     const g = groups.get(key);
     g.paths.add(m.project_path || NO_WORKSPACE_KEY);
     g.items.push(m);
-    if (m.mtime > g.mostRecent) g.mostRecent = m.mtime;
-    if (m.mtime >= dayAgo) g.recentCount += 1;
+    if (activityTime(m) > g.mostRecent) g.mostRecent = activityTime(m);
+    if (activityTime(m) >= dayAgo) g.recentCount += 1;
   }
   return [...groups.values()].sort((a, b) => b.mostRecent - a.mostRecent);
 }
@@ -2548,11 +2605,14 @@ function bucketByScope(items) {
 
 // The frontend re-derives scope from state.recentDays, overriding the value the backend sent.
 // The priority matches the backend's compute_scope: archived > starred > mtime-based.
+function activityTime(m) { return m.activity_at || m.mtime || 0; }
+function activityISO(m) { return m.activity_at_iso || m.mtime_iso || ''; }
+
 function computeScope(m) {
   if (m.archived) return 'archived';
   if (m.starred) return 'starred';
   if (state.recentDays === 'all') return 'recent';
-  const ageDays = (Date.now() / 1000 - m.mtime) / 86400;
+  const ageDays = (Date.now() / 1000 - activityTime(m)) / 86400;
   return ageDays < state.recentDays ? 'recent' : 'dusty';
 }
 
@@ -2574,16 +2634,23 @@ function renderRecentDaysSelector() {
   </div>`;
 }
 
-// The set of sessions the dashboard actually displays right now: source filter → search → hideOneshot, the same pipeline as render.
+function isSuspected(m) {
+  return m.user_turn_count === 1 && !m.human_confirmed;
+}
+
+// The set of sessions the dashboard actually displays right now: source filter → search → suspected-run filter.
 // Extracted so "collapse all" can operate over the full dataset — including cards inside unexpanded groups that aren't currently rendered to the DOM.
 function displayedItems() {
   const scopedItems = state.sourceFilter === 'all'
     ? state.items
     : state.items.filter(m => (m.source || 'claude') === state.sourceFilter);
   const q = state.q.toLowerCase();
-  let filtered = q ? scopedItems.filter(m => m.id in state.searchHits) : scopedItems;
-  if (state.hideOneshot) filtered = filtered.filter(m => m.user_turn_count !== 1);
-  return { scopedItems, filtered };
+  const matched = q ? scopedItems.filter(m => m.id in state.searchHits) : scopedItems;
+  const hiddenSuspected = state.hideOneshot ? matched.filter(isSuspected) : [];
+  let filtered = state.hideOneshot ? matched.filter(m => !isSuspected(m)) : matched;
+  // Archive remains a deliberate hide action in the primary timeline, but search can still retrieve it.
+  if (state.viewMode === 'timeline' && !q) filtered = filtered.filter(m => !m.archived);
+  return { scopedItems, filtered, hiddenSuspected };
 }
 
 let _hasRendered = false;  // The entrance animation runs only once: true on the first frame, after which all renders (including live polling) no longer replay it
@@ -2593,9 +2660,9 @@ function render() {
   $list.classList.toggle('anim-in', !_hasRendered);
   _hasRendered = true;
 
-  // The unified filtering pipeline for source filter / search / hideOneshot (see displayedItems).
+  // The unified filtering pipeline for source filter / search / suspected runs (see displayedItems).
   // state.items stays unchanged (still everything the backend returned), avoiding data loss when switching.
-  const { scopedItems, filtered } = displayedItems();
+  const { scopedItems, filtered, hiddenSuspected } = displayedItems();
 
   if (scopedItems.length === 0) {
     $count.textContent = '0 sessions';
@@ -2620,10 +2687,30 @@ function render() {
   // No search results: a dedicated empty state, echoing the query term + one-click clear (distinguishing "nothing found" from "didn't search")
   if (state.q && filtered.length === 0) {
     $count.textContent = '0 / ' + scopedItems.length + ' sessions';
-    $list.innerHTML = `<div class="empty"><div class="empty-title">No matches for “${escapeHtml(state.q)}”</div><button class="empty-action" id="empty-clear-search">Clear search</button></div>`;
-    document.getElementById('empty-clear-search')?.addEventListener('click', () => {
-      $search.value = ''; syncSearchClear(); $search.dispatchEvent(new Event('input')); $search.focus();
-    });
+    if (hiddenSuspected.length) {
+      $list.innerHTML = `<div class="empty"><div class="empty-title">No visible matches for “${escapeHtml(state.q)}”</div><div class="empty-hint">${hiddenSuspected.length} matching suspected ${hiddenSuspected.length === 1 ? 'run is' : 'runs are'} hidden.</div><button class="empty-action" id="empty-show-suspected">Search suspected runs</button></div>`;
+      document.getElementById('empty-show-suspected')?.addEventListener('click', () => {
+        state.hideOneshot = false; syncSuspectedFilterUI(); saveUIState(); render();
+      });
+    } else {
+      $list.innerHTML = `<div class="empty"><div class="empty-title">No matches for “${escapeHtml(state.q)}”</div><button class="empty-action" id="empty-clear-search">Clear search</button></div>`;
+      document.getElementById('empty-clear-search')?.addEventListener('click', () => {
+        $search.value = ''; syncSearchClear(); $search.dispatchEvent(new Event('input')); $search.focus();
+      });
+    }
+    return;
+  }
+
+  if (!state.q && filtered.length === 0) {
+    $count.textContent = '0 / ' + scopedItems.length + ' sessions';
+    if (hiddenSuspected.length) {
+      $list.innerHTML = `<div class="empty"><div class="empty-title">No visible sessions</div><div class="empty-hint">${hiddenSuspected.length} suspected ${hiddenSuspected.length === 1 ? 'run is' : 'runs are'} hidden.</div><button class="empty-action" id="empty-show-suspected">Show suspected runs</button></div>`;
+      document.getElementById('empty-show-suspected')?.addEventListener('click', () => {
+        state.hideOneshot = false; syncSuspectedFilterUI(); saveUIState(); render();
+      });
+    } else {
+      $list.innerHTML = `<div class="empty"><div class="empty-title">No active sessions</div></div>`;
+    }
     return;
   }
 
@@ -2633,6 +2720,18 @@ function render() {
     $count.textContent = filtered.length + ' / ' + scopedItems.length + ' sessions';
   }
 
+  if (state.viewMode === 'timeline') {
+    const scrollTop = $list.scrollTop;
+    $list.classList.add('timeline');
+    $list.innerHTML = `<div class="timeline-list">${filtered
+      .slice().sort((a, b) => activityTime(b) - activityTime(a)).map(renderCard).join('')}</div>`;
+    $list.scrollTop = scrollTop;
+    bindCardEvents();
+    syncCollapseAllBtn();
+    return;
+  }
+
+  $list.classList.remove('timeline');
   const buckets = bucketByScope(filtered);
   const searching = q.length > 0;
 
@@ -3044,7 +3143,7 @@ function renderCard(m) {
     ? `<div class="note">${escapeHtml(m.note)}</div>`
     : '';
   // A2 freshness: mtime within the last 1 hour → add fresh to time-tag (more eye-catching, scannable at a glance for "which are still hot")
-  const _mt = m.mtime_iso ? new Date(m.mtime_iso).getTime() : 0;
+  const _mt = activityTime(m) * 1000;
   const isFresh = _mt && (Date.now() - _mt) < 3600 * 1000;
   // D2 persistent "has a note" micro-marker (shown even in the collapsed state, not dependent on hover)
   const noteIndicator = m.note
@@ -3062,13 +3161,23 @@ function renderCard(m) {
   const archiveClass = m.archived ? '' : 'btn-danger';
   const archiveIcon = m.archived ? ICONS.unarchive : ICONS.archive;
   const starLabel = m.starred ? 'unstar' : 'star';
-  const titleBlock = m.custom_title
-    ? `<div class="card-title" title="${escapeHtml(m.custom_title)}">${escapeHtml(m.custom_title)}</div>`
+  const displayTitle = m.display_title || m.custom_title || '';
+  const titleBlock = displayTitle
+    ? `<div class="card-title" title="${escapeHtml(displayTitle)}">${escapeHtml(displayTitle)}</div>`
+    : '';
+  const suspectedBadge = isSuspected(m)
+    ? `<div class="suspected-badge" title="Suspected because this session has one user turn">Suspected automated run · single-turn</div>`
     : '';
   // The group header already shows the main repo name; the card only shows the .worktrees/<branch> suffix for worktree sessions,
   // and the main-repo card doesn't render this row (project identity is read from the group header). Unknown paths still show a placeholder.
   let pathLabel = '';
-  if (!m.project_path) {
+  if (state.viewMode === 'timeline') {
+    pathLabel = projectKey(m.project_path);
+    const trunk = stripWorktree(m.project_path);
+    if (trunk && m.project_path && m.project_path.length > trunk.length) {
+      pathLabel += ` · ${m.project_path.slice(trunk.length).replace(/^\//, '')}`;
+    }
+  } else if (!m.project_path) {
     pathLabel = NO_WORKSPACE_KEY;
   } else {
     const trunk = stripWorktree(m.project_path);
@@ -3110,6 +3219,7 @@ function renderCard(m) {
       ${collapseBtn}
       ${filesAbsBtn}
       ${titleBlock}
+      ${suspectedBadge}
       ${pathrow}
       <div class="card-foot">
         <span class="card-sid-wrap">
@@ -3118,7 +3228,7 @@ function renderCard(m) {
           <button class="sid-link-btn" data-act="copy-path" data-tooltip="Copy source reference" aria-label="Copy source reference">${ICONS.link}</button>
           <button class="sid-link-btn" data-act="copy-link" data-tooltip="Copy shareable link" aria-label="Copy shareable link">${ICONS.share}</button>
         </span>
-        <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(m.mtime_iso || '')}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(m.mtime_iso)}</span>
+        <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(activityISO(m))}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(activityISO(m))}</span>
         ${noteIndicator}
         <div class="card-actions">
           <button class="btn" data-act="note" data-tooltip="Edit note" aria-label="Edit note">${ICONS.note}</button>
@@ -3703,6 +3813,72 @@ async function openFileInSystem(filePath) {
   }
 }
 
+function sessionMetadataTargets(data, meta) {
+  return [...new Set([data, meta, state.items.find(item => item.id === data.id)].filter(Boolean))];
+}
+
+function redrawSessionMetadata(data, meta) {
+  const scrollTop = $conv?.querySelector('.conv-body')?.scrollTop || 0;
+  if (!_convStandalone) render();
+  renderConv(data, state.items.find(item => item.id === data.id) || meta);
+  const body = $conv?.querySelector('.conv-body');
+  if (body) body.scrollTop = scrollTop;
+}
+
+async function editSessionTitle(data, meta) {
+  const targets = sessionMetadataTargets(data, meta);
+  const current = targets.find(item => item.title_override)?.title_override || '';
+  const nextValue = await window.openTextModal(current, {
+    title: 'Personal Session Title',
+    placeholder: 'Name this Session… (save empty to clear)',
+    multiline: false,
+  });
+  if (nextValue === null) return;
+  const next = nextValue.trim();
+  const previous = targets.map(item => ({item, title_override: item.title_override, display_title: item.display_title}));
+  for (const item of targets) {
+    item.title_override = next;
+    item.display_title = next || item.custom_title || '';
+  }
+  redrawSessionMetadata(data, meta);
+  try {
+    const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(data.id)}/title`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title_override: next}),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    toast(next ? 'Title saved' : 'Personal title cleared');
+  } catch (err) {
+    for (const old of previous) {
+      old.item.title_override = old.title_override;
+      old.item.display_title = old.display_title;
+    }
+    redrawSessionMetadata(data, meta);
+    toast('Title failed: ' + err.message);
+  }
+}
+
+async function setSessionHumanConfirmation(data, meta, confirmed) {
+  const targets = sessionMetadataTargets(data, meta);
+  const previous = targets.map(item => ({item, human_confirmed: item.human_confirmed}));
+  for (const item of targets) item.human_confirmed = confirmed;
+  redrawSessionMetadata(data, meta);
+  try {
+    const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(data.id)}/human`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({human_confirmed: confirmed}),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    toast(confirmed ? 'Marked as human Session' : 'Human confirmation removed');
+  } catch (err) {
+    for (const old of previous) old.item.human_confirmed = old.human_confirmed;
+    redrawSessionMetadata(data, meta);
+    toast('Update failed: ' + err.message);
+  }
+}
+
 function renderConv(data, meta) {
   const head = $conv.querySelector('.conv-head');
   const body = $conv.querySelector('.conv-body');
@@ -3718,6 +3894,7 @@ function renderConv(data, meta) {
   const archiveLabel = meta?.archived ? 'unarchive' : 'archive';
   const archiveClass = meta?.archived ? '' : 'btn-danger';
   const archiveIcon = meta?.archived ? ICONS.unarchive : ICONS.archive;
+  const humanConfirmed = Boolean(meta?.human_confirmed ?? data.human_confirmed);
   // Raw toggle: shown in all modes (including standalone), independent of meta. Highlighted accent when active.
   const rawBtnHtml = `<button class="btn conv-raw-btn ${_convRaw ? 'active' : ''}" id="conv-raw" aria-pressed="${_convRaw}" data-tooltip="${_convRaw ? 'Showing raw text in this view — click for rendered markdown' : 'Show raw text for this view'}">${ICONS.code}${_convRaw ? 'raw on' : 'raw'}</button>`;
   // Export submenu: three export actions (shown in all modes, independent of meta) collected into one menu.
@@ -3759,11 +3936,20 @@ function renderConv(data, meta) {
   const closeHtml = _convStandalone ? '' :
     `<button class="conv-close" id="conv-close">${ICONS.close}</button>`;
 
-  // /title custom title takes priority; otherwise fall back to project_path / id
-  const headTitle = data.custom_title || data.project_path || data.id;
-  const subtitleHtml = data.custom_title && data.project_path
-    ? `<div class="conv-subtitle" title="${escapeHtml(data.project_path)}">${escapeHtml(data.project_path)}</div>`
+  const titleOverride = meta?.title_override ?? data.title_override ?? '';
+  const sourceTitle = data.custom_title || meta?.custom_title || '';
+  const headTitle = titleOverride || sourceTitle || data.project_path || data.id;
+  const subtitleParts = [];
+  if (titleOverride && sourceTitle) subtitleParts.push(`Source: ${sourceTitle}`);
+  if ((titleOverride || sourceTitle) && data.project_path) subtitleParts.push(data.project_path);
+  const subtitle = subtitleParts.join(' · ');
+  const subtitleHtml = subtitle
+    ? `<div class="conv-subtitle" title="${escapeHtml(subtitle)}">${escapeHtml(subtitle)}</div>`
     : '';
+  const humanIdentityHtml = userCount === 1
+    ? `<span class="conv-identity-label">${humanConfirmed ? 'Human-confirmed · single-turn' : 'Suspected automated run · single-turn'}</span><button type="button" id="conv-human">${humanConfirmed ? 'Undo' : 'I participated in this Session'}</button>`
+    : '';
+  const localMetadataHtml = `<div class="conv-identity">${humanIdentityHtml}<button type="button" id="conv-title-edit">${titleOverride ? 'Edit personal title' : 'Add personal title'}</button></div>`;
   // Source pill: modal identity tag, on the same line as conv-title
   const sourceVal = (meta?.source || data.source || 'claude');
   const SRC_PILL = {
@@ -3784,7 +3970,7 @@ function renderConv(data, meta) {
     <div class="conv-detail">
       <span class="conv-sid-wrap"><span class="conv-copy-id" data-copy-id="${escapeHtml(data.id)}" data-tooltip="Click to copy session ID">${escapeHtml(data.id)}</span>${pathBtnHtml}</span>
       ${sizeKB ? `<span>${sizeKB}</span>` : ''}
-      ${meta?.mtime_iso ? `<span>${escapeHtml(fmtAbsTime(meta.mtime_iso))}</span>` : ''}
+      ${meta ? `<span>${escapeHtml(fmtAbsTime(activityISO(meta)))}</span>` : ''}
       ${meta?.jsonl_path ? `<div style="margin-top:2px">${escapeHtml(meta.jsonl_path)}</div>` : ''}
     </div>`;
 
@@ -3797,6 +3983,7 @@ function renderConv(data, meta) {
         </div>
         ${subtitleHtml}
         <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} ${data.source === 'devin' ? 'database nodes' : 'raw lines'}</div>
+        ${localMetadataHtml}
       </div>
       ${actionsHtml}
       ${shareHtml}
@@ -3845,6 +4032,12 @@ function renderConv(data, meta) {
     const scrollTop = body.scrollTop;
     renderConv(data, meta);
     $conv.querySelector('.conv-body').scrollTop = scrollTop;
+  });
+  head.querySelector('#conv-title-edit')?.addEventListener('click', () => {
+    editSessionTitle(data, meta);
+  });
+  head.querySelector('#conv-human')?.addEventListener('click', () => {
+    setSessionHumanConfirmation(data, meta, !humanConfirmed);
   });
   if (hasMeta) {
     head.querySelector('#conv-star').addEventListener('click', () => {
@@ -4036,7 +4229,7 @@ function renderConv(data, meta) {
 
   // standalone: set page title so the browser tab shows it
   if (_convStandalone) {
-    document.title = (data.custom_title || data.project_path || data.id) + ' · Sessions';
+    document.title = (data.display_title || data.custom_title || data.project_path || data.id) + ' · Sessions';
   }
 }
 
@@ -4755,11 +4948,32 @@ document.addEventListener('keydown', (e) => {
 // On startup, sync the UI to state (when restoring from localStorage)
 syncSourceFilterUI();
 
-// Hide one-shot (claude -p) toggle
+// Primary timeline / legacy project view.
+const $viewToggle = document.getElementById('view-toggle');
+function syncViewUI() {
+  $viewToggle.querySelectorAll('[data-view]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === state.viewMode);
+  });
+}
+$viewToggle.addEventListener('click', e => {
+  const btn = e.target.closest('[data-view]');
+  if (!btn || !VIEW_MODES.includes(btn.dataset.view)) return;
+  state.viewMode = btn.dataset.view;
+  syncViewUI(); saveUIState(); render();
+});
+syncViewUI();
+
+// Suspected automated-run filter. The checkbox keeps the old hideOneshot storage key for compatibility.
 const $hideOneshot = document.getElementById('hide-oneshot');
-$hideOneshot.checked = state.hideOneshot;
+const $suspectedFilterLabel = document.getElementById('suspected-filter-label');
+function syncSuspectedFilterUI() {
+  $hideOneshot.checked = state.hideOneshot;
+  $suspectedFilterLabel.textContent = state.hideOneshot ? 'Suspected runs hidden' : 'Showing suspected runs';
+}
+syncSuspectedFilterUI();
 $hideOneshot.addEventListener('change', () => {
   state.hideOneshot = $hideOneshot.checked;
+  syncSuspectedFilterUI();
   saveUIState();
   render();
 });
@@ -4788,11 +5002,12 @@ const LIVE_SLOW_MS = 20000;     // idle: no interaction for a long time
 const LIVE_ACTIVE_WINDOW_MS = 60000;  // how long after an interaction still counts as "active"
 
 // Cheap fingerprint: only include fields that affect display and are backend-authoritative (scope is a frontend-derived value, not in the fingerprint).
-// star/archive don't change the jsonl mtime, so they must be included explicitly — otherwise a state change made elsewhere wouldn't be visible.
+// Local metadata doesn't change the transcript mtime, so include it explicitly.
 function sessionsSignature(items) {
   let s = items.length + '|';
   for (const m of items) {
-    s += m.id + ':' + m.mtime + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0) + ',';
+    s += m.id + ':' + m.mtime + ':' + activityTime(m) + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0)
+      + ':' + (m.human_confirmed ? 1 : 0) + ':' + (m.title_override || '') + ',';
   }
   return s;
 }
@@ -4854,8 +5069,8 @@ async function livePoll() {
     const sig = sessionsSignature(items);
     if (sig !== _liveSig) {
       // B2 compute the ids that are new/advanced (old mtime vs new), and after render flash only these
-      const prev = new Map(state.items.map(m => [m.id, m.mtime]));
-      const changedIds = items.filter(m => !prev.has(m.id) || prev.get(m.id) !== m.mtime).map(m => m.id);
+      const prev = new Map(state.items.map(m => [m.id, activityTime(m)]));
+      const changedIds = items.filter(m => !prev.has(m.id) || activityTime(m) > prev.get(m.id)).map(m => m.id);
       _liveSig = sig;
       state.items = items;
       _lastInteractionAt = Date.now();  // a real change → enter active cadence, ask more frequently next round
@@ -4991,6 +5206,7 @@ applyColLeftPct();
     <div class="note-dialog">
       <div class="note-dialog-title">Session Note</div>
       <textarea id="note-textarea" name="note" aria-label="Session note" placeholder="Add a note… (save empty to clear)"></textarea>
+      <input id="note-input" name="title" aria-label="Personal Session title" hidden>
       <div class="note-dialog-foot">
         <button class="btn-cancel">Cancel</button>
         <button class="btn-save">Save</button>
@@ -4998,19 +5214,32 @@ applyColLeftPct();
     </div>`;
   document.body.appendChild(overlay);
 
+  const dialogTitle = overlay.querySelector('.note-dialog-title');
   const ta = overlay.querySelector('textarea');
+  const input = overlay.querySelector('input');
   const btnSave = overlay.querySelector('.btn-save');
   const btnCancel = overlay.querySelector('.btn-cancel');
   let _resolve = null;
+  let activeField = ta;
 
-  function openNoteModal(current) {
+  function openTextModal(current, options = {}) {
     return new Promise(resolve => {
       _resolve = resolve;
-      ta.value = current || '';
+      const multiline = options.multiline !== false;
+      activeField = multiline ? ta : input;
+      ta.hidden = !multiline;
+      input.hidden = multiline;
+      dialogTitle.textContent = options.title || 'Session Note';
+      activeField.placeholder = options.placeholder || 'Add a note… (save empty to clear)';
+      activeField.value = current || '';
       overlay.style.display = 'flex';
       // Wait until render is done before focusing, to avoid a Safari issue
-      requestAnimationFrame(() => { ta.focus(); ta.select(); });
+      requestAnimationFrame(() => { activeField.focus(); activeField.select(); });
     });
+  }
+
+  function openNoteModal(current) {
+    return openTextModal(current, {multiline: true});
   }
 
   function close(value) {
@@ -5018,17 +5247,20 @@ applyColLeftPct();
     if (_resolve) { _resolve(value); _resolve = null; }
   }
 
-  btnSave.addEventListener('click', () => close(ta.value));
+  btnSave.addEventListener('click', () => close(activeField.value));
   btnCancel.addEventListener('click', () => close(null));
   overlay.addEventListener('click', e => { if (e.target === overlay) close(null); });
   document.addEventListener('keydown', e => {
     if (overlay.style.display === 'none') return;
     if (e.key === 'Escape') { e.preventDefault(); close(null); }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); close(ta.value); }
+    if (e.key === 'Enter' && (activeField === input || e.metaKey || e.ctrlKey)) {
+      e.preventDefault(); close(activeField.value);
+    }
   });
 
   // Attach to global scope so bindCardEvents can call it
   window.openNoteModal = openNoteModal;
+  window.openTextModal = openTextModal;
 })();
 
 // PWA service worker registration — to satisfy Chrome's heuristic check for the install prompt
