@@ -4,50 +4,73 @@ Top-level positioning and boundaries. Read this document before adding or reject
 
 ## How the user works (design premise)
 
-Session volume eventually makes manual lifecycle management unsustainable. The durable jobs are simpler:
+Session volume eventually makes manual lifecycle management unsustainable. Whether a live
+Session should continue or be archived is decided in its agent client. The durable need here is
+to recover work later, often across many clients and projects.
 
-1. Find a past Session by time or search.
-2. Read its detail and reuse the work.
-3. Add a personal title when the source title is not enough to find it again.
-
-## What the Dashboard is
+## What Session Logbook is
 
 | | |
 |---|---|
 | ✅ Retrieval layer | Find and re-read work across agent clients |
 | ❌ Orchestrator | Does not send messages, does not spawn sessions |
-| ❌ Client | Does not write messages, does not push in real time |
+| ❌ Lifecycle manager | Does not decide which client Sessions stay alive or get archived |
+| ❌ Client | Does not write messages or push in real time |
 
-The agent clients own Session lifecycle. Session Logbook reads their history and adds only small, local recovery metadata.
+The primary journey is deliberately short:
 
-## Primary surface
+1. Find a Session by time or search.
+2. Open Session Detail and recover the full context.
+3. Reuse the work elsewhere.
 
-The default view is one cross-project timeline in reverse chronological order. Search and Session Detail are the main interaction path. Project grouping remains an alternate view for people who still need the older organization model.
+The browser and Agent CLI are complementary interfaces to local Session history. The browser is
+optimized for human recall and reading; the CLI is optimized for bounded Agent retrieval and
+evidence expansion.
 
-Single-turn Sessions are hidden by default as **suspected automated runs**. This is deliberately a suspicion, not an identity claim. The filter is visible, can be disabled, and a matching hidden result is offered when normal search returns nothing. A revealed Session can be marked as human-participated; that small correction is stored locally and is reversible. Explicitly identified sub-agent logs remain excluded at the source layer.
+## Product direction
 
-A personal title overrides display and participates in search. The source title is retained, and clearing the personal title restores it. Naming a Session does not change its human/automated classification.
+The primary browser surface is one reverse-chronological timeline across projects, with
+search as the other main entry. Project boundaries can help narrow a result, but should not split
+the default history into separate places.
 
-## Legacy project organization
+Explicitly identified sub-agent logs are machine-to-machine work, not conversations the user
+remembers having. They should not appear as standalone human Sessions. When the source does not
+provide reliable identity, the product may use a simple, visible **suspected non-human Session**
+filter. Initially, single-turn Sessions without human confirmation are suspected and hidden by default in the timeline and search. Empty results explain the active filter and offer to reveal hidden matches. A suspicion is not a fact: the user must be able to reveal the filtered results and mark a
+Session as human-participated. Opening, naming, or copying a Session does not silently classify it.
 
-The project view keeps the original four-zone hierarchy. These controls are secondary compatibility tools, not the product's main lifecycle model.
+Local metadata belongs only when it improves retrieval. A personal title is useful when the source
+title is hard to remember: it may override display and participate in search, while the source title
+stays intact and clearing the personal title restores it. This is different from managing the
+Session's lifecycle.
+
+Start with the smallest useful rule and correct real failures as they appear. Do not build a
+classification framework, scoring system, or edge-case matrix in advance.
+
+## Existing organization is secondary
+
+The current project view and its four zones remain useful compatibility tools. They are not the
+product's primary lifecycle model.
+
+### Four-zone hierarchy
 
 | Zone | Entry condition | Default | Purpose |
 |---|---|---|---|
 | ⭐ Starred | Starred manually | Expanded | "I want to remember this" |
-| 🔥 Recent | mtime ≥ now − N days | Expanded | The main working surface |
+| 🔥 Recent | mtime ≥ now − N days | Expanded | Newer Sessions in the project view |
 | 🕸 Dusty | mtime < now − N days | Collapsed | Auto-accumulation zone |
 | 📦 Archived | Archived manually | Collapsed | "Out of sight" |
 
 Priority: `archived > starred > mtime`.
 
-## Time decay
+### Time decay
 
-In the project view, once a Session has been untouched for N days, it automatically drops into the collapsed Dusty zone.
+Within the project view, once a Session has been untouched for N days, it automatically drops into
+the collapsed Dusty zone.
 
 N is adjustable: the frontend toggles between 7 / 14 / 21 d (persisted in localStorage); the initial default equals the backend's `DUSTY_AFTER_DAYS`.
 
-## Star ⊥ Archive
+### Star ⊥ Archive
 
 | | Meaning | Overrides |
 |---|---|---|
@@ -91,13 +114,15 @@ quiet transcript proves liveness or completion.
 | Won't do | Reason |
 |---|---|
 | Send messages / spawn sessions | The CLI is already the orchestrator |
+| Manage client Session lifecycle | Each agent client already owns whether its Session stays alive or is archived |
 | Multi-user / authentication | A single-user, local-machine tool |
-| SSE / WebSocket | Manual ↻ is already enough; a persistent connection costs 100× its value to sync |
-| Full-text session browsing (beyond search snippets) | `code $jsonl_path` does the job |
-| Auto star / archive via ML | The decay threshold already replaces 99% of the need |
+| SSE / WebSocket | Existing polling supports list and reader updates without a persistent push connection |
+| Predict human identity or lifecycle with ML | Visible suspicion plus reversible correction is enough until real use proves otherwise |
 | Cross-machine sync / mobile support | The work environment is right here on this machine |
 
-Before adding a feature: run it past this table first, then past the three negations under "What the Dashboard is."
+Before adding a feature, ask whether it makes historical work easier to find, read, or reuse. If
+not, it should normally stay out. Then run it past this table and the boundaries under "What
+Session Logbook is."
 
 ## Database-backed source coordinates
 
