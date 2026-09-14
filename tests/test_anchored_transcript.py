@@ -13,6 +13,9 @@ from pathlib import Path
 from sources import anchored_transcript as at
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex"
+KIMI_FIXTURES = Path(__file__).parent / "fixtures" / "kimi" / "sessions"
+KIMI_MAIN = (KIMI_FIXTURES / "wd_my-app_0123456789ab" / "session_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+             / "agents" / "main" / "wire.jsonl")
 
 
 def _write_jsonl(lines):
@@ -185,6 +188,55 @@ class CodexRenderTests(unittest.TestCase):
         self.assertIn("keep this real prompt", out)
 
 
+class KimiRenderTests(unittest.TestCase):
+    def setUp(self):
+        self.out = at.render_kimi(KIMI_MAIN)
+        self.lines = self.out.splitlines()
+
+    def test_user_turns_anchor_to_turn_prompt_lines(self):
+        self.assertIn("━━━━━━━━━━ [U1] [L4] USER", self.out)
+        self.assertIn("List the files in the project and tell me what it does", self.out)
+        self.assertIn("[U2] [L30] USER", self.out)
+        self.assertNotIn("[U3]", self.out)
+
+    def test_injection_and_task_messages_are_context_not_user_turns(self):
+        self.assertIn("[L5]   [CONTEXT injected (injection): <env>injected environment notes</env>]", self.out)
+        self.assertIn("[L29]   [CONTEXT injected (task): Background task finished: index rebuilt]", self.out)
+        self.assertEqual(sum(1 for l in self.lines if "Background task finished" in l), 1)
+
+    def test_think_tool_and_result_lines(self):
+        self.assertIn("[L9]   💭 THINK: I should list the files first.", self.out)
+        self.assertIn("[L10]   🔧 Bash: ls -la", self.out)
+        self.assertIn("[L11]   ⮑ RESULT OK: [2 lines, 19 chars hidden; use evidence]", self.out)
+        self.assertNotIn("README.md", self.out)
+        self.assertIn("[L23]   🔧 Grep: pattern='def main' path=/Users/alice/my-app", self.out)
+        self.assertIn("[L24]   ⮑ RESULT ERROR: grep: permission denied", self.out)
+
+    def test_assistant_text_per_part_and_qa(self):
+        self.assertIn("[L14] ASSISTANT: It is a small web dashboard.", self.out)
+        self.assertIn("[L15]   🔧 AskUserQuestion: Which area should I explain first?", self.out)
+        self.assertIn("[L17]   ⮑ USER ANSWERED: Which area should I explain first? → Backend", self.out)
+        self.assertEqual(sum(1 for l in self.lines if "Which area should I explain first?" in l), 2)
+
+    def test_session_meta_and_turn_end(self):
+        self.assertIn("[L1] [SESSION_META] protocol=1.5", self.out)
+        self.assertIn("[L2] [SESSION_META] cwd=/Users/alice/my-app model=kimi-k2-turbo", self.out)
+        self.assertIn("[L35] [TURN ENDED: completed]", self.out)
+
+    def test_every_rendered_line_carries_an_anchor(self):
+        for line in self.lines:
+            if not line or line.startswith("━━━"):
+                continue
+            if line.startswith("[L"):
+                continue
+            # user body text follows its own [U#] [L#] banner
+            self.assertIn(line, ("List the files in the project and tell me what it does",
+                                 "Thanks, summarize in one line"))
+
+    def test_render_core_stays_clean(self):
+        self.assertNotIn("COMPACT SESSION DIGEST", self.out)
+
+
 class DigestHeaderTests(unittest.TestCase):
     """Self-describing header: lets a cold recipient read the anchors and go back to the original from the .txt alone."""
 
@@ -208,6 +260,7 @@ class DigestHeaderTests(unittest.TestCase):
     def test_header_source_label(self):
         self.assertIn("Codex", at.digest_header("/x.jsonl", "codex"))
         self.assertIn("Claude Code", at.digest_header("/x.jsonl", "claude"))
+        self.assertIn("Kimi Code", at.digest_header("/x.jsonl", "kimi"))
 
     def test_render_core_stays_clean(self):
         # Key: the render body must never contain the header -- the offline pipeline's byte-level consistency contract depends on this

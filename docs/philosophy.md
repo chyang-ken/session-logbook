@@ -48,13 +48,13 @@ Before shrinking a session, ask one question first: **who is the reduction for?*
 
 | Consumer | Artifact | Anchors / back-reference | Source | Current carrier |
 |---|---|---|---|---|
-| **Agent reading** (fed read-only analysis, expands back to the original on demand) | rendered anchored transcript (plain text) | `[U#]` for human turns + `[L#]` for the **original line number** — one jump and you're there | Claude + Codex ✓ | `sources/anchored_transcript.py` via the web download or Agent CLI |
-| **Human reading** (review, clipboard) | token-optimized Markdown | None (read once, then discard) | Dual-source ✓ | modal `export` button → `extract_transcript` |
+| **Agent reading** (fed read-only analysis, expands back to the original on demand) | rendered anchored transcript (plain text) | `[U#]` for human turns + `[L#]` for the **original line number** — one jump and you're there | Claude + Codex + Kimi ✓ | `sources/anchored_transcript.py` via the web download or Agent CLI |
+| **Human reading** (review, clipboard) | token-optimized Markdown | None (read once, then discard) | All four sources ✓ | modal `export` button → `extract_transcript` |
 | **Programmatic parsing** (structured re-assembly) | structured JSONL | call_id / turn_id | Codex only | No current product surface; the early trim attempt was superseded by render |
 
 Hard rules:
 
-1. **The rendered anchored transcript is the standard reduction artifact for agents** — it does not replace the raw jsonl; it's a **navigation layer carrying original-file coordinates**. User and Assistant message text stays complete. Tool actions retain their target path, search scope, or command prefix. Successful result bodies collapse to status and size; leading error text stays visible. Thinking, injected context, and binary content are reduced. The agent uses `[L#]` to fetch hidden operational detail back from the original with precision. The raw jsonl always lives in `~/.claude` / `~/.codex`, so "read the conversation, expand operations on demand" holds naturally on the local machine. The dashboard download and `session_logbook_cli.py context` emit the same artifact through `sources/anchored_transcript.py`.
+1. **The rendered anchored transcript is the standard reduction artifact for agents** — it does not replace the raw jsonl; it's a **navigation layer carrying original-file coordinates**. User and Assistant message text stays complete. Tool actions retain their target path, search scope, or command prefix. Successful result bodies collapse to status and size; leading error text stays visible. Thinking, injected context, and binary content are reduced. The agent uses `[L#]` to fetch hidden operational detail back from the original with precision. The raw jsonl always lives in `~/.claude` / `~/.codex` / `~/.kimi-code`, so "read the conversation, expand operations on demand" holds naturally on the local machine. The dashboard download and `session_logbook_cli.py context` emit the same artifact through `sources/anchored_transcript.py`.
 2. **A model-written summary (a brief or a session-review report) is downstream of reduction, not a fourth kind of reduction** — it consumes any of the artifacts above and produces a shorter insight. Don't conflate "summary" with "reduction" as if they were the same layer.
 3. **Before adding any new "reduction / summary" variant, come back to this table** and prove the existing three can't cover the case before doing anything. The structured use case for `trim` has no live demand right now; to revive it, first prove the rendered anchored transcript can't feed your consumer.
 
@@ -84,3 +84,28 @@ quiet transcript proves liveness or completion.
 | Cross-machine sync / mobile support | The work environment is right here on this machine |
 
 Before adding a feature: run it past this table first, then past the three negations under "What the Dashboard is."
+
+## Database-backed source coordinates
+
+Devin Local uses its selected SQLite message chain as the original evidence.
+`[N#]` addresses `message_nodes.row_id` within the identified session; it never
+pretends that a generated transcript line is an original source line. Context and
+HTTP anchored export share the Devin renderer. Follow returns the full current
+chain because edits and compaction can replace prior nodes. Evidence can still
+expand an old node belonging to that session. See
+[the Devin Local decision](decisions/2026-09-08-devin-local.md).
+
+
+## Session selection is shared metadata
+
+Session Logbook owns source relationships and selection hints for downstream clients.
+The CLI and HTTP selector reuse `sources/session_identity.py`; clients must not infer
+parentage or maintain a second classification registry. The selection endpoint returns
+recent primary and single-turn groups separately so a burst of automated work cannot
+crowd all other candidates out. A single user turn is useful evidence for folding likely
+automation, not proof: `interaction_kind` stays unknown, and clients can reveal the
+other group. Names and stars are not required. Explicit children are linked to their
+parent by the CLI and omitted from standalone selector candidates. Search and source
+records remain available; selection never archives, deletes, or grants permission.
+Large Claude logs are checked for a second user turn instead of treating file size as
+evidence of a conversation. The existing preview count remains backward compatible.

@@ -79,6 +79,7 @@ class TestScanCachePersistence(ScanCacheTestCase):
 
                 server._scan_cache_dirty = True
                 self.assertTrue(server.save_scan_cache())
+                self.assertFalse((root / "backups").exists())
 
                 server._cache.clear()
                 server._CWD_TRUTH_MAP.clear()
@@ -187,6 +188,7 @@ class TestScanCacheIncremental(ScanCacheTestCase):
                     mock.patch.object(server, "PROJECTS_DIR", projects_dir), \
                     mock.patch.object(server.codex_source, "scan_sessions", return_value=[]), \
                     mock.patch.object(server.ag_source, "scan_sessions", return_value=[]), \
+                    mock.patch.object(server.kimi_source, "scan_sessions", return_value=[]), \
                     mock.patch.object(server, "extract_metadata", side_effect=fake_extract):
                 server.scan_sessions(force=True)
                 self.assertCountEqual(calls, ["a.jsonl", "b.jsonl"])

@@ -2,6 +2,8 @@
 """Session Logbook - a minimal, zero-dependency, local dashboard for AI-agent sessions."""
 import argparse
 import json
+import hashlib
+import sqlite3
 import os
 import re
 import shutil
@@ -16,6 +18,9 @@ from pathlib import Path
 from sources import antigravity as ag_source
 from sources import anchored_transcript
 from sources import codex as codex_source
+from sources import devin as devin_source
+
+from sources import kimi as kimi_source
 
 # ---------- Config ----------
 HOST = "127.0.0.1"
@@ -33,8 +38,10 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 4
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
+# Legacy timestamped backups are pruned for backward compatibility. New backups are not
+# created because this cache is derived entirely from the original session sources.
 SCAN_CACHE_BACKUP_DIR = Path.home() / ".session-logbook" / "scan-cache-backups"
 
 DASHBOARD_DIR = Path(__file__).resolve().parent
@@ -71,6 +78,10 @@ RIPGREP_FALLBACK_PATHS = (
     Path("/opt/homebrew/bin/rg"),  # Apple Silicon Homebrew GUI/background services
     Path("/usr/local/bin/rg"),    # Intel Homebrew and common local installs
 )
+# Keep explicit path arguments well below the operating system's exec limit. The session
+# corpus can contain thousands of long absolute paths; one giant argv eventually crosses
+# macOS ARG_MAX and silently forces the much slower full-Python scan.
+RIPGREP_ARG_CHUNK_BYTES = 256 * 1024 if os.name != "nt" else 24 * 1024
 
 # ---------- In-memory state ----------
 _cache = {}   # jsonl_path_str -> session meta dict
@@ -217,18 +228,16 @@ def _mark_scan_cache_dirty():
     _scan_cache_dirty = True
 
 
-def _backup_scan_cache_file():
-    """Copy the scan cache into the backup directory with a timestamp suffix and prune old backups.
+def _prune_legacy_scan_cache_backups():
+    """Age out legacy cache backups without creating more derived copies.
 
-    Same discipline as state backups: backup failure does not affect the main write, but it
-    must be reported to stderr.
+    The scan cache is fully rebuildable from original session sources, unlike state.json.
+    Timestamping every valid cache write caused active sessions to create gigabytes of copies.
+    Keep the existing 30-day expiry for already-created files, but stop write amplification.
     """
-    if not SCAN_CACHE_FILE.exists():
+    if not SCAN_CACHE_BACKUP_DIR.exists():
         return
     try:
-        SCAN_CACHE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        shutil.copy2(SCAN_CACHE_FILE, SCAN_CACHE_BACKUP_DIR / f"scan-cache-{ts}.json")
         cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
         for p in SCAN_CACHE_BACKUP_DIR.glob("scan-cache-*.json"):
             try:
@@ -237,7 +246,7 @@ def _backup_scan_cache_file():
             except OSError:
                 pass
     except Exception as e:
-        print(f"[warn] backup failed (scan cache still saved): {e}", file=sys.stderr)
+        print(f"[warn] legacy scan-cache backup cleanup failed: {e}", file=sys.stderr)
 
 
 def _scan_cache_payload():
@@ -326,7 +335,7 @@ def save_scan_cache():
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(SCAN_CACHE_FILE)
         _scan_cache_dirty = False
-        _backup_scan_cache_file()
+        _prune_legacy_scan_cache_backups()
         return True
     except Exception as e:
         print(f"[warn] failed to save scan cache to {SCAN_CACHE_FILE}: {e}", file=sys.stderr)
@@ -688,6 +697,20 @@ def _extract_custom_title(jsonl_path: Path):
     return last
 
 
+def _selection_user_turn(record):
+    """Match the preview's user-turn rules without counting tool/system traffic."""
+    if record.get("type") != "user" or record.get("isMeta"):
+        return False
+    content = record.get("message", {}).get("content")
+    if isinstance(content, str):
+        return bool(content.strip()) and not _is_system_user_string(content.lstrip())
+    if isinstance(content, list):
+        return any(isinstance(b, dict) and b.get("type") == "text"
+                   and isinstance(b.get("text"), str) and b["text"].strip()
+                   and not _is_system_user_string(b["text"].lstrip()) for b in content)
+    return False
+
+
 def extract_metadata(jsonl_path: Path):
     """Read jsonl head (first user message) plus tail, then merge a conversation preview.
 
@@ -745,23 +768,28 @@ def extract_metadata(jsonl_path: Path):
     for line in lines:
         try:
             d = json.loads(line)
-        except Exception:
+        except ValueError:
             continue
-        if d.get("type") != "user":
-            continue
-        msg_content = d.get("message", {}).get("content")
-        if isinstance(msg_content, str):
-            stripped = msg_content.lstrip()
-            if stripped and not _is_system_user_string(stripped):
-                user_turn_count += 1
-        elif isinstance(msg_content, list):
-            for b in msg_content:
-                if isinstance(b, dict) and b.get("type") == "text":
-                    txt = (b.get("text") or "").lstrip()
-                    if txt and not txt.startswith("<system-reminder>"):
-                        user_turn_count += 1
-                        break
+        if _selection_user_turn(d):
+            user_turn_count += 1
+    single_turn = user_turn_count == 1
     if size > TAIL_BUFFER:
+        if user_turn_count < 2:
+            observed = 0
+            try:
+                with jsonl_path.open(encoding="utf-8", errors="replace") as full:
+                    for raw in full:
+                        try:
+                            record = json.loads(raw)
+                        except ValueError:
+                            continue
+                        if _selection_user_turn(record):
+                            observed += 1
+                            if observed >= 2:
+                                break
+                single_turn = observed == 1
+            except OSError:
+                single_turn = None
         user_turn_count = max(user_turn_count, 2)
 
     # Track separately: take the last N user and assistant messages independently
@@ -880,6 +908,7 @@ def extract_metadata(jsonl_path: Path):
         "recent_msgs": recent_msgs,
         "last_stop_reason": last_stop_reason,
         "user_turn_count": user_turn_count,
+        "single_turn": single_turn,
         "custom_title": _extract_custom_title(jsonl_path),
     }
 
@@ -1102,6 +1131,16 @@ def _format_qa_preview(qa_unit, max_chars):
         prefix = '↳ Other: ' if is_other else '↳ '
         parts.append(f"Q: {q['question']}\n{prefix}{ans}")
     return _truncate('\n\n'.join(parts), max_chars)
+
+
+def file_fingerprint(path) -> str:
+    """Cheap change signal for a session file: mtime (ns) + size.
+
+    Taken *before* the file is parsed, so a write that lands mid-parse is still reported as a
+    change on the next poll — the fingerprint can lag behind the content, never run ahead of it.
+    """
+    st = os.stat(path)
+    return f"{st.st_mtime_ns}:{st.st_size}"
 
 
 def extract_conversation(jsonl_path):
@@ -1467,13 +1506,21 @@ def get_or_generate_brief(sid: str, jsonl_path: Path, transcript_text: str):
     Returns (brief_text, status, generated_at_iso), where status is one of
     {'cached', 'generated', 'regenerated', 'failed'}. Failures are not cached.
     """
-    st = jsonl_path.stat()
-    size, mtime = st.st_size, st.st_mtime
+    source_digest = None
+    if devin_source.is_devin_path(jsonl_path):
+        # The selected chain may change without a timestamp/size change.
+        size = len(transcript_text.encode())
+        mtime = devin_source.extract_metadata(jsonl_path)["mtime"]
+        source_digest = hashlib.sha256(transcript_text.encode()).hexdigest()
+    else:
+        st = jsonl_path.stat()
+        size, mtime = st.st_size, st.st_mtime
     entry = _state.get(sid, {})
     cached = entry.get('brief')
 
     if (cached
             and cached.get('size_at_gen') == size
+            and cached.get('source_digest') == source_digest
             and abs(cached.get('mtime_at_gen', 0) - mtime) < 0.001):
         return cached['text'], 'cached', cached.get('generated_at', '')
 
@@ -1490,6 +1537,7 @@ def get_or_generate_brief(sid: str, jsonl_path: Path, transcript_text: str):
         'text': text,
         'size_at_gen': size,
         'mtime_at_gen': mtime,
+        'source_digest': source_digest,
         'generated_at': now_iso,
     }
     _state[sid] = entry
@@ -1545,8 +1593,10 @@ def _find_jsonl(session_id):
     candidates.sort(key=lambda m: m.get('size', 0), reverse=True)
     for meta in candidates:
         p = Path(meta['jsonl_path'])
-        if p.exists():
+        if p.exists() or devin_source.is_devin_path(p):
             return p
+    if session_id.startswith("devin:"):
+        return devin_source.find_session(session_id)
     # Claude filesystem fallback
     if PROJECTS_DIR.exists():
         fs_candidates = []
@@ -1573,6 +1623,10 @@ def _find_jsonl(session_id):
     ag_tp = ag_source.AG_BRAIN / session_id / ".system_generated" / "logs" / "transcript.jsonl"
     if ag_tp.exists():
         return ag_tp
+    # Kimi filesystem fallback; id is the session directory name (session_<uuid>)
+    kimi_wire = kimi_source.find_wire_by_session_id(session_id)
+    if kimi_wire is not None:
+        return kimi_wire
     return None
 
 
@@ -1682,6 +1736,43 @@ def scan_sessions(force=False):
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
 
+    # --- Devin Local database records (including committed WAL data) ---
+    devin_seen = set()
+    try:
+        devin_paths = devin_source.scan_sessions()
+        fingerprint = devin_source.fingerprint()
+        for ref in devin_paths:
+            key = str(ref)
+            devin_seen.add(key)
+            cached = _cache.get(key)
+            if force or cached is None or cached.get("devin_fingerprint") != fingerprint:
+                try:
+                    meta = devin_source.extract_metadata(ref)
+                    meta["devin_fingerprint"] = fingerprint
+                    _cache[key] = meta
+                    _mark_scan_cache_dirty()
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    print(f"[warn] Devin session could not be read: {type(exc).__name__}", file=sys.stderr)
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        print(f"[warn] Devin database unavailable: {type(exc).__name__}", file=sys.stderr)
+        devin_seen = {p for p in _cache if devin_source.is_devin_path(p)}
+
+    # --- Kimi paths ---
+    kimi_seen = set()
+    for jsonl_path in kimi_source.scan_sessions():
+        key = str(jsonl_path)
+        kimi_seen.add(key)
+        try:
+            cur_mtime = jsonl_path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        cached = _cache.get(key)
+        if force or cached is None or cached.get("mtime") != cur_mtime:
+            meta = kimi_source.extract_metadata(jsonl_path)
+            if meta and _cache.get(key) != meta:
+                _cache[key] = meta
+                _mark_scan_cache_dirty()
+
     # --- Clean stale cache keys per root prefix so sources do not delete each other. ---
     # Codex uses is_codex_path to recognize both roots (sessions + archived_sessions); otherwise
     # stale keys under the archived root would never be removed because they are not under CODEX_ROOT.
@@ -1696,7 +1787,13 @@ def scan_sessions(force=False):
         elif codex_source.is_codex_path(p) and p not in codex_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
+        elif devin_source.is_devin_path(p) and p not in devin_seen:
+            del _cache[p]
+            _mark_scan_cache_dirty()
         elif p.startswith(ag_root_str) and p not in ag_seen:
+            del _cache[p]
+            _mark_scan_cache_dirty()
+        elif kimi_source.is_kimi_path(p) and p not in kimi_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
     for p in list(_CWD_SEQ.keys()):
@@ -1813,6 +1910,15 @@ def _search_session(jsonl_path: Path, terms: list[str]):
     # rollout-<date>-<uuid>.jsonl, so stem is not the ID shown on the card. Read it from
     # session_meta.payload.id, otherwise pasted Codex card IDs miss id_hit and fallback
     # snippets show the wrong Session ID.
+    if devin_source.is_devin_path(jsonl_path):
+        try:
+            found, snippets = devin_source.search(jsonl_path, terms)
+            sid = devin_source.extract_metadata(jsonl_path)["id"]
+            if any(t in sid.lower() for t in terms):
+                return snippets or [{"text": f"Session ID: {sid}", "role": "", "term": ""}]
+            return snippets if len(found) == len(terms) else []
+        except (ValueError, OSError, sqlite3.Error):
+            return []
     is_codex = codex_source.is_codex_path(jsonl_path)
     is_ag = str(jsonl_path).startswith(str(ag_source.AG_BRAIN))
     if is_codex:
@@ -1821,6 +1927,9 @@ def _search_session(jsonl_path: Path, terms: list[str]):
     elif is_ag:
         # Antigravity filenames are transcript.jsonl; id is the brain/<id>/ directory name
         session_id = ag_source._conv_id(jsonl_path)
+    elif kimi_source.is_kimi_path(jsonl_path):
+        # Kimi filenames are wire.jsonl; id is the <session_id>/agents/main/ ancestor directory name
+        session_id = kimi_source.session_id_for_path(jsonl_path)
     else:
         session_id = jsonl_path.stem
 
@@ -1866,6 +1975,9 @@ def _search_session(jsonl_path: Path, terms: list[str]):
                 elif t in ("USER_INPUT", "PLANNER_RESPONSE"):
                     # Antigravity row: extract user/assistant text and search it too
                     text = ag_source.search_text_from_line(d)
+                elif t in ("context.append_message", "context.append_loop_event"):
+                    # Kimi row: appended user message / assistant text part
+                    text = kimi_source.search_text_from_line(d)
 
                 if not text:
                     continue
@@ -1929,25 +2041,47 @@ def _rg_prefilter(terms, paths):
     if not rg_executable:
         _warn_search_fallback("ripgrep executable not found")
         return None
-    path_strs = [str(p) for p in paths]
+    path_strs = [str(p) for p in paths if not devin_source.is_devin_path(p)]
+    if not path_strs:
+        return set()
     candidate = None  # None = unconstrained so far; intersect per term to implement AND
     for term in terms:
         # -i is case-insensitive and -F is literal matching, aligned with _search_session lower()+substring semantics
-        cmd = [rg_executable, "-l", "-i", "-F", "--no-messages", "--", term, *path_strs]
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=20)
-        except subprocess.TimeoutExpired:
-            _warn_search_fallback("ripgrep prefilter timed out")
-            return None
-        except (FileNotFoundError, OSError) as e:
-            _warn_search_fallback(f"ripgrep prefilter could not start ({type(e).__name__})")
-            return None  # includes ARG_MAX overflow (E2BIG); fall back to full scan
-        # rg exit codes: 0=matches, 1=no matches (both normal), >=2=real error
-        if r.returncode not in (0, 1):
-            _warn_search_fallback(f"ripgrep prefilter exited with status {r.returncode}")
-            return None
-        hit = {ln for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln}
-        candidate = hit if candidate is None else (candidate & hit)
+        fixed = [rg_executable, "-l", "-i", "-F", "--no-messages", "--", term]
+        fixed_bytes = sum(len(os.fsencode(arg)) + 1 for arg in fixed)
+        batches = []
+        batch = []
+        batch_bytes = fixed_bytes
+        for path_str in path_strs:
+            arg_bytes = len(os.fsencode(path_str)) + 1
+            if batch and batch_bytes + arg_bytes > RIPGREP_ARG_CHUNK_BYTES:
+                batches.append(batch)
+                batch = []
+                batch_bytes = fixed_bytes
+            batch.append(path_str)
+            batch_bytes += arg_bytes
+        if batch:
+            batches.append(batch)
+
+        term_hits = set()
+        for path_batch in batches:
+            cmd = [*fixed, *path_batch]
+            try:
+                r = subprocess.run(cmd, capture_output=True, timeout=20)
+            except subprocess.TimeoutExpired:
+                _warn_search_fallback("ripgrep prefilter timed out")
+                return None
+            except (FileNotFoundError, OSError) as e:
+                _warn_search_fallback(f"ripgrep prefilter could not start ({type(e).__name__})")
+                return None
+            # rg exit codes: 0=matches, 1=no matches (both normal), >=2=real error
+            if r.returncode not in (0, 1):
+                _warn_search_fallback(f"ripgrep prefilter exited with status {r.returncode}")
+                return None
+            term_hits.update(
+                ln for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln
+            )
+        candidate = term_hits if candidate is None else (candidate & term_hits)
         if not candidate:
             break  # one term already has no intersection, so AND result is empty
     return candidate or set()
@@ -1974,9 +2108,10 @@ def search_sessions(query: str):
     results = []
     for key, meta in ordered:
         jsonl_path = Path(meta["jsonl_path"])
-        if not jsonl_path.exists():
+        is_devin = devin_source.is_devin_path(jsonl_path)
+        if not is_devin and not jsonl_path.exists():
             continue
-        if prefiltered is not None and str(jsonl_path) not in prefiltered:
+        if not is_devin and prefiltered is not None and str(jsonl_path) not in prefiltered:
             # Content does not contain all terms. The only exception is a term matching the
             # session id itself, because rg searches content and does not cover pure id-substring
             # search. Use meta.id plus filename stem as an id fallback, covering Claude
@@ -2323,7 +2458,7 @@ def open_file_in_system(file_path: str, root: str, reveal: bool = False) -> tupl
 PWA_MANIFEST = json.dumps({
     "name": "Session Logbook",
     "short_name": "Logbook",
-    "description": "A minimal, local dashboard for browsing your Claude Code, Codex, and Antigravity agent sessions.",
+    "description": "A minimal, local dashboard for browsing your Claude Code, Codex, Antigravity, and Kimi Code agent sessions.",
     "start_url": "/",
     "scope": "/",
     "display": "standalone",
@@ -2511,6 +2646,11 @@ class Handler(BaseHTTPRequestHandler):
                 extra_headers={"Cache-Control": "no-cache"},
             )
 
+        if path == "/api/session-choices":
+            from sources.session_identity import session_choices
+            source = (qs.get("source") or [None])[0]
+            return self._send_json(200, session_choices(enriched_sessions(), source=source))
+
         if path == "/api/sessions":
             return self._send_json(200, enriched_sessions())
 
@@ -2533,32 +2673,51 @@ class Handler(BaseHTTPRequestHandler):
 
         cm = re.match(r"^/api/sessions/([^/]+)/conversation$", path)
         if cm:
-            sid = cm.group(1)
+            sid = urllib.parse.unquote(cm.group(1))
             jsonl = _find_jsonl(sid)
             if not jsonl:
                 return self._send_json(404, {"error": "Session not found"})
             try:
-                if codex_source.is_codex_path(jsonl):
+                if devin_source.is_devin_path(jsonl):
+                    # Hash the selected chain, not the shared database's mtime: a different
+                    # session must not redraw this reader, and in-place edits must be detected.
+                    conv = devin_source.extract_conversation(jsonl)
+                    fingerprint = conv['fingerprint']
+                else:
+                    fingerprint = file_fingerprint(jsonl)
+                seen = (qs.get('fingerprint') or [''])[0]
+                if seen and seen == fingerprint:
+                    return self._send_json(200, {'id': sid, 'unchanged': True, 'fingerprint': fingerprint})
+                if devin_source.is_devin_path(jsonl):
+                    pass  # Already parsed from one coherent SQLite snapshot above.
+                elif codex_source.is_codex_path(jsonl):
                     conv = codex_source.extract_conversation(jsonl)
                 elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
                     conv = ag_source.extract_conversation(jsonl)
+                elif kimi_source.is_kimi_path(jsonl):
+                    conv = kimi_source.extract_conversation(jsonl)
                 else:
                     conv = extract_conversation(jsonl)
+                conv['fingerprint'] = fingerprint
                 return self._send_json(200, conv)
             except Exception as e:
                 return self._send_json(500, {"error": str(e)})
 
         tm = re.match(r"^/api/sessions/([^/]+)/transcript$", path)
         if tm:
-            sid = tm.group(1)
+            sid = urllib.parse.unquote(tm.group(1))
             jsonl = _find_jsonl(sid)
             if not jsonl:
                 return self._send_bytes(404, "Session not found", "text/plain; charset=utf-8")
             try:
-                if codex_source.is_codex_path(jsonl):
+                if devin_source.is_devin_path(jsonl):
+                    text = devin_source.extract_transcript(jsonl)
+                elif codex_source.is_codex_path(jsonl):
                     text = codex_source.extract_transcript(jsonl)
                 elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
                     text = ag_source.extract_transcript(jsonl)
+                elif kimi_source.is_kimi_path(jsonl):
+                    text = kimi_source.extract_transcript(jsonl)
                 else:
                     text = extract_transcript(jsonl)
                 brief_param = (qs.get('brief') or ['0'])[0].lower()
@@ -2588,7 +2747,7 @@ class Handler(BaseHTTPRequestHandler):
         # sources/anchored_transcript with the offline pipeline.
         am = re.match(r"^/api/sessions/([^/]+)/anchored$", path)
         if am:
-            sid = am.group(1)
+            sid = urllib.parse.unquote(am.group(1))
             jsonl = _find_jsonl(sid)
             if not jsonl:
                 return self._send_bytes(404, "Session not found", "text/plain; charset=utf-8")
@@ -2597,13 +2756,19 @@ class Handler(BaseHTTPRequestHandler):
                 # repository context, can understand anchor semantics and source positions from
                 # this .txt alone. Only prepend it to the download artifact, not render body,
                 # preserving byte-level parity with the offline pipeline.
-                if codex_source.is_codex_path(jsonl):
+                if devin_source.is_devin_path(jsonl):
+                    src = "devin"
+                    body = devin_source.render_context(jsonl)
+                elif codex_source.is_codex_path(jsonl):
                     src = "codex"
                     body = anchored_transcript.render_codex(jsonl)
+                elif kimi_source.is_kimi_path(jsonl):
+                    src = "kimi"
+                    body = anchored_transcript.render_kimi(jsonl)
                 else:
                     src = "claude"
                     body = anchored_transcript.render_claude(jsonl)
-                text = anchored_transcript.digest_header(jsonl, src) + "\n\n" + body
+                text = body if src == "devin" else anchored_transcript.digest_header(jsonl, src) + "\n\n" + body
                 fname = f"{sid}.anchored.txt"
                 return self._send_bytes(
                     200, text, "text/plain; charset=utf-8",
@@ -2680,7 +2845,7 @@ class Handler(BaseHTTPRequestHandler):
 
         m = re.match(r"^/api/sessions/([^/]+)/(archive|note|star)$", path)
         if m:
-            sid, action = m.group(1), m.group(2)
+            sid, action = urllib.parse.unquote(m.group(1)), m.group(2)
             try:
                 body = self._read_json()
             except Exception:

@@ -119,6 +119,23 @@ class TestRipgrepDiscovery(unittest.TestCase):
         self.assertEqual(result, set())
         self.assertEqual(run.call_args.args[0][0], "/opt/homebrew/bin/rg")
 
+    def test_prefilter_batches_large_path_lists_below_exec_limit(self):
+        paths = [Path(f"/Users/alice/my-app/session-{i:02d}.jsonl") for i in range(8)]
+        completed = mock.Mock(returncode=1, stdout=b"")
+        with mock.patch.object(server, "_find_ripgrep", return_value="/opt/homebrew/bin/rg"), \
+             mock.patch.object(server, "RIPGREP_ARG_CHUNK_BYTES", 160), \
+             mock.patch.object(server.subprocess, "run", return_value=completed) as run:
+            result = server._rg_prefilter(["needle"], paths)
+
+        self.assertEqual(result, set())
+        self.assertGreater(run.call_count, 1)
+        passed_paths = []
+        for call in run.call_args_list:
+            cmd = call.args[0]
+            self.assertLessEqual(sum(len(os.fsencode(arg)) + 1 for arg in cmd), 160)
+            passed_paths.extend(cmd[7:])
+        self.assertEqual(passed_paths, [str(path) for path in paths])
+
     def test_runtime_failure_warns_and_falls_back(self):
         completed = mock.Mock(returncode=2, stdout=b"")
         with mock.patch.object(server, "_find_ripgrep", return_value="/opt/homebrew/bin/rg"), \

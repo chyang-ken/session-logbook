@@ -6,7 +6,7 @@ Thanks for your interest in Session Logbook. It's a small, deliberately-scoped t
 
 - **Backend:** a single `server.py` (Python 3.9+, standard library only — no third-party dependencies).
 - **Frontend:** a single `index.html` (vanilla HTML/CSS/JS, no framework, **no build step**).
-- **Sources:** `sources/` adapts each agent's on-disk format (Claude Code, Codex, Antigravity) into a common shape.
+- **Sources:** `sources/` adapts each agent's on-disk format (Claude Code, Codex, Antigravity, Kimi Code) into a common shape.
 - **Tests:** `tests/` (Python `unittest`) with synthetic fixtures.
 
 There is no bundler, transpiler, or package manager. The dev loop is: edit a file, restart `server.py` (for backend changes) or refresh the browser (for `index.html`).
@@ -50,6 +50,11 @@ This project is developed in the open, for a worldwide audience. A few rules mak
 - For UI changes, include a before/after screenshot.
 - Make sure `python3 -m unittest discover -s tests` and `python3 scripts/check_no_cjk.py` are green.
 
+Open pull requests against **`staging`**, not `main`. `staging` is where changes land first and
+get used for real on the maintainer's machine; `main` is promoted from it once a commit has
+soaked for two weeks (`scripts/release_flow.py`, described in [`CLAUDE.md`](CLAUDE.md)
+"Branch model and release flow"). Never rebase or force-push `staging`.
+
 All changes to `main`, including maintainer changes, go through a pull request. The
 required Python 3.9, 3.11, and 3.13 CI checks must pass on a branch that is up to
 date with `main`, and review conversations must be resolved before merge. An
@@ -60,7 +65,8 @@ outside approval is welcome but is not required for maintainer-only changes.
 Session Logbook is distributed as source through GitHub Releases. There is no
 package registry publication or deployment step.
 
-1. Prepare a focused release pull request: move the completed entries in
+1. Prepare a focused release pull request (against `staging`, like every change; it reaches
+   `main` through the normal promotion): move the completed entries in
    `CHANGELOG.md` from `Unreleased` to a SemVer version and date, then add a new
    empty `Unreleased` section.
 2. Merge the release pull request only after all required checks pass.
