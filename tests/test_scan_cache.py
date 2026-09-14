@@ -22,11 +22,13 @@ class ScanCacheTestCase(unittest.TestCase):
         self.old_seq = {k: list(v) for k, v in server._CWD_SEQ.items()}
         self.old_dirty = server._scan_cache_dirty
         self.old_decode = dict(server._DECODE_DIR_CACHE)
+        self.old_codex_index_mtime = server._codex_session_index_mtime_ns
         server._cache.clear()
         server._CWD_TRUTH_MAP.clear()
         server._CWD_INDEX_SEEN.clear()
         server._CWD_SEQ.clear()
         server._DECODE_DIR_CACHE.clear()
+        server._codex_session_index_mtime_ns = None
         server._scan_cache_dirty = False
 
     def tearDown(self):
@@ -40,6 +42,7 @@ class ScanCacheTestCase(unittest.TestCase):
         server._CWD_SEQ.update({k: list(v) for k, v in self.old_seq.items()})
         server._DECODE_DIR_CACHE.clear()
         server._DECODE_DIR_CACHE.update(self.old_decode)
+        server._codex_session_index_mtime_ns = self.old_codex_index_mtime
         server._scan_cache_dirty = self.old_dirty
 
     def _patch_cache_paths(self, root: Path):
@@ -75,8 +78,10 @@ class TestScanCachePersistence(ScanCacheTestCase):
                     dict(server._CWD_TRUTH_MAP),
                     set(server._CWD_INDEX_SEEN),
                     {k: list(v) for k, v in server._CWD_SEQ.items()},
+                    123456789,
                 )
 
+                server._codex_session_index_mtime_ns = expected[4]
                 server._scan_cache_dirty = True
                 self.assertTrue(server.save_scan_cache())
                 self.assertFalse((root / "backups").exists())
@@ -85,12 +90,14 @@ class TestScanCachePersistence(ScanCacheTestCase):
                 server._CWD_TRUTH_MAP.clear()
                 server._CWD_INDEX_SEEN.clear()
                 server._CWD_SEQ.clear()
+                server._codex_session_index_mtime_ns = None
 
                 self.assertTrue(server.load_scan_cache())
                 self.assertEqual(server._cache, expected[0])
                 self.assertEqual(server._CWD_TRUTH_MAP, expected[1])
                 self.assertEqual(server._CWD_INDEX_SEEN, expected[2])
                 self.assertEqual(server._CWD_SEQ, expected[3])
+                self.assertEqual(server._codex_session_index_mtime_ns, expected[4])
 
     def test_schema_version_mismatch_returns_false_and_leaves_globals(self):
         with tempfile.TemporaryDirectory() as td:
@@ -203,6 +210,37 @@ class TestScanCacheIncremental(ScanCacheTestCase):
 
                 server.scan_sessions(force=False)
                 self.assertEqual(calls, ["a.jsonl"])
+
+    def test_codex_title_index_change_refreshes_unchanged_transcript(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            transcript = root / "rollout-test.jsonl"
+            transcript.write_text("{}\n", encoding="utf-8")
+            calls = []
+            session_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+            def fake_extract(path):
+                calls.append(Path(path).name)
+                meta = self._fake_meta(Path(path))
+                meta["id"] = session_id
+                meta["custom_title"] = "Fallback title"
+                return meta
+
+            with self._patch_cache_paths(root), \
+                    mock.patch.object(server, "PROJECTS_DIR", root / "no-claude"), \
+                    mock.patch.object(server.codex_source, "scan_sessions", return_value=[transcript]), \
+                    mock.patch.object(server.codex_source, "extract_metadata", side_effect=fake_extract), \
+                    mock.patch.object(server.codex_source, "session_index_mtime_ns", side_effect=[10, 10, 20]), \
+                    mock.patch.object(server.codex_source, "session_index_titles", side_effect=[
+                        {session_id: "Title 1"}, {session_id: "Title 2"}]), \
+                    mock.patch.object(server.codex_source, "is_codex_path", return_value=True), \
+                    mock.patch.object(server.ag_source, "scan_sessions", return_value=[]):
+                server.scan_sessions(force=True)
+                server.scan_sessions(force=False)
+                server.scan_sessions(force=False)
+
+            self.assertEqual(calls, ["rollout-test.jsonl"])
+            self.assertEqual(server._cache[str(transcript)]["custom_title"], "Title 2")
 
 
 if __name__ == "__main__":

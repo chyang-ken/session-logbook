@@ -48,9 +48,10 @@ verified it. Purely mechanical changes (rename, format) only need the subject + 
 "what" line.
 
 ### Stay in scope
-Before adding a feature, check [`docs/philosophy.md`](docs/philosophy.md). The dashboard
-is a **read-only cockpit**: "send a message", "spawn a session", "multi-user auth", and
-"live push" are explicit non-goals.
+Before adding a feature, check [`docs/philosophy.md`](docs/philosophy.md). Session Logbook
+is a **read-only retrieval layer**, not an agent client or lifecycle manager: "send a message",
+"spawn a Session", "manage client Session state", "multi-user auth", and "live push" are
+explicit non-goals.
 
 ---
 
@@ -66,10 +67,10 @@ DATA (read-only)
         └─► _cache {jsonl_path: meta}
             └─► enriched_sessions()      [meta + state + scope]
                 └─► GET /api/sessions
-                    └─► frontend: bucket → group → render
+                    └─► frontend: filter → timeline (default) or project groups → render
 
 STATE (writable)
-  POST /api/sessions/:id/{star,archive,note}
+  POST /api/sessions/:id/{star,archive,note,title,human}
     └─► _state[id] updated
         └─► save_state()                 [tmp file + atomic rename + backup rotation]
             └─► ~/.session-logbook/state.json
@@ -78,7 +79,7 @@ UI (browser-only)
   localStorage:
     'session-logbook-ui' = { q, sectionOpen/Closed, groupOpen/Closed,
                   cardCollapsed, cardExpanded, recentDays, colLeftPct,
-                  hideOneshot, sourceFilter }
+                  hideOneshot, sourceFilter, viewMode }
 ```
 
 Each agent's on-disk format is adapted to a common shape by a module under `sources/`
@@ -92,22 +93,27 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 2. **Priority is consistent.** `archived > starred > mtime`, front and back must agree.
 3. **Optimistic UI.** Update `state.items[i]` + render immediately; on a failed POST,
    roll back + toast.
-4. **No auth.** Binds `127.0.0.1` only.
+4. **Suspected automation is intentionally simple.** A single-turn Session is suspected
+   unless local `human_confirmed` metadata says otherwise. Confirmed sub-agents remain excluded
+   by their source adapter; do not merge the two concepts.
+5. **No auth.** Binds `127.0.0.1` only.
 
 ## 3. API
 
 | Endpoint | In | Out |
 |---|---|---|
-| `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, scope, archived, archived_at, starred, starred_at, note}]` |
+| `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, title_override, display_title, human_confirmed, scope, archived, archived_at, starred, starred_at, note}]` |
 | `GET /api/session-choices?source=claude` | optional source | Recent primary and single-turn candidates (up to 100 each); shared relationship and selection hints, title and recent user preview. No authorization changes. |
-| `GET /api/search?q=…` | multi-word = AND; session ID matches too | `[{id, snippets:[{text, role, term}]}]` |
+| `GET /api/search?q=…` | multi-word = AND; session title and ID match too | `[{id, snippets:[{text, role, term}]}]` |
 | `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` |
-| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
+| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, title_override, display_title, human_confirmed, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
 | `GET /api/sessions/:id/anchored` | — | Plain-text transcript with `[L#]` original-line anchors (for agents to read / download) |
 | `GET /api/recent-files` / `GET /api/find-files` | Files panel | recent-changed / `fd` name search |
 | `POST /api/sessions/:id/star` | `{starred: bool}` | `{id, …entry}` |
 | `POST /api/sessions/:id/archive` | `{archived: bool, note?}` | `{id, …entry}` |
 | `POST /api/sessions/:id/note` | `{note: string}` | `{id, …entry}` |
+| `POST /api/sessions/:id/title` | `{title_override: string}` | `{id, …entry}`; empty clears the personal title |
+| `POST /api/sessions/:id/human` | `{human_confirmed: bool}` | `{id, …entry}`; false clears the correction |
 
 A POST body missing `starred` / `archived` defaults to `True`.
 
@@ -115,7 +121,7 @@ A POST body missing `starred` / `archived` defaults to `True`.
 
 | URL | Mode | Notes |
 |---|---|---|
-| `/` | dashboard | list view (default) |
+| `/` | dashboard | cross-project timeline by default; optional project view |
 | `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text; follows a running session in place (`startConvLive` polls `/conversation?fingerprint=…`, redraws only on change, keeps scroll / open state) |
 
 ## 5. Agent-facing CLI and Skill

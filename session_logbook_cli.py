@@ -257,9 +257,46 @@ def search_sessions(
     paths = _candidate_paths(source, include_subagents)
 
     prefiltered = server._rg_prefilter(terms, paths)
+    # Codex titles usually live outside transcript files, so ripgrep cannot see them.
+    # Resolve only title-matching Codex IDs here; all other paths retain the cheap transcript
+    # prefilter and avoid full metadata parsing.
+    codex_title_ids = set()
+    if role == "any" and source in (None, "codex"):
+        codex_title_ids = {
+            session_id
+            for session_id, title in codex_source.session_index_titles().items()
+            if any(term in title.lower() for term in terms)
+        }
+    title_prefiltered = set()
+    if codex_title_ids:
+        for path in paths:
+            if not codex_source.is_codex_path(path):
+                continue
+            session_id = (codex_source._read_session_meta(path) or {}).get("id")
+            if session_id in codex_title_ids:
+                title_prefiltered.add(str(path))
+
+    # User-defined titles live in the Logbook state file rather than transcripts.
+    # Resolve only matching title IDs so the common search path keeps its cheap prefilter.
+    server.load_state()
+    local_title_ids = {
+        session_id
+        for session_id, entry in server._state.items()
+        if any(term in str(entry.get("title_override") or "").lower() for term in terms)
+    }
+    local_title_paths = set()
+    for session_id in local_title_ids:
+        path = server._find_jsonl(session_id)
+        if path is not None:
+            local_title_paths.add(str(path))
+
     results = []
     for path in paths:
-        if not devin_source.is_devin_path(path) and prefiltered is not None and str(path) not in prefiltered:
+        if (not devin_source.is_devin_path(path)
+                and prefiltered is not None
+                and str(path) not in prefiltered
+                and str(path) not in title_prefiltered
+                and str(path) not in local_title_paths):
             continue
         try:
             item = session_metadata(path)
@@ -273,15 +310,21 @@ def search_sessions(
         # Metadata can identify a target during ordinary discovery, but a role-filtered
         # historical search must be satisfied by that role's real messages only.
         metadata_terms = set()
+        title_override = str(server._state.get(item.get("id"), {}).get("title_override") or "")
         if role == "any":
             metadata_blob = " ".join(
                 str(item.get(key) or "")
                 for key in ("id", "slug", "custom_title", "project_path", "jsonl_path")
-            ).lower()
+            ) + " " + title_override
+            metadata_blob = metadata_blob.lower()
             metadata_terms = {term for term in terms if term in metadata_blob}
 
         found = set(metadata_terms)
         snippets = []
+        custom_title = str(item.get("custom_title") or "")
+        display_title = title_override or custom_title
+        if role == "any" and any(term in f"{custom_title} {title_override}".lower() for term in terms):
+            snippets.append({"role": "title", "line": None, "text": display_title})
         try:
             for line_number, message_role, text in iter_messages(path, item["source"]):
                 if not text or message_role is None:
