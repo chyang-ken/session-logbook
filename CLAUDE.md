@@ -91,7 +91,10 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 1. **Scope is computed twice.** The backend uses `DUSTY_AFTER_DAYS` for an initial value;
    the frontend's `computeScope()` recomputes with the user's `recentDays` and overrides it.
    **The frontend is the source of truth.**
-2. **Priority is consistent.** `archived > starred > mtime`, front and back must agree.
+2. **Priority is consistent.** `archived > starred > conversation activity`, front and back must agree.
+   `activity_at` / `activity_at_iso` describe the latest parsed user/assistant message;
+   when no valid message time is available, they fall back to source modification time.
+   Keep `mtime` / `mtime_iso` unchanged for cache invalidation and file diagnostics.
 3. **Optimistic UI.** Update `state.items[i]` + render immediately; on a failed POST,
    roll back + toast.
 4. **Suspected automation is intentionally simple.** A single-turn Session is suspected

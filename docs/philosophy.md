@@ -57,11 +57,15 @@ product's primary lifecycle model.
 | Zone | Entry condition | Default | Purpose |
 |---|---|---|---|
 | ⭐ Starred | Starred manually | Expanded | "I want to remember this" |
-| 🔥 Recent | mtime ≥ now − N days | Expanded | Newer Sessions in the project view |
-| 🕸 Dusty | mtime < now − N days | Collapsed | Auto-accumulation zone |
+| 🔥 Recent | conversation activity ≥ now − N days | Expanded | Newer Sessions in the project view |
+| 🕸 Dusty | conversation activity < now − N days | Collapsed | Auto-accumulation zone |
 | 📦 Archived | Archived manually | Collapsed | "Out of sight" |
 
-Priority: `archived > starred > mtime`.
+Priority: `archived > starred > conversation activity`.
+
+Timeline, search, and displayed recency use the latest parsed user/assistant message time.
+Rewriting a source file does not count as a new conversation. If no valid message timestamp
+is available, fall back to source modification time; filesystem time still detects changes.
 
 ### Time decay
 

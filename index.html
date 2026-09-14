@@ -131,8 +131,15 @@
     backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
     padding: 10px 28px;
-    display: flex; align-items: center; gap: 16px;
+    display: flex; flex-direction: column; gap: 10px;
   }
+  .head-search-row, .head-filter-row {
+    display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0;
+  }
+  .head-filter-row { flex-wrap: wrap; }
+  .head-status { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .head-search-row .refresh-btn { flex-shrink: 0; background: none; border-color: transparent; }
+  .head-search-row .refresh-btn:hover { background: var(--bg-hover); }
   /* Source filter dropdown: replaces the original title, showing the current filter state + ▾.
      Semantics: which side's sessions are currently shown (All/Claude/Codex). */
   .source-filter {
@@ -141,9 +148,9 @@
   .source-filter-trigger {
     display: flex; align-items: center; gap: 5px;
     background: none; border: none;
-    padding: 3px 9px; margin-left: -9px;  /* negative margin offsets the padding so the label's left edge aligns with the all state and doesn't jump */
+    padding: 6px 8px;
     border-radius: 7px;
-    font-size: 15px; font-weight: 700; color: var(--text-1);
+    font-size: 11px; font-weight: 500; color: var(--text-1);
     cursor: pointer; user-select: none;
     font-family: var(--font-mono);  /* top-bar filter trigger uses the mono chrome language (consistent with count / recent-days chip) */
     white-space: nowrap;
@@ -253,7 +260,7 @@
     font-size: 11px;
   }
   .search-wrap {
-    position: relative; flex: 1; min-width: 180px;
+    position: relative; flex: 1; min-width: 0;
   }
   .search {
     width: 100%;
@@ -262,7 +269,7 @@
     border-radius: 6px;
     color: var(--text-1);
     font: inherit; font-size: 13px;
-    padding: 6px 28px 6px 12px;
+    height: 36px; padding: 6px 28px 6px 12px;
     outline: none;
     transition: border-color 0.2s;
   }
@@ -334,15 +341,13 @@
   .oneshot-toggle {
     display: inline-flex; align-items: center; gap: 6px;
     font-family: var(--font-mono);  /* control label uses the mono chrome language (consistent with the adjacent count) */
-    font-size: 12px; color: var(--text-3);
+    font-size: 11px; color: var(--text-2);
     white-space: nowrap; user-select: none; cursor: pointer;
   }
   .oneshot-toggle input { margin: 0; cursor: pointer; }
   .oneshot-toggle:hover { color: var(--text-1); }
-  /* When checked (currently hiding one-shots) the label turns accent, consistent with .files-toggle.on — visually unifying the active state of similar toggles,
-     while also hinting that "some sessions are currently hidden". */
-  .oneshot-toggle:has(input:checked) { color: var(--accent); }
-  .oneshot-toggle:has(input:checked):hover { color: var(--text-1); }
+  /* The checkbox carries selection; the explicit label stays quiet and readable. */
+  .oneshot-toggle input { accent-color: var(--accent); }
   /* Top-bar icon-only square buttons (collapse all / refresh): flex-centered + square, ensuring the SVG is strictly centered and both buttons are the same size.
      Previously used padding:5px 12px (set for buttons with text) + display:block + inline SVG → icon sat too high, looked crooked. */
   .refresh-btn {
@@ -373,11 +378,13 @@
   }
 
   /* ---------- Two-column layout ---------- */
+  body:not(.standalone) { display: flex; flex-direction: column; height: 100vh; }
+  .page-head { flex-shrink: 0; }
   main {
     display: flex;
     gap: 0;
     padding: 20px 28px 60px;
-    height: calc(100vh - 49px);
+    flex: 1; min-height: 0;
     --col-left-pct: 57.5%;
   }
   main.timeline { display: block; overflow-y: auto; }
@@ -2247,22 +2254,31 @@
      where the card footer row (sid+time+actions) and group-header buttons no longer fit and get clipped.
      960px guarantees the narrow column is ≥ ~370px in two-column mode; any narrower switches to single-column full width. */
   @media (max-width: 960px) {
+    body:not(.standalone) { height: auto; min-height: 100vh; }
     main { flex-direction: column; gap: 24px; height: auto; }
     .col-left, .col-right { flex: 1 1 auto; overflow-y: visible; }
     .col-left { flex-basis: auto; }
     .col-divider { display: none; }
-    .page-head { padding: 10px 16px; flex-wrap: wrap; }
+    .page-head { padding: 10px 16px; }
   }
-  /* The top bar doesn't fit below ~656px (search has hit its min-width yet still pushes out refresh).
-     Promote search to a full-width input on its own row, leaving filter/toggles/count/refresh on another row. */
   @media (max-width: 680px) {
-    .page-head { row-gap: 10px; column-gap: 12px; }
-    .search-wrap { order: -1; flex-basis: 100%; min-width: 0; }
+    .head-filter-row { gap: 8px 12px; }
+    .head-status { margin-left: 0; }
   }
 </style>
 </head>
 <body>
 <header class="page-head">
+  <div class="head-search-row">
+    <div class="search-wrap" id="search-wrap">
+      <input class="search" id="search" aria-label="Search sessions" placeholder="Search sessions" title="Search titles, messages, or session IDs. Multiple words must all match.">
+      <span class="search-spinner" aria-hidden="true"></span>
+      <button class="search-clear" id="search-clear" type="button" title="Clear search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <button class="refresh-btn" id="collapse-all" type="button" title="Collapse all cards" aria-label="Collapse all cards"></button>
+    <button class="refresh-btn" id="refresh" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+  </div>
+  <div class="head-filter-row">
   <div class="source-filter" id="source-filter" data-open="false">
     <button class="source-filter-trigger" id="source-filter-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
       <span id="source-filter-label">All Sessions</span>
@@ -2282,19 +2298,15 @@
     <button type="button" data-view="timeline">Timeline</button>
     <button type="button" data-view="projects">Projects</button>
   </div>
-  <div class="search-wrap" id="search-wrap">
-    <input class="search" id="search" placeholder="Full-text search · multiple words = AND · supports session ID">
-    <span class="search-spinner" aria-hidden="true"></span>
-    <button class="search-clear" id="search-clear" type="button" title="Clear search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-  </div>
   <label class="oneshot-toggle" title="Single-turn sessions are treated as suspected automated runs until you confirm otherwise">
     <input type="checkbox" id="hide-oneshot">
     <span id="suspected-filter-label">Suspected runs hidden</span>
   </label>
-  <span class="live-dot" id="live-dot" data-tooltip="Live — auto-refreshing"></span>
-  <span class="count" id="count">—</span>
-  <button class="refresh-btn" id="collapse-all" type="button" title="Collapse all cards" aria-label="Collapse all cards"></button>
-  <button class="refresh-btn" id="refresh" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+    <div class="head-status">
+      <span class="live-dot" id="live-dot" data-tooltip="Live — auto-refreshing"></span>
+      <span class="count" id="count">—</span>
+    </div>
+  </div>
 </header>
 <main id="list"></main>
 <div class="toast" id="toast"></div>
@@ -2548,8 +2560,8 @@ function groupItems(items) {
     const g = groups.get(key);
     g.paths.add(m.project_path || NO_WORKSPACE_KEY);
     g.items.push(m);
-    if (m.mtime > g.mostRecent) g.mostRecent = m.mtime;
-    if (m.mtime >= dayAgo) g.recentCount += 1;
+    if (activityTime(m) > g.mostRecent) g.mostRecent = activityTime(m);
+    if (activityTime(m) >= dayAgo) g.recentCount += 1;
   }
   return [...groups.values()].sort((a, b) => b.mostRecent - a.mostRecent);
 }
@@ -2598,11 +2610,14 @@ function bucketByScope(items) {
 
 // The frontend re-derives scope from state.recentDays, overriding the value the backend sent.
 // The priority matches the backend's compute_scope: archived > starred > mtime-based.
+function activityTime(m) { return m.activity_at || m.mtime || 0; }
+function activityISO(m) { return m.activity_at_iso || m.mtime_iso || ''; }
+
 function computeScope(m) {
   if (m.archived) return 'archived';
   if (m.starred) return 'starred';
   if (state.recentDays === 'all') return 'recent';
-  const ageDays = (Date.now() / 1000 - m.mtime) / 86400;
+  const ageDays = (Date.now() / 1000 - activityTime(m)) / 86400;
   return ageDays < state.recentDays ? 'recent' : 'dusty';
 }
 
@@ -2714,7 +2729,7 @@ function render() {
     const scrollTop = $list.scrollTop;
     $list.classList.add('timeline');
     $list.innerHTML = `<div class="timeline-list">${filtered
-      .slice().sort((a, b) => b.mtime - a.mtime).map(renderCard).join('')}</div>`;
+      .slice().sort((a, b) => activityTime(b) - activityTime(a)).map(renderCard).join('')}</div>`;
     $list.scrollTop = scrollTop;
     bindCardEvents();
     syncCollapseAllBtn();
@@ -3133,7 +3148,7 @@ function renderCard(m) {
     ? `<div class="note">${escapeHtml(m.note)}</div>`
     : '';
   // A2 freshness: mtime within the last 1 hour → add fresh to time-tag (more eye-catching, scannable at a glance for "which are still hot")
-  const _mt = m.mtime_iso ? new Date(m.mtime_iso).getTime() : 0;
+  const _mt = activityTime(m) * 1000;
   const isFresh = _mt && (Date.now() - _mt) < 3600 * 1000;
   // D2 persistent "has a note" micro-marker (shown even in the collapsed state, not dependent on hover)
   const noteIndicator = m.note
@@ -3219,7 +3234,7 @@ function renderCard(m) {
           <button class="sid-link-btn" data-act="copy-path" data-tooltip="Copy source reference" aria-label="Copy source reference">${ICONS.link}</button>
           <button class="sid-link-btn" data-act="copy-link" data-tooltip="Copy shareable link" aria-label="Copy shareable link">${ICONS.share}</button>
         </span>
-        <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(m.mtime_iso || '')}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(m.mtime_iso)}</span>
+        <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(activityISO(m))}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(activityISO(m))}</span>
         ${noteIndicator}
         <div class="card-actions">
           <button class="btn" data-act="note" data-tooltip="Edit note" aria-label="Edit note">${ICONS.note}</button>
@@ -3962,7 +3977,7 @@ function renderConv(data, meta) {
     <div class="conv-detail">
       <span class="conv-sid-wrap"><span class="conv-copy-id" data-copy-id="${escapeHtml(data.id)}" data-tooltip="Click to copy session ID">${escapeHtml(data.id)}</span>${pathBtnHtml}</span>
       ${sizeKB ? `<span>${sizeKB}</span>` : ''}
-      ${meta?.mtime_iso ? `<span>${escapeHtml(fmtAbsTime(meta.mtime_iso))}</span>` : ''}
+      ${meta ? `<span>${escapeHtml(fmtAbsTime(activityISO(meta)))}</span>` : ''}
       ${meta?.jsonl_path ? `<div style="margin-top:2px">${escapeHtml(meta.jsonl_path)}</div>` : ''}
     </div>`;
 
@@ -4999,7 +5014,7 @@ const LIVE_ACTIVE_WINDOW_MS = 60000;  // how long after an interaction still cou
 function sessionsSignature(items) {
   let s = items.length + '|';
   for (const m of items) {
-    s += m.id + ':' + m.mtime + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0)
+    s += m.id + ':' + m.mtime + ':' + activityTime(m) + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0)
       + ':' + (m.human_confirmed ? 1 : 0) + ':' + (m.title_override || '') + ',';
   }
   return s;
@@ -5062,8 +5077,8 @@ async function livePoll() {
     const sig = sessionsSignature(items);
     if (sig !== _liveSig) {
       // B2 compute the ids that are new/advanced (old mtime vs new), and after render flash only these
-      const prev = new Map(state.items.map(m => [m.id, m.mtime]));
-      const changedIds = items.filter(m => !prev.has(m.id) || prev.get(m.id) !== m.mtime).map(m => m.id);
+      const prev = new Map(state.items.map(m => [m.id, activityTime(m)]));
+      const changedIds = items.filter(m => !prev.has(m.id) || activityTime(m) > prev.get(m.id)).map(m => m.id);
       _liveSig = sig;
       state.items = items;
       _lastInteractionAt = Date.now();  // a real change → enter active cadence, ask more frequently next round

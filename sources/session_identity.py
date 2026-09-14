@@ -1,5 +1,6 @@
 """Shared observed relationships and selection hints; never authorization policy."""
 from pathlib import Path
+from sources.activity import activity_time
 from typing import Optional
 from sources import codex as codex_source
 from sources import kimi as kimi_source
@@ -58,7 +59,7 @@ def session_choices(items, source=None, limit=100):
     Source history, search, and authorization are untouched.
     """
     groups = {"primary": [], "other": []}
-    for original in sorted(items, key=lambda x: x.get("mtime") or 0, reverse=True):
+    for original in sorted(items, key=activity_time, reverse=True):
         if original.get("archived") or (source and original.get("source", "claude") != source):
             continue
         meta = selection_metadata(original)

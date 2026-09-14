@@ -5,6 +5,7 @@ Keep pre-compaction messages for historical reading; never migrate or rewrite lo
 Format: https://pi.dev/docs/latest/session-format
 """
 import json
+from sources.activity import activity_fields
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -138,6 +139,7 @@ def extract_metadata(path):
               for m in messages if m["line"] in recent_lines]
     return {**_facts(header, rows, branch), "jsonl_path": str(path),
             "mtime": stat.st_mtime, "mtime_iso": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            **activity_fields((m["ts"] for m in messages), stat.st_mtime),
             "size": stat.st_size, "source": "pi", "cli_version": None,
             "user_turn_count": len(users), "single_turn": len(users) == 1,
             "recent_msgs": recent, "first_user_msg": users[0]["text"] if users else ""}

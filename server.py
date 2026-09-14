@@ -17,6 +17,8 @@ from pathlib import Path
 
 from sources import antigravity as ag_source
 from sources import anchored_transcript
+from sources.claude_text import strip_leading_reminders
+from sources.activity import activity_fields, activity_time
 from sources import codex as codex_source
 from sources import devin as devin_source
 
@@ -39,7 +41,7 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 7
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -388,11 +390,22 @@ def _is_system_user_string(stripped):
 
 
 def _user_text(content):
-    """Return string content only; arrays are tool_result and are skipped.
+    """Return human text, including reminder-prefixed desktop text blocks.
     Also skip slash-command injections and system-side pseudo-user messages such as
     task-notification / bash output / teammate.
     """
+    if isinstance(content, list):
+        # Recover reminder-prefixed text blocks without reclassifying ordinary
+        # skill-body arrays or tool-result records as human input.
+        blocks = [b for b in content if isinstance(b, dict)]
+        if any(b.get("type") == "tool_result" for b in blocks):
+            return ""
+        texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+        if not any(t.lstrip().startswith("<system-reminder>") for t in texts):
+            return ""
+        content = "\n".join(strip_leading_reminders(t) for t in texts).strip()
     if isinstance(content, str):
+        content = strip_leading_reminders(content)
         stripped = content.lstrip()
         if _is_system_user_string(stripped):
             return ""
@@ -919,6 +932,8 @@ def extract_metadata(jsonl_path: Path):
         "mtime_iso": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
         "size": size,
         "recent_msgs": recent_msgs,
+        **activity_fields((m.get("ts") for m in recent_msgs
+                           if m.get("role") in ("user", "assistant")), mtime),
         "last_stop_reason": last_stop_reason,
         "user_turn_count": user_turn_count,
         "single_turn": single_turn,
@@ -1250,7 +1265,7 @@ def extract_conversation(jsonl_path):
             elif t == 'user':
                 msg_content = d.get('message', {}).get('content')
                 if isinstance(msg_content, str):
-                    text = msg_content.strip()
+                    text = strip_leading_reminders(msg_content).strip()
                     if not text:
                         next_is_skill = False
                     elif text.startswith('<command-'):
@@ -1319,7 +1334,7 @@ def extract_conversation(jsonl_path):
                                     'is_error': is_err, 'ts': ts,
                                 })
                         elif bt == 'text':
-                            txt = block.get('text', '')
+                            txt = strip_leading_reminders(block.get('text', ''))
                             if txt and not txt.lstrip().startswith(
                                     '<system-reminder>'):
                                 user_texts.append(txt)
@@ -1434,7 +1449,7 @@ def extract_transcript(jsonl_path: Path) -> str:
             elif t == 'user':
                 msg_content = d.get('message', {}).get('content')
                 if isinstance(msg_content, str):
-                    text = msg_content.strip()
+                    text = strip_leading_reminders(msg_content).strip()
                     if not text:
                         next_is_skill = False
                     elif text.startswith('<command-'):
@@ -1491,7 +1506,7 @@ def extract_transcript(jsonl_path: Path) -> str:
                                 head = f"[tool: ?()]{err_tag}"
                             out_blocks.append(head + ('\n' + result + '\n' if result else '\n'))
                         elif bt == 'text':
-                            txt = block.get('text', '')
+                            txt = strip_leading_reminders(block.get('text', ''))
                             if txt and not txt.lstrip().startswith('<system-reminder>'):
                                 user_texts.append(txt)
                         elif bt == 'image':
@@ -1672,7 +1687,7 @@ def compute_scope(session_meta, state_entry, now=None):
         return "archived"
     if entry.get("starred"):
         return "starred"
-    mtime = session_meta.get("mtime", 0)
+    mtime = activity_time(session_meta)
     cutoff = now - DUSTY_AFTER_DAYS * 86400
     if mtime >= cutoff:
         return "recent"
@@ -1856,7 +1871,7 @@ def scan_sessions(force=False):
         _rebuild_cwd_truth_map_from_seq()
 
     save_scan_cache()
-    return _dedup_by_id(sorted(_cache.values(), key=lambda m: m["mtime"], reverse=True))
+    return _dedup_by_id(sorted(_cache.values(), key=activity_time, reverse=True))
 
 
 def _dedup_by_id(metas):
@@ -2176,7 +2191,7 @@ def search_sessions(query: str):
         scan_sessions()
 
     # (key, meta) list matching the original traversal order
-    ordered = sorted(_cache.items(), key=lambda kv: kv[1].get("mtime", 0), reverse=True)
+    ordered = sorted(_cache.items(), key=lambda kv: activity_time(kv[1]), reverse=True)
 
     # ripgrep prefilter: select files whose content contains every term and skip expensive
     # per-line JSON parsing for the rest. prefiltered=None means rg is unavailable, so scan

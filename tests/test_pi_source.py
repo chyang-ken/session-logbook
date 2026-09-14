@@ -67,6 +67,16 @@ class PiTests(unittest.TestCase):
         self.assertEqual(session_identity.relationship(self.path, "pi"), (False, None))
         self.assertFalse(session_identity.selection_metadata(meta)["is_subagent"])
 
+    def test_file_rewrite_does_not_change_activity(self):
+        before = pi.extract_metadata(self.path)
+        self.assertNotEqual(before["activity_at"], before["mtime"])
+        self.append({"type": "session_info", "id": "name2", "parentId": "n1",
+                     "timestamp": "2030-01-01T00:00:00Z", "name": "Renamed orchard"})
+        os.utime(self.path, (1900000000, 1900000000))
+        after = pi.extract_metadata(self.path)
+        self.assertEqual(after["activity_at"], before["activity_at"])
+        self.assertEqual(after["mtime"], 1900000000)
+
     def test_active_branch_search_excludes_tools_thinking_injection(self):
         for term in ("abandoned-only", "private-reasoning-only", "tool-only", "injected-only", "synthetic-binary-only"):
             self.assertEqual(pi.search(self.path, [term]), [], term)
