@@ -49,6 +49,8 @@ The identity markers for a session's source form **their own palette**, delibera
 
 Devin Local reuses neutral `--bg-hover`, `--text-1`, `--text-3`, and `--border` tokens; its DEV / Devin Local labels distinguish the source without another hue.
 
+Pi follows the same neutral treatment, with PI / Pi labels across cards, the reader, and the source selector.
+
 Where it lands: the card `.source-chip`, the conversation modal's `.conv-source-pill` + glow, and the top-left `.source-filter` switcher.
 **Iron rule**: a given source uses this same palette in every component — warm = Claude / cool = Codex / purple = Antigravity / teal = Kimi, never swapped.
 Teal was chosen for Kimi because it is the remaining hue that reads apart from the three source colors and from the three semantic colors; it is bluer than the emerald user-turn tint (§1.2), and the two never appear on the same element. For a stronger statement use `-solid` (filled); don't reach for `--gold` / `--accent`.

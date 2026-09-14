@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only command-line access to local Claude Code, Codex, Kimi Code, and Devin Local sessions.
+"""Read-only command-line access to local Claude Code, Codex, Kimi Code, Devin Local, and Pi sessions.
 
 This is the stable Agent-facing surface for Session Logbook. It reuses the
 dashboard's source adapters and anchored renderer, but does not require the web
@@ -23,9 +23,10 @@ from sources import anchored_transcript, session_identity
 from sources import codex as codex_source
 from sources import devin as devin_source
 from sources import kimi as kimi_source
+from sources import pi as pi_source
 
 
-SUPPORTED_SOURCES = ("claude", "codex", "kimi", "devin")
+SUPPORTED_SOURCES = ("claude", "codex", "kimi", "devin", "pi")
 ANCHOR_RE = re.compile(r"\[L(\d+)\]")
 
 
@@ -60,6 +61,8 @@ def detect_source(path: Path) -> Optional[str]:
         return "codex"
     if kimi_source.is_kimi_path(path):
         return "kimi"
+    if pi_source.is_pi_path(path):
+        return "pi"
     if _under(path, server.PROJECTS_DIR):
         return "claude"
 
@@ -74,6 +77,8 @@ def detect_source(path: Path) -> Optional[str]:
                 except Exception:
                     continue
                 kind = row.get("type")
+                if kind == "session" and row.get("id") and "cwd" in row:
+                    return "pi"
                 if kind == "session_meta":
                     return "codex"
                 if kind == "metadata" and row.get("protocol_version"):
@@ -120,6 +125,8 @@ def session_metadata(path: Path) -> dict:
         meta = codex_source.extract_metadata(path)
     elif source == "kimi":
         meta = kimi_source.extract_metadata(path)
+    elif source == "pi":
+        meta = pi_source.extract_metadata(path)
     else:
         meta = server.extract_metadata(path)
     if not meta:
@@ -149,6 +156,9 @@ def iter_session_paths(
             yield from project_dir.glob("*.jsonl")
             if include_subagents:
                 yield from project_dir.glob("*/subagents/*.jsonl")
+
+    if source in (None, "pi"):
+        yield from pi_source.scan_sessions()
 
     if source in (None, "devin"):
         try:
@@ -206,6 +216,9 @@ def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
 
 
 def iter_messages(path, source):
+    if source == "pi":
+        yield from pi_source.iter_messages(path)
+        return
     if source == "devin":
         _, chain = devin_source.read_session(path)
         for node in chain:
@@ -479,19 +492,27 @@ def render_context(path: Path, after_line: int = 0) -> str:
         body = anchored_transcript.render_codex(path)
     elif item["source"] == "kimi":
         body = anchored_transcript.render_kimi(path)
+    elif item["source"] == "pi":
+        body = anchored_transcript.render_pi(path)
     else:
         body = anchored_transcript.render_claude(path)
-    body = _filter_from_cursor_line(body, after_line)
+    # Pi can switch branches inside one file. Return the complete selected branch
+    # on follow rather than pretending an append-only cursor preserves its context.
+    if item["source"] != "pi":
+        body = _filter_from_cursor_line(body, after_line)
     header = anchored_transcript.digest_header(path.resolve(), item["source"])
     observation = "\n".join([
         f"# SESSION_ID: {item.get('id')}",
         f"# PROJECT: {item.get('project_path') or ''}",
         f"# INPUT_CURSOR: L{after_line}",
-        f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line else 'none'}",
+        *(['# FOLLOW_MODE: full selected branch (Pi can change branches)'] if item["source"] == "pi" else []),
+        f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
         f"# RETURNED_CONTENT: {'yes' if body.strip() else 'no'}",
         f"# EXPLICIT_TERMINAL: {_observed_terminal(item)}",
-        "# The cursor line is returned again on follow; ignore it when its [L#] was already seen.",
+        ("# Compare the full selected branch with the previous snapshot, including removed entries."
+         if item["source"] == "pi" else
+         "# The cursor line is returned again on follow; ignore it when its [L#] was already seen."),
         "# A quiet file is not proof that its Agent is still running or has finished.",
     ])
     return header + "\n" + observation + "\n\n" + (body or "[NO NEW RENDERED CONTENT]")

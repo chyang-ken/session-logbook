@@ -105,6 +105,7 @@ class SessionLogbookCliTests(unittest.TestCase):
             mock.patch.object(codex_source, "SESSION_INDEX_PATH", self.codex_index),
             mock.patch.object(codex_source, "_INDEX_CACHE", {"mtime_ns": None, "data": {}}),
             mock.patch.object(cli.devin_source, "DEVIN_ROOT", self.devin_root),
+            mock.patch.object(cli.pi_source, "PI_SESSIONS_ROOT", root / "no-pi"),
             mock.patch.object(kimi_source, "KIMI_SESSIONS_ROOT", self.kimi_root),
             mock.patch.object(kimi_source, "SESSION_INDEX_PATH", self.kimi_root.parent / "session_index.jsonl"),
             mock.patch.object(kimi_source, "_INDEX_CACHE", {"mtime": 0.0, "data": {}}),

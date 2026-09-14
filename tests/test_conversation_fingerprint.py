@@ -59,6 +59,7 @@ class ConversationFingerprintEndpointTests(unittest.TestCase):
             mock.patch.object(server, "_state_loaded", True),
             mock.patch.object(server.codex_source, "scan_sessions", return_value=[]),
             mock.patch.object(server.ag_source, "scan_sessions", return_value=[]),
+            mock.patch.object(server.pi_source, "scan_sessions", return_value=[]),
             mock.patch.dict(server._cache, {}, clear=True),
         ]
         for p in self.patches:

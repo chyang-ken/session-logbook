@@ -800,14 +800,18 @@
     background: var(--source-claude-chip-bg);
     color: var(--source-claude-chip-fg);
   }
-  /* Devin uses existing neutral tokens; its text label carries source identity. */
+  /* Devin and Pi use neutral tokens; text labels carry source identity. */
+  .source-chip.source-pi, .conv-source-pill.source-pi,
+  .source-filter[data-source="pi"] .source-filter-trigger,
   .source-chip.source-devin, .conv-source-pill.source-devin,
   .source-filter[data-source="devin"] .source-filter-trigger {
     background: var(--bg-hover);
     color: var(--text-1);
     box-shadow: inset 0 0 0 1px var(--border);
   }
+  .source-filter-option[data-value="pi"]::before,
   .source-filter-option[data-value="devin"]::before { background: var(--text-3); }
+  .card[data-source="pi"]:hover,
   .card[data-source="devin"]:hover { border-color: var(--text-3); }
   .source-chip.source-codex {
     background: var(--source-codex-chip-bg);
@@ -2287,6 +2291,7 @@
       <div class="source-filter-option" role="option" data-value="antigravity">Antigravity only</div>
       <div class="source-filter-option" role="option" data-value="kimi">Kimi Code only</div>
       <div class="source-filter-option" role="option" data-value="devin">Devin Local only</div>
+      <div class="source-filter-option" role="option" data-value="pi">Pi only</div>
     </div>
   </div>
   <div class="view-toggle" id="view-toggle" aria-label="Session view">
@@ -2368,7 +2373,7 @@ const _saved = loadUIState();
 const RECENT_DAYS_OPTIONS = [7, 14, 21, 'all'];
 const recentDaysChipLabel = d => d === 'all' ? 'All time' : `Last ${d} days`;
 const recentDaysOptionLabel = d => d === 'all' ? 'All time' : `${d} days`;
-const SOURCE_FILTER_VALUES = ['all', 'claude', 'codex', 'antigravity', 'kimi', 'devin'];
+const SOURCE_FILTER_VALUES = ['all', 'claude', 'codex', 'antigravity', 'kimi', 'devin', 'pi'];
 const VIEW_MODES = ['timeline', 'projects'];
 
 const state = {
@@ -3206,6 +3211,7 @@ function renderCard(m) {
     : '';
   const SRC_CHIP = {
     devin: ['DEV', 'source-devin', 'Devin Local'],
+    pi: ['PI', 'source-pi', 'Pi'],
     codex: ['CDX', 'source-codex', 'Codex'],
     antigravity: ['AGY', 'source-antigravity', 'Antigravity'],
     kimi: ['KMI', 'source-kimi', 'Kimi Code'],
@@ -3885,7 +3891,7 @@ function renderConv(data, meta) {
   // Set data-source so the overlay switches the source glow (radial gradient around the modal)
   // meta may be empty (standalone cold start); fall back to data.source, then to claude
   const _src = (meta?.source || data.source || 'claude');
-  $conv.setAttribute('data-source', ['codex', 'antigravity', 'kimi', 'devin'].includes(_src) ? _src : 'claude');
+  $conv.setAttribute('data-source', ['codex', 'antigravity', 'kimi', 'devin', 'pi'].includes(_src) ? _src : 'claude');
 
   const userCount = data.turns.filter(t => t.type === 'user').length;
   const toolTurns = data.turns.filter(t => t.type === 'tool').length;
@@ -3954,6 +3960,7 @@ function renderConv(data, meta) {
   const sourceVal = (meta?.source || data.source || 'claude');
   const SRC_PILL = {
     devin: ['Devin Local', 'source-devin'],
+    pi: ['Pi', 'source-pi'],
     codex: ['Codex', 'source-codex'],
     antigravity: ['Antigravity', 'source-antigravity'],
     kimi: ['Kimi Code', 'source-kimi'],
@@ -4878,6 +4885,7 @@ const SOURCE_FILTER_LABELS = {
   all: 'All Sessions',
   claude: 'Claude only',
   devin: 'Devin Local only',
+  pi: 'Pi only',
   codex: 'Codex only',
   antigravity: 'Antigravity only',
   kimi: 'Kimi Code only',

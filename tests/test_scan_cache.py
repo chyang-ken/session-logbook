@@ -16,6 +16,9 @@ import server  # noqa: E402
 
 class ScanCacheTestCase(unittest.TestCase):
     def setUp(self):
+        pi_patch = mock.patch.object(server.pi_source, "scan_sessions", return_value=[])
+        pi_patch.start()
+        self.addCleanup(pi_patch.stop)
         self.old_cache = dict(server._cache)
         self.old_truth = dict(server._CWD_TRUTH_MAP)
         self.old_seen = set(server._CWD_INDEX_SEEN)

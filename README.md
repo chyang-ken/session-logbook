@@ -1,6 +1,6 @@
 # Session Logbook
 
-A minimal, local, zero-dependency retrieval layer for finding and re-reading your AI coding-agent sessions — **Claude Code, Codex, Antigravity, Kimi Code, and Devin Local** — all in one place.
+A minimal, local, zero-dependency retrieval layer for finding and re-reading your AI coding-agent sessions — **Claude Code, Codex, Antigravity, Kimi Code, Devin Local, and Pi** — all in one place.
 
 [![CI](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@ A minimal, local, zero-dependency retrieval layer for finding and re-reading you
 
 > Read this in other languages: [Chinese](README_zh-CN.md)
 
-Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, `~/.gemini`, `~/.kimi-code`, and the Devin Local database. Session Logbook reads them **read-only** so you can find past work by time or text, open the full Session, and reuse it without leaving your machine.
+Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, `~/.gemini`, `~/.kimi-code`, `~/.pi/agent/sessions`, and the Devin Local database. Session Logbook reads them **read-only** so you can find past work by time or text, open the full Session, and reuse it without leaving your machine.
 
 ![Session Logbook screenshot](docs/screenshot.png)
 
@@ -20,7 +20,7 @@ At enough volume, managing every Session by hand stops working. Session Logbook 
 
 - **Find past work** — browse by recency or search the words you remember.
 - **Read it in context** — open the complete Session Detail instead of reconstructing the work from filenames or snippets.
-- **Cross-agent** — Claude Code, Codex, Antigravity, Kimi Code, and Devin Local sessions share one local surface.
+- **Cross-agent** — Claude Code, Codex, Antigravity, Kimi Code, Devin Local, and Pi sessions share one local surface.
 - **Read-only and private** — it never sends a message, spawns a session, or talks to the network. Binds `127.0.0.1` only and serves its browser assets locally.
 
 ## Quickstart
@@ -85,6 +85,12 @@ ln -s "$PWD/skills/session-logbook" ~/.codex/skills/session-logbook
 ```
 
 ## Features
+
+Pi reads the last saved branch of each session, including its original messages before
+compaction. Its `parentSession` field indicates a fork, not an automated sub-agent.
+Set `PI_CODING_AGENT_DIR` for a custom agent home, or
+`PI_CODING_AGENT_SESSION_DIR` for a custom session directory. Extension-specific
+subagent layouts and per-project session-directory settings are not auto-discovered.
 
 - **Full-text search** — multi-word AND; matched snippets highlighted; source titles, personal titles, and session IDs match too. Backed by `ripgrep` when available, with a pure-Python fallback.
 - **Full conversation view** — click a card to expand; user / assistant / tool / skill turns are color-coded. Pop out to a standalone full-screen reader (`/?session=<id>`).

@@ -129,6 +129,7 @@ class DevinSourceTests(unittest.TestCase):
              mock.patch.object(server.codex_source, 'scan_sessions', return_value=[]), \
              mock.patch.object(server.ag_source, 'scan_sessions', return_value=[]), \
              mock.patch.object(server.kimi_source, 'scan_sessions', return_value=[]), \
+             mock.patch.object(server.pi_source, 'scan_sessions', return_value=[]), \
              mock.patch.object(server, '_cache', {}), \
              mock.patch.object(server, 'save_scan_cache'):
             first = server.scan_sessions()

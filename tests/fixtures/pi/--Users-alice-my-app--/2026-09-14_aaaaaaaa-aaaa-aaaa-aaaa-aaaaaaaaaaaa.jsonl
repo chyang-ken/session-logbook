@@ -1,0 +1,12 @@
+{"type":"session","version":3,"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":"2026-09-14T10:00:00Z","cwd":"/Users/alice/my-app","parentSession":"/synthetic/parent.jsonl"}
+{"type":"message","id":"u1","parentId":null,"timestamp":"2026-09-14T10:00:01Z","message":{"role":"user","content":"Inspect the orchard"}}
+{"type":"message","id":"old","parentId":"u1","timestamp":"2026-09-14T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"abandoned-only answer"}]}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-09-14T10:00:03Z","message":{"role":"assistant","model":"example-model","stopReason":"toolUse","content":[{"type":"thinking","thinking":"private-reasoning-only"},{"type":"text","text":"Reading the orchard file"},{"type":"toolCall","id":"call1","name":"read","arguments":{"path":"/Users/alice/my-app/fruit.txt"}}]}}
+{"type":"message","id":"r1","parentId":"a1","timestamp":"2026-09-14T10:00:04Z","message":{"role":"toolResult","toolCallId":"call1","toolName":"read","content":[{"type":"text","text":"tool-only result"}],"isError":false}}
+{"type":"message","id":"u2","parentId":"r1","timestamp":"2026-09-14T10:00:05Z","message":{"role":"user","content":[{"type":"text","text":"Check the harvest"},{"type":"image","mimeType":"image/png","data":"synthetic-binary-only"}]}}
+{"type":"message","id":"a2","parentId":"u2","timestamp":"2026-09-14T10:00:06Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call2","name":"bash","arguments":{"command":"false"}}],"stopReason":"toolUse"}}
+{"type":"message","id":"r2","parentId":"a2","timestamp":"2026-09-14T10:00:07Z","message":{"role":"toolResult","toolCallId":"call2","toolName":"bash","content":[{"type":"text","text":"failed inspection"}],"isError":true}}
+{"type":"message","id":"a3","parentId":"r2","timestamp":"2026-09-14T10:00:08Z","message":{"role":"assistant","content":[{"type":"text","text":"Harvest needs another check"}],"stopReason":"stop","model":"example-model"}}
+{"type":"compaction","id":"c1","parentId":"a3","timestamp":"2026-09-14T10:00:09Z","summary":"Orchard history summarized","retainedTail":[{"role":"user","content":"Check the harvest"}]}
+{"type":"custom_message","id":"x1","parentId":"c1","timestamp":"2026-09-14T10:00:10Z","customType":"example","content":"injected-only hidden content","display":false}
+{"type":"session_info","id":"n1","parentId":"x1","timestamp":"2026-09-14T10:00:11Z","name":"Orchard review"}

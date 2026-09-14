@@ -141,6 +141,13 @@ expand an old node belonging to that session. See
 
 ## Session selection is shared metadata
 
+Pi's JSONL contains an entry tree. The reader, search, and exports use the last
+persisted entry's parent chain, retaining original messages before compaction.
+They do not splice abandoned branches into one conversation. Raw evidence still
+addresses every physical line. Follow returns the full selected branch because
+its earlier context can change. A header's `parentSession` denotes a fork, not
+proof of an automated sub-agent; the ordinary single-turn suspicion rule applies.
+
 Session Logbook owns source relationships and selection hints for downstream clients.
 The CLI and HTTP selector reuse `sources/session_identity.py`; clients must not infer
 parentage or maintain a second classification registry. The selection endpoint returns
