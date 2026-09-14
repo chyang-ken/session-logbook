@@ -4,19 +4,33 @@ Top-level positioning and boundaries. Read this document before adding or reject
 
 ## How the user works (design premise)
 
-Many parallel sessions × a fleet of worktrees × switching across projects. All three kinds of parallelism happen at once — a single flat list is bound to collapse under them.
+Session volume eventually makes manual lifecycle management unsustainable. The durable jobs are simpler:
+
+1. Find a past Session by time or search.
+2. Read its detail and reuse the work.
+3. Add a personal title when the source title is not enough to find it again.
 
 ## What the Dashboard is
 
 | | |
 |---|---|
-| ✅ Cockpit | Observe, organize, tag |
+| ✅ Retrieval layer | Find and re-read work across agent clients |
 | ❌ Orchestrator | Does not send messages, does not spawn sessions |
 | ❌ Client | Does not write messages, does not push in real time |
 
-The CLI is already the orchestrator; the dashboard does not reinvent that wheel.
+The agent clients own Session lifecycle. Session Logbook reads their history and adds only small, local recovery metadata.
 
-## The four-zone hierarchy
+## Primary surface
+
+The default view is one cross-project timeline in reverse chronological order. Search and Session Detail are the main interaction path. Project grouping remains an alternate view for people who still need the older organization model.
+
+Single-turn Sessions are hidden by default as **suspected automated runs**. This is deliberately a suspicion, not an identity claim. The filter is visible, can be disabled, and a matching hidden result is offered when normal search returns nothing. A revealed Session can be marked as human-participated; that small correction is stored locally and is reversible. Explicitly identified sub-agent logs remain excluded at the source layer.
+
+A personal title overrides display and participates in search. The source title is retained, and clearing the personal title restores it. Naming a Session does not change its human/automated classification.
+
+## Legacy project organization
+
+The project view keeps the original four-zone hierarchy. These controls are secondary compatibility tools, not the product's main lifecycle model.
 
 | Zone | Entry condition | Default | Purpose |
 |---|---|---|---|
@@ -29,7 +43,7 @@ Priority: `archived > starred > mtime`.
 
 ## Time decay
 
-The bet: **people won't archive 130 times by hand.** So once a session has been untouched for N days, it automatically drops into the collapsed Dusty zone, keeping the main working surface uncluttered.
+In the project view, once a Session has been untouched for N days, it automatically drops into the collapsed Dusty zone.
 
 N is adjustable: the frontend toggles between 7 / 14 / 21 d (persisted in localStorage); the initial default equals the backend's `DUSTY_AFTER_DAYS`.
 

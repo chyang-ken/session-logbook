@@ -87,7 +87,7 @@ RIPGREP_ARG_CHUNK_BYTES = 256 * 1024 if os.name != "nt" else 24 * 1024
 
 # ---------- In-memory state ----------
 _cache = {}   # jsonl_path_str -> session meta dict
-_state = {}   # session_id -> { archived, archived_at, note }
+_state = {}   # session_id -> local user metadata (archive/star/note/title/human confirmation)
 # Whether load_state() has run successfully. Distinguishes genuinely empty state from
 # forgotten initialization. Every HTTP handler entry point falls back to load_state()
 # (idempotent) to prevent startup paths such as `import server; ThreadingHTTPServer(...)`
@@ -1872,7 +1872,7 @@ def _dedup_by_id(metas):
 
 
 def enriched_sessions():
-    """Return all sessions without filtering, adding scope/archive/star/note fields.
+    """Return all sessions without filtering, adding local user metadata.
 
     Also backfill source / cli_version / model for Claude-path metadata; Codex already
     includes them. The frontend labels cards by source.
@@ -1895,6 +1895,9 @@ def enriched_sessions():
         item["starred"] = bool(st.get("starred"))
         item["starred_at"] = st.get("starred_at")
         item["note"] = st.get("note", "")
+        item["title_override"] = st.get("title_override", "")
+        item["display_title"] = item["title_override"] or item.get("custom_title", "")
+        item["human_confirmed"] = bool(st.get("human_confirmed"))
         result.append(item)
     return result
 
@@ -1944,9 +1947,20 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
         try:
             found, snippets = devin_source.search(jsonl_path, terms)
             sid = devin_source.extract_metadata(jsonl_path)["id"]
+            custom_title = str((session_meta or {}).get("custom_title") or "")
+            title_override = str(_state.get(sid, {}).get("title_override") or "")
+            title_terms = {
+                term for term in terms
+                if term in f"{custom_title} {title_override}".lower()
+            }
+            if title_terms:
+                snippets.insert(0, {
+                    "text": f"Session title: {title_override or custom_title}",
+                    "role": "", "term": "",
+                })
             if any(t in sid.lower() for t in terms):
                 return snippets or [{"text": f"Session ID: {sid}", "role": "", "term": ""}]
-            return snippets if len(found) == len(terms) else []
+            return snippets if len(set(found) | title_terms) == len(terms) else []
         except (ValueError, OSError, sqlite3.Error):
             return []
     is_codex = codex_source.is_codex_path(jsonl_path)
@@ -1961,7 +1975,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
         # Kimi filenames are wire.jsonl; id is the <session_id>/agents/main/ ancestor directory name
         session_id = kimi_source.session_id_for_path(jsonl_path)
     else:
-        session_id = jsonl_path.stem
+        session_id = (session_meta or {}).get("id") or jsonl_path.stem
 
     # 1) Session ID match: any term matching the ID returns a snippet
     id_lower = session_id.lower()
@@ -1970,11 +1984,13 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     # 2) Titles are metadata, and Codex commonly stores them only in the separate
     # session_index.jsonl roster. Seed the match before scanning transcript messages.
     custom_title = str((session_meta or {}).get("custom_title") or "")
-    title_lower = custom_title.lower()
-    title_terms = {term for term in terms if term in title_lower}
+    title_override = str(_state.get(session_id, {}).get("title_override") or "")
+    title_blob = f"{custom_title} {title_override}".lower()
+    title_terms = {term for term in terms if term in title_blob}
     snippets = []
     if title_terms:
-        snippets.append({"text": f"Session title: {custom_title}", "role": "", "term": ""})
+        matched_title = title_override or custom_title
+        snippets.append({"text": f"Session title: {matched_title}", "role": "", "term": ""})
     term_found = set(title_terms)  # track terms found in title or message text
     if len(term_found) == len(terms):
         return snippets
@@ -2156,7 +2172,10 @@ def search_sessions(query: str):
             # (id=stem) and Codex (id in meta). Prefer one extra downstream check over skipping
             # a true hit.
             id_blob = (meta.get("id", "") + " " + jsonl_path.stem).lower()
-            title_blob = str(meta.get("custom_title") or "").lower()
+            title_blob = (
+                str(meta.get("custom_title") or "") + " "
+                + str(_state.get(meta.get("id"), {}).get("title_override") or "")
+            ).lower()
             if not any(t in id_blob or t in title_blob for t in terms):
                 continue
         snippets = _search_session(jsonl_path, terms, meta)
@@ -2737,6 +2756,10 @@ class Handler(BaseHTTPRequestHandler):
                     conv = kimi_source.extract_conversation(jsonl)
                 else:
                     conv = extract_conversation(jsonl)
+                st = _state.get(sid, {})
+                conv['title_override'] = st.get('title_override', '')
+                conv['display_title'] = conv['title_override'] or conv.get('custom_title', '')
+                conv['human_confirmed'] = bool(st.get('human_confirmed'))
                 conv['fingerprint'] = fingerprint
                 return self._send_json(200, conv)
             except Exception as e:
@@ -2882,7 +2905,7 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         path = url.path
 
-        m = re.match(r"^/api/sessions/([^/]+)/(archive|note|star)$", path)
+        m = re.match(r"^/api/sessions/([^/]+)/(archive|note|star|title|human)$", path)
         if m:
             sid, action = urllib.parse.unquote(m.group(1)), m.group(2)
             try:
@@ -2909,6 +2932,18 @@ class Handler(BaseHTTPRequestHandler):
                     entry["starred_at"] = datetime.now(timezone.utc).isoformat()
                 else:
                     entry.pop("starred_at", None)
+            elif action == "title":
+                title = str(body.get("title_override") or "").strip()
+                if title:
+                    entry["title_override"] = title
+                else:
+                    entry.pop("title_override", None)
+            elif action == "human":
+                confirmed = bool(body.get("human_confirmed", True))
+                if confirmed:
+                    entry["human_confirmed"] = True
+                else:
+                    entry.pop("human_confirmed", None)
 
             _state[sid] = entry
             save_state()

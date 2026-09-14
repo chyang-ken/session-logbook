@@ -109,6 +109,8 @@ class SessionLogbookCliTests(unittest.TestCase):
             mock.patch.object(kimi_source, "SESSION_INDEX_PATH", self.kimi_root.parent / "session_index.jsonl"),
             mock.patch.object(kimi_source, "_INDEX_CACHE", {"mtime": 0.0, "data": {}}),
             mock.patch.object(server, "_cache", {}),
+            mock.patch.object(server, "_state", {}),
+            mock.patch.object(server, "_state_loaded", True),
             mock.patch.object(server, "_CWD_TRUTH_MAP", {}),
             mock.patch.object(server, "_CWD_INDEX_SEEN", set()),
             mock.patch.object(server, "_CWD_SEQ", {}),
@@ -201,6 +203,15 @@ class SessionLogbookCliTests(unittest.TestCase):
         self.assertEqual([hit["id"] for hit in hits],
                          ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"])
         self.assertEqual(hits[0]["snippets"][0]["role"], "title")
+
+    def test_user_defined_title_is_searchable(self):
+        server._state["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] = {
+            "title_override": "Billing recovery",
+        }
+        hits = cli.search_sessions("billing retry")
+        self.assertEqual([hit["id"] for hit in hits],
+                         ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"])
+        self.assertEqual(hits[0]["snippets"][0]["text"], "Billing recovery")
 
     def test_kimi_search_status_and_context(self):
         hits = cli.search_sessions("rotation scheduled", source="kimi")

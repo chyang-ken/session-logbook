@@ -170,6 +170,55 @@ class TestSessionSearch(unittest.TestCase):
         self.assertEqual(results[0]["snippets"][0]["text"],
                          "Session title: Codex Launch Review")
 
+    def test_user_title_matches_and_combines_with_transcript_terms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(
+                json.dumps({
+                    "type": "user",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {"content": "payment retry details"},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            meta = {
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "jsonl_path": str(path),
+                "mtime": path.stat().st_mtime,
+                "custom_title": "Source title",
+            }
+            state = {meta["id"]: {"title_override": "Billing recovery"}}
+            with mock.patch.object(server, "_cache", {str(path): meta}), \
+                    mock.patch.object(server, "_state", state), \
+                    mock.patch.object(server, "_rg_prefilter", return_value=set()):
+                results = server.search_sessions("billing retry")
+
+        self.assertEqual([result["id"] for result in results], [meta["id"]])
+        self.assertEqual(results[0]["snippets"][0]["text"],
+                         "Session title: Billing recovery")
+
+
+class TestEnrichedSessions(unittest.TestCase):
+    def test_local_title_and_human_confirmation_overlay_source_metadata(self):
+        meta = {
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "mtime": time.time(),
+            "custom_title": "Source title",
+        }
+        local = {
+            meta["id"]: {
+                "title_override": "My title",
+                "human_confirmed": True,
+            }
+        }
+        with mock.patch.object(server, "scan_sessions", return_value=[meta]), \
+                mock.patch.object(server, "_state", local):
+            item = server.enriched_sessions()[0]
+
+        self.assertEqual(item["custom_title"], "Source title")
+        self.assertEqual(item["display_title"], "My title")
+        self.assertTrue(item["human_confirmed"])
+
 
 class TestComputeScope(unittest.TestCase):
     def setUp(self):
