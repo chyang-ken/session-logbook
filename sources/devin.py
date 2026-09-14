@@ -5,6 +5,7 @@ They identify database records, never generated transcript files. N anchors refe
 to message_nodes.row_id; follow returns a full snapshot because branches can change.
 """
 import json
+from sources.activity import activity_fields
 import hashlib
 import os
 import sqlite3
@@ -141,6 +142,9 @@ def _metadata(path, meta, chain):
             'project_path': meta.get('working_directory') or '',
             'jsonl_path': str(path), 'source_kind': 'sqlite',
             'mtime': mtime, 'mtime_iso': _iso(mtime),
+            **activity_fields(((n['message'].get('metadata') or {}).get('created_at')
+                               or n['created_at'] for n in chain
+                               if all(message_text(n))), mtime),
             'size': sum(len(n['chat_message'].encode()) for n in chain),
             'model': meta.get('model'), 'custom_title': meta.get('title') or '',
             'user_turn_count': len(users), 'last_stop_reason': None,

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import server
+from sources.activity import activity_time
 from sources import anchored_transcript, session_identity
 from sources import codex as codex_source
 from sources import devin as devin_source
@@ -304,7 +305,7 @@ def search_sessions(
             continue
         if project and project.lower() not in (item.get("project_path") or "").lower():
             continue
-        if since_ts is not None and item.get("mtime", 0) < since_ts:
+        if since_ts is not None and activity_time(item) < since_ts:
             continue
 
         # Metadata can identify a target during ordinary discovery, but a role-filtered
@@ -356,6 +357,8 @@ def search_sessions(
             "project_path": item.get("project_path"),
             "jsonl_path": item["jsonl_path"],
             "mtime_iso": item.get("mtime_iso"),
+            "activity_at": activity_time(item),
+            "activity_at_iso": item.get("activity_at_iso") or item.get("mtime_iso"),
             "size": item.get("size"),
             "is_subagent": item["is_subagent"],
             "parent_session_id": item["parent_session_id"],
@@ -371,7 +374,7 @@ def search_sessions(
         if previous is None or (entry.get("size") or 0) > (previous.get("size") or 0):
             winners[sid] = entry
     deduped = list(winners.values())
-    deduped.sort(key=lambda entry: entry.get("mtime_iso") or "", reverse=True)
+    deduped.sort(key=activity_time, reverse=True)
     return deduped[:limit]
 
 
