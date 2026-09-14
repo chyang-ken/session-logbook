@@ -2555,8 +2555,8 @@ function groupItems(items) {
     const g = groups.get(key);
     g.paths.add(m.project_path || NO_WORKSPACE_KEY);
     g.items.push(m);
-    if (m.mtime > g.mostRecent) g.mostRecent = m.mtime;
-    if (m.mtime >= dayAgo) g.recentCount += 1;
+    if (activityTime(m) > g.mostRecent) g.mostRecent = activityTime(m);
+    if (activityTime(m) >= dayAgo) g.recentCount += 1;
   }
   return [...groups.values()].sort((a, b) => b.mostRecent - a.mostRecent);
 }
@@ -2605,11 +2605,14 @@ function bucketByScope(items) {
 
 // The frontend re-derives scope from state.recentDays, overriding the value the backend sent.
 // The priority matches the backend's compute_scope: archived > starred > mtime-based.
+function activityTime(m) { return m.activity_at || m.mtime || 0; }
+function activityISO(m) { return m.activity_at_iso || m.mtime_iso || ''; }
+
 function computeScope(m) {
   if (m.archived) return 'archived';
   if (m.starred) return 'starred';
   if (state.recentDays === 'all') return 'recent';
-  const ageDays = (Date.now() / 1000 - m.mtime) / 86400;
+  const ageDays = (Date.now() / 1000 - activityTime(m)) / 86400;
   return ageDays < state.recentDays ? 'recent' : 'dusty';
 }
 
@@ -2721,7 +2724,7 @@ function render() {
     const scrollTop = $list.scrollTop;
     $list.classList.add('timeline');
     $list.innerHTML = `<div class="timeline-list">${filtered
-      .slice().sort((a, b) => b.mtime - a.mtime).map(renderCard).join('')}</div>`;
+      .slice().sort((a, b) => activityTime(b) - activityTime(a)).map(renderCard).join('')}</div>`;
     $list.scrollTop = scrollTop;
     bindCardEvents();
     syncCollapseAllBtn();
@@ -3140,7 +3143,7 @@ function renderCard(m) {
     ? `<div class="note">${escapeHtml(m.note)}</div>`
     : '';
   // A2 freshness: mtime within the last 1 hour → add fresh to time-tag (more eye-catching, scannable at a glance for "which are still hot")
-  const _mt = m.mtime_iso ? new Date(m.mtime_iso).getTime() : 0;
+  const _mt = activityTime(m) * 1000;
   const isFresh = _mt && (Date.now() - _mt) < 3600 * 1000;
   // D2 persistent "has a note" micro-marker (shown even in the collapsed state, not dependent on hover)
   const noteIndicator = m.note
@@ -3225,7 +3228,7 @@ function renderCard(m) {
           <button class="sid-link-btn" data-act="copy-path" data-tooltip="Copy source reference" aria-label="Copy source reference">${ICONS.link}</button>
           <button class="sid-link-btn" data-act="copy-link" data-tooltip="Copy shareable link" aria-label="Copy shareable link">${ICONS.share}</button>
         </span>
-        <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(m.mtime_iso || '')}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(m.mtime_iso)}</span>
+        <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(activityISO(m))}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(activityISO(m))}</span>
         ${noteIndicator}
         <div class="card-actions">
           <button class="btn" data-act="note" data-tooltip="Edit note" aria-label="Edit note">${ICONS.note}</button>
@@ -3967,7 +3970,7 @@ function renderConv(data, meta) {
     <div class="conv-detail">
       <span class="conv-sid-wrap"><span class="conv-copy-id" data-copy-id="${escapeHtml(data.id)}" data-tooltip="Click to copy session ID">${escapeHtml(data.id)}</span>${pathBtnHtml}</span>
       ${sizeKB ? `<span>${sizeKB}</span>` : ''}
-      ${meta?.mtime_iso ? `<span>${escapeHtml(fmtAbsTime(meta.mtime_iso))}</span>` : ''}
+      ${meta ? `<span>${escapeHtml(fmtAbsTime(activityISO(meta)))}</span>` : ''}
       ${meta?.jsonl_path ? `<div style="margin-top:2px">${escapeHtml(meta.jsonl_path)}</div>` : ''}
     </div>`;
 
@@ -5003,7 +5006,7 @@ const LIVE_ACTIVE_WINDOW_MS = 60000;  // how long after an interaction still cou
 function sessionsSignature(items) {
   let s = items.length + '|';
   for (const m of items) {
-    s += m.id + ':' + m.mtime + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0)
+    s += m.id + ':' + m.mtime + ':' + activityTime(m) + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0)
       + ':' + (m.human_confirmed ? 1 : 0) + ':' + (m.title_override || '') + ',';
   }
   return s;
@@ -5066,8 +5069,8 @@ async function livePoll() {
     const sig = sessionsSignature(items);
     if (sig !== _liveSig) {
       // B2 compute the ids that are new/advanced (old mtime vs new), and after render flash only these
-      const prev = new Map(state.items.map(m => [m.id, m.mtime]));
-      const changedIds = items.filter(m => !prev.has(m.id) || prev.get(m.id) !== m.mtime).map(m => m.id);
+      const prev = new Map(state.items.map(m => [m.id, activityTime(m)]));
+      const changedIds = items.filter(m => !prev.has(m.id) || activityTime(m) > prev.get(m.id)).map(m => m.id);
       _liveSig = sig;
       state.items = items;
       _lastInteractionAt = Date.now();  // a real change → enter active cadence, ask more frequently next round

@@ -6,6 +6,7 @@ The interface mirrors the existing Claude path in server.py:
 - extract_conversation(jsonl_path): returns a list of turns
 """
 import json
+from sources.activity import activity_fields
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -352,6 +353,7 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
         "jsonl_path": str(jsonl_path),
         "mtime": mtime,
         "mtime_iso": mtime_iso,
+        **activity_fields((ts for ts, _, text in raw if text), mtime),
         "size": size,
         "source": "codex",
         # Archived status is derived from file location: under archived_sessions/ means
