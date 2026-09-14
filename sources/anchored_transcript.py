@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from sources.claude_text import strip_leading_reminders
 
 
 def trunc(s, n):
@@ -188,9 +189,11 @@ def render_claude(path) -> str:
                             o_lines.append(f"[L{ln}]   ⮑ TOOL_RESULT {status}{side}: {txt}")
                 else:
                     if isinstance(content, list):
-                        txt = " ".join(b.get('text', '') if isinstance(b, dict) and b.get('type') == 'text' else ('[image]' if isinstance(b, dict) and b.get('type') == 'image' else '') for b in content).strip()
+                        txt = " ".join(strip_leading_reminders(b.get('text', '')) if isinstance(b, dict) and b.get('type') == 'text' else ('[image]' if isinstance(b, dict) and b.get('type') == 'image' else '') for b in content).strip()
                     else:
-                        txt = content or ''
+                        txt = strip_leading_reminders(content or '')
+                    if not txt.strip():
+                        continue
                     uturn += 1
                     o_lines.append("")
                     o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts}{side} ━━━━━━━━━━")
