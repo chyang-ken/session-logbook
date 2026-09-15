@@ -34,6 +34,15 @@ class RuntimeEventsTests(unittest.TestCase):
         self.assertEqual(events.read("codex", "a", path=self.path)["collection"], "no_events_observed")
         self.assertFalse(self.path.exists())
 
+    def test_pi_settled_does_not_erase_native_abort_reason(self):
+        events.record("pi", {"session_id": "a", "hook_event_name": "agent_end",
+                             "stop_reasons": ["aborted"], "messages": ["private text"]}, self.path)
+        events.record("pi", {"session_id": "a", "hook_event_name": "agent_settled"}, self.path)
+        page = events.read("pi", "a", path=self.path)
+        self.assertEqual(page["events"][0]["facts"]["stop_reasons"], ["aborted"])
+        self.assertNotIn("messages", page["events"][0]["facts"])
+        self.assertEqual(page["liveness"], "unknown")
+
     def test_broken_journal_is_unavailable_not_empty_or_completed(self):
         self.path.write_bytes(b"not a database")
         result = events.read("claude", "a", after=10, path=self.path)

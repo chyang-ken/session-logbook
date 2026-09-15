@@ -34,7 +34,7 @@ def record(source, payload, path=None):
     # Keep identity and event facts only. Conversation text stays in its source.
     fields = ("hook_event_name", "session_id", "turn_id", "turnId", "agent_id",
               "parent_session_id", "transcript_path", "timestamp", "reason",
-              "stop_hook_active", "tool_name", "tool_use_id", "run_id")
+              "stop_hook_active", "tool_name", "tool_use_id", "run_id", "stop_reasons")
     facts = {key: payload[key] for key in fields if key in payload}
     encoded = json.dumps(facts, ensure_ascii=False)
     if len(encoded.encode("utf-8")) > 65536:

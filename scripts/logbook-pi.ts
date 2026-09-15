@@ -33,9 +33,15 @@ export default function (pi: any) {
     heartbeat.unref();
     await send("session_start", ctx);
   });
-  for (const name of ["before_agent_start", "agent_start", "agent_end", "agent_settled"]) {
+  for (const name of ["before_agent_start", "agent_start", "agent_settled"]) {
     pi.on(name, (_event: any, ctx: any) => send(name, ctx));
   }
+  pi.on("agent_end", (event: any, ctx: any) => send("agent_end", ctx, {
+    // Preserve native reasons: settled also fires after an aborted run.
+    stop_reasons: (event.messages ?? [])
+      .filter((message: any) => message.role === "assistant" && typeof message.stopReason === "string")
+      .map((message: any) => message.stopReason),
+  }));
   for (const name of ["tool_execution_start", "tool_execution_end"]) {
     pi.on(name, (event: any, ctx: any) => send(name, ctx, {tool_name: event.toolName}));
   }

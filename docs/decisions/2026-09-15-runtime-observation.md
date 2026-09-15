@@ -42,3 +42,10 @@ Synthetic tests cover session isolation, paging, incomplete native records, and
 preserving blocked outcomes. Real source-by-source startup, interruption, failure,
 continuous-turn, recovery, and independent Agent consumption checks remain required
 before advertising stable runtime monitoring. Delivery status is in docs/runtime-observation.md.
+
+Follow-up real-client validation found that Pi agent_settled also fires after an
+aborted request. Preserve the native assistant stopReason values in agent_end
+metadata rather than interpreting settled as success or forcing extra raw-log reads.
+The updated extension was verified with real normal, aborted, and recovered requests.
+Kimi SIGINT left no terminal event, demonstrating why missing evidence must remain
+unknown. Source-specific outcomes and remaining gaps are in the delivery document.

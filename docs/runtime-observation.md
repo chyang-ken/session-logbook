@@ -48,8 +48,8 @@ emits a diagnostic to stderr and never blocks permissions or emits approval outp
 Implemented: metadata journal, independent cursors, native Codex/Kimi facts,
 Claude/Codex configuration utility, Pi extension, Agent observation guidance.
 
-Pending release acceptance: real lifecycle tests for each source and an independent
-Agent using the Skill. No stable cross-source monitoring claim yet. No resident
+Basic real lifecycle and independent Agent consumption checks are recorded below.
+No stable cross-source monitoring claim yet. No resident
 service is installed. Heartbeats are exposed as facts, not converted to liveness.
 Legacy explicit_terminal is historical metadata, not an authoritative current-turn
 verdict; use the event identities and conversation in observe.
@@ -67,3 +67,40 @@ Tests used temporary observation storage and did not install permanent hooks.
 
 Kimi authentication was not changed. The failure case is evidence for preserving
 failure, not evidence that a successful Kimi lifecycle has been validated.
+
+### Multi-turn, interruption, and recovery follow-up
+
+The maintainer subsequently restored Kimi authentication. Each source was exercised
+with two short replies, an interrupted request, and a recovery request in the same
+session. Claude, Codex, and Kimi used separate CLI invocations to resume the session;
+Pi used consecutive RPC requests in one process, including the native abort command.
+No tools, permanent installations, authentication changes, or model overrides were
+performed by this test. SIGINT targeted only the test-owned process groups.
+
+| Source | Actual result | Boundary |
+|---|---|---|
+| Codex | Two completed turns, an interrupted turn with matching turn_aborted identity, and a completed recovery turn | Native rollout path verified, not Logbook-owned Hook delivery or Desktop coverage |
+| Claude | Two completed turns; SIGINT interrupted the third; same-session recovery and a plain greeting both received provider rejection | Recovery not passed; no model change or repeated attempts to bypass the provider response |
+| Pi | Two completed turns, abort, and successful recovery; the modified extension was loaded in a new real process and verified again | agent_settled fires after abort too; agent_end now exposes native stop_reasons without message bodies |
+| Kimi | After user login, two completed turns and successful post-SIGINT recovery | The interrupted turn left no turn.ended; it must remain unknown from logs alone, not inherit the preceding completion |
+
+A separate Claude run used a temporary Stop blocker. It emitted Stop with
+stop_hook_active=false, continued to produce the requested extra line, then emitted
+Stop with stop_hook_active=true. Both observations reached Logbook. This validates
+that receiving the first Stop is not proof the runtime has stopped continuing.
+
+Codex native events were additionally read in two-event pages: all eight lifecycle
+events were returned once, then an empty page. Pi exposed stop, stop, aborted, stop
+in the four agent_end observations. A fresh Agent, without the construction discussion,
+found the installed Skill wrapper, read observe, distinguished the unfinished third
+request from the successful fourth reply, and returned independent cursors without
+modifying or resuming the inspected session.
+
+Remaining acceptance gaps include Claude post-interruption provider recovery,
+Codex-owned Hook delivery and Desktop coverage, permission waits, Pi automatic
+retry/compaction and queued follow-ups, and abrupt termination without cleanup.
+These are not grounds for converting missing events into a completion claim.
+
+Local private reproduction inputs and source references are retained in
+`_private/runtime_probe.py`, `_private/runtime-probe-results.json`, and
+`_private/runtime-probe-followup.json`; these are intentionally excluded from Git.
