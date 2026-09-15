@@ -10,6 +10,13 @@ to recover work later, often across many clients and projects.
 
 ## What Session Logbook is
 
+For 0.2.0, runtime observation is an approved extension of retrieval: Logbook may
+install observation hooks and retain lifecycle facts for Agents to interpret with
+conversation evidence. It does not make semantic success or permission decisions.
+See [the runtime observation decision](decisions/2026-09-15-runtime-observation.md)
+and [setup and delivery status](runtime-observation.md). Earlier retrieval-only
+language below continues to prohibit lifecycle control, not passive observation.
+
 | | |
 |---|---|
 | ✅ Retrieval layer | Find and re-read work across agent clients |

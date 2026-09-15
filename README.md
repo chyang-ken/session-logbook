@@ -59,6 +59,9 @@ append-only delta. Copied source references have the form
 
 ## Give a Session to another Agent
 
+For optional lifecycle evidence alongside conversation, see
+[runtime observation (experimental)](docs/runtime-observation.md).
+
 The dashboard does not need to be running. The read-only Agent CLI accepts a known Session
 ID, an exact JSONL path, or a search query:
 
