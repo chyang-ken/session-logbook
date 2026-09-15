@@ -479,7 +479,7 @@ def _observed_terminal(item: dict) -> str:
     return reason if reason in {"complete", "aborted", "error"} else "unknown"
 
 
-def render_context(path: Path, after_line: int = 0) -> str:
+def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False) -> str:
     item = session_metadata(path)
     if item["source"] == "devin":
         return devin_source.render_context(path, after_line)
@@ -509,7 +509,8 @@ def render_context(path: Path, after_line: int = 0) -> str:
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
         f"# RETURNED_CONTENT: {'yes' if body.strip() else 'no'}",
-        f"# EXPLICIT_TERMINAL: {_observed_terminal(item)}",
+        (f"# HISTORICAL_TERMINAL_NOT_CURRENT_STATE: {_observed_terminal(item)}"
+         if historical_terminal else f"# EXPLICIT_TERMINAL: {_observed_terminal(item)}"),
         ("# Compare the full selected branch with the previous snapshot, including removed entries."
          if item["source"] == "pi" else
          "# The cursor line is returned again on follow; ignore it when its [L#] was already seen."),
@@ -545,6 +546,7 @@ def read_evidence(path: Path, line: int, context: int = 1, max_chars: int = 12_0
 
 
 def status_for(path: Path) -> dict:
+    from sources import runtime_events
     item = session_metadata(path)
     if item["source"] == "devin":
         _, chain = devin_source.read_session(path)
@@ -568,6 +570,7 @@ def status_for(path: Path) -> dict:
         "is_subagent": item["is_subagent"],
         "parent_session_id": item["parent_session_id"],
         "liveness": "unknown",
+        "runtime_observations": runtime_events.read(item["source"], item.get("id")),
     }
 
 
@@ -600,6 +603,13 @@ def parse_args(argv=None):
 
     status = sub.add_parser("status", help="report observed transcript state")
     _add_target_filters(status)
+
+    observe = sub.add_parser("observe", help="read runtime facts and incremental conversation")
+    _add_target_filters(observe)
+    observe.add_argument("--event-cursor", type=int, default=0)
+    observe.add_argument("--native-line-cursor", type=int, default=0)
+    observe.add_argument("--cursor-line", type=int, default=0)
+    observe.add_argument("--limit", type=int, default=50)
 
     evidence = sub.add_parser("evidence", help="read source lines or Devin database nodes around an anchor")
     _add_target_filters(evidence)
@@ -653,6 +663,23 @@ def main(argv=None) -> int:
             print(render_context(path, after_line=max(0, args.after_line)))
         elif args.command == "status":
             _print_json(status_for(path))
+        elif args.command == "observe":
+            from sources import runtime_events
+            item = session_metadata(path)
+            if item["source"] not in runtime_events.SOURCES:
+                raise ValueError("runtime observation is not supported for this source")
+            _print_json({
+                "source": item["source"], "session_id": item.get("id"),
+                "hooks": runtime_events.read(item["source"], item.get("id"),
+                                             args.event_cursor, args.limit),
+                "native": runtime_events.native_events(path, item["source"],
+                                                       args.native_line_cursor, args.limit),
+                "conversation": render_context(path, after_line=max(0, args.cursor_line),
+                                               historical_terminal=True),
+                "interpretation": "Events are observations, not proof of task success. "
+                                  "Use turn identities and conversation evidence. Missing events "
+                                  "do not establish liveness or completion.",
+            })
         elif args.command == "evidence":
             print(read_evidence(
                 path,

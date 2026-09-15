@@ -133,12 +133,18 @@ A POST body missing `starred` / `archived` defaults to `True`.
 `session_logbook_cli.py` is the stable read-only interface for Agents and does not require the
 dashboard server. Its commands are:
 
+0.2.0 additionally includes passive runtime observation. See
+[`docs/runtime-observation.md`](docs/runtime-observation.md) for setup, cursors, and
+validation status. The collector writes only Logbook-owned event metadata; source
+transcripts remain read-only. Semantic judgments belong to the consuming Agent.
+
 | Command | Outcome |
 |---|---|
 | `locate <target>` | Resolve a Session ID, exact JSONL path, or bounded search query |
 | `context <target>` | Emit the standard anchored transcript plus the next line cursor |
 | `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record |
 | `status <target>` | Report observed file/session metadata without guessing process liveness |
+| `observe <target>` | Return runtime facts and conversation with independent cursors (Devin excluded) |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
 | `search <query>` | Search real User/Assistant messages with source/project/date/role filters |
 
