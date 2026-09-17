@@ -120,6 +120,54 @@ class HistoryTests(unittest.TestCase):
         self.assertNotIn(str(old) + ' L1-L5', text)
         self.assertNotIn('Discarded old branch', text)
 
+    def test_large_replaced_tail_is_not_loaded_and_original_evidence_remains_available(self):
+        old = self.segment('old', [msg('Retained constraint')])
+        latest = self.segment('new', [msg('New request')], base=(old, 2))
+        with old.open('ab') as stream:
+            stream.write(json.dumps(dict(msg('x' * (8 * 1024 * 1024)), ordinal=2)).encode() + b'\n')
+        original_open = Path.open
+        bytes_read = [0]
+
+        class CountedFile:
+            def __init__(self, stream):
+                self.stream = stream
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.stream.close()
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+            def read(self, *args):
+                data = self.stream.read(*args)
+                bytes_read[0] += len(data)
+                return data
+            def readline(self, *args):
+                data = self.stream.readline(*args)
+                bytes_read[0] += len(data)
+                return data
+
+        def counted_open(path, *args, **kwargs):
+            stream = original_open(path, *args, **kwargs)
+            return CountedFile(stream) if path == old else stream
+
+        with patch.object(Path, 'open', counted_open):
+            history = codex_history.resolve(latest)
+        self.assertTrue(history['complete'], history['issues'])
+        self.assertEqual(len(history['records']), 4)
+        self.assertLess(bytes_read[0], 16 * 1024)
+        self.assertIn('Retained constraint', cli.read_evidence(old, 2, context=0))
+        self.assertGreater(old.stat().st_size, 8 * 1024 * 1024)
+
+    def test_boundary_probe_handles_long_records_and_invalid_prefix(self):
+        old = self.segment('long', [msg('Earlier'), msg('x' * 12000)])
+        byte = old.stat().st_size
+        self.assertEqual(codex_history.boundary_ordinal(old, byte), 2)
+        self.assertIsNone(codex_history.boundary_ordinal(old, byte - 1))
+        latest = self.segment('new', [msg('Next')], base=(old, 3))
+        data = old.read_bytes().replace(b'"text": "Earlier"', b'"text": XEarlier"', 1)
+        old.write_bytes(data)
+        self.assertFalse(codex_history.resolve(latest)['complete'])
+
     def test_deep_history_does_not_depend_on_python_recursion_limit(self):
         previous = None
         for n in range(1100):

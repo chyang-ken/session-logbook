@@ -92,3 +92,21 @@ export, and a fourth continuation with an unchanged ID and refreshed source list
 
 Validation: 353 tests on Python 3.9 and 3.14, one existing skip on each. Delivery
 remains paused; neither these local changes nor the packaged Skill are deployed.
+
+## Follow-up: demand-driven ancestry boundaries
+
+Probe the record ending at the declared byte boundary before loading a candidate.
+Only a matching candidate's retained prefix is parsed and validated. Discarded tails
+remain untouched, and conflicting valid prefixes still block history resolution.
+This uses per-invocation indexes only; it introduces no persistent cache or service.
+
+Synthetic acceptance verifies that an 8 MB discarded tail costs less than 16 KB
+of explicit binary reads, preserves access to original evidence, and rejects an
+invalid prefix even when its endpoint is valid. Long boundary records and 1,100
+segments also pass. The complete suite reports 355 tests on Python 3.9 and 3.14,
+with one existing skip; installed-consumer isolated catch-up remains correct.
+
+This reduces unnecessary disk reads but does not reuse previously verified history
+across separate process invocations. Cross-process reuse would need a recoverable
+local index or a caller-carried validation checkpoint, with explicit invalidation
+on changes to history. Neither is implemented or enabled by this change.

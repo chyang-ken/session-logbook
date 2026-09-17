@@ -8,12 +8,17 @@ import json
 from pathlib import Path
 
 
-def read_segment(path):
+def read_segment(path, stop=None):
     path = Path(path).resolve()
     records, issues, offset = [], [], 0
     try:
         with path.open('rb') as stream:
-            for line, raw in enumerate(stream, 1):
+            line = 0
+            while stop is None or offset < stop:
+                raw = stream.readline(-1 if stop is None else stop - offset)
+                if not raw:
+                    break
+                line += 1
                 end = offset + len(raw)
                 origin = {'path': str(path), 'line': line, 'start': offset, 'end': end}
                 if not raw.endswith(b'\n'):
@@ -36,6 +41,34 @@ def read_segment(path):
     return records, issues
 
 
+def boundary_ordinal(path, byte):
+    """Read only the record ending at an explicit byte boundary, never the tail."""
+    try:
+        with Path(path).open('rb') as stream:
+            stream.seek(0, 2)
+            if byte <= 0 or byte > stream.tell():
+                return None
+            stream.seek(byte - 1)
+            if stream.read(1) != b'\n':
+                return None
+            position, chunks = byte - 1, []
+            while position:
+                size = min(position, 4096)
+                position -= size
+                stream.seek(position)
+                chunk = stream.read(size)
+                newline = chunk.rfind(b'\n')
+                if newline >= 0:
+                    chunks.append(chunk[newline + 1:])
+                    break
+                chunks.append(chunk)
+            row = json.loads(b''.join(reversed(chunks)))
+            ordinal = row.get('ordinal') if isinstance(row, dict) else None
+            return ordinal if type(ordinal) is int else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
 def _meta(records):
     if records and records[0]['record'].get('type') == 'session_meta':
         return records[0]['record'].get('payload') or {}
@@ -48,13 +81,14 @@ def resolve(path):
     snapshots, visited, boundary_indexes = {}, set(), {}
     metadata_index = None
 
-    def read(p):
+    def read(p, stop=None):
         p = Path(p).resolve()
-        if p not in snapshots:
-            snapshots[p] = read_segment(p)
-        return snapshots[p]
+        key = (p, stop)
+        if key not in snapshots:
+            snapshots[key] = read_segment(p, stop)
+        return snapshots[key]
 
-    def boundaries(sid):
+    def boundaries(sid, byte):
         nonlocal metadata_index
         if metadata_index is None:
             metadata_index = {}
@@ -63,17 +97,16 @@ def resolve(path):
                     for candidate in root.rglob('rollout-*.jsonl'):
                         meta = codex._read_session_meta(candidate) or {}
                         metadata_index.setdefault(meta.get('id'), set()).add(candidate.resolve())
-        if sid not in boundary_indexes:
+        key = (sid, byte)
+        if key not in boundary_indexes:
             index = {}
             for candidate in sorted(metadata_index.get(sid, ())):
-                rows, errors = read(candidate)
-                first_error = min((e.get('start', 0) for e in errors), default=float('inf'))
-                for i, row in enumerate(rows):
-                    ordinal = row['record'].get('ordinal')
-                    if type(ordinal) is int and row['end'] <= first_error:
-                        index.setdefault((ordinal + 1, row['end']), []).append((candidate, i + 1))
-            boundary_indexes[sid] = index
-        return boundary_indexes[sid]
+                # Probe the explicit byte boundary before loading a candidate prefix.
+                ordinal = boundary_ordinal(candidate, byte)
+                if ordinal is not None:
+                    index.setdefault(ordinal + 1, []).append(candidate)
+            boundary_indexes[key] = index
+        return boundary_indexes[key]
 
     layers = []
     p, stop = Path(path).resolve(), None
@@ -82,7 +115,7 @@ def resolve(path):
             layers.append(([], [{'path': str(p), 'reason': 'history_cycle'}]))
             break
         visited.add(p)
-        rows, errors = read(p)
+        rows, errors = read(p, stop)
         meta = _meta(rows)
         selected = [r for r in rows if stop is None or r['end'] <= stop]
         errors = [e for e in errors if stop is None or e.get('start', 0) < stop]
@@ -115,12 +148,14 @@ def resolve(path):
         if rows and rows[0]['record'].get('ordinal') != end:
             errors.append({**issue, 'reason': 'continuation_start_conflict'})
             break
-        matches = [(candidate, cut) for candidate, cut in boundaries(sid).get((end, byte), ())
+        matches = [candidate for candidate in boundaries(sid, byte).get(end, ())
                    if candidate != p and candidate not in visited]
         # Equivalent active/archive copies have the same records, not merely equal ordinals.
         groups = {}
-        for candidate, cut in matches:
-            prefix = read(candidate)[0][:cut]
+        for candidate in matches:
+            prefix, prefix_errors = read(candidate, byte)
+            if prefix_errors or not prefix or prefix[-1]['end'] != byte:
+                continue
             digest = hashlib.sha256()
             for entry in prefix:
                 digest.update(json.dumps(entry['record'], sort_keys=True).encode())
@@ -138,7 +173,7 @@ def resolve(path):
         records.extend(rows)
         issues.extend(errors)
         if rows:
-            meta = _meta(read(rows[0]['path'])[0])
+            meta = _meta(rows)
             segments.append({'path': rows[0]['path'], 'session_id': meta.get('id'), 'records': rows})
     return {'records': records, 'segments': segments, 'issues': issues, 'complete': not issues}
 
