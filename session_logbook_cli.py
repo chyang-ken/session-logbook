@@ -384,7 +384,12 @@ def search_sessions(
     for entry in results:
         sid = entry.get("id") or entry["jsonl_path"]
         previous = winners.get(sid)
-        if previous is None or (entry.get("size") or 0) > (previous.get("size") or 0):
+        if (previous is None or
+                (entry["source"] == "codex" and
+                 codex_source.rollout_rank(Path(entry["jsonl_path"])) >
+                 codex_source.rollout_rank(Path(previous["jsonl_path"]))) or
+                (entry["source"] != "codex" and
+                 (entry.get("size") or 0) > (previous.get("size") or 0))):
             winners[sid] = entry
     deduped = list(winners.values())
     deduped.sort(key=activity_time, reverse=True)
@@ -482,7 +487,13 @@ def _observed_terminal(item: dict) -> str:
 def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False) -> str:
     item = session_metadata(path)
     if item["source"] == "devin":
-        return devin_source.render_context(path, after_line)
+        return devin_source.render_context(path, int(after_line))
+    input_cursor = after_line
+    changed = False
+    if item["source"] == "codex":
+        after_line, changed = codex_source.resume_cursor(path, after_line)
+    else:
+        after_line = int(after_line)
     total_lines = _line_count(path)
     if after_line > total_lines:
         raise SessionLookupError(
@@ -504,10 +515,13 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     observation = "\n".join([
         f"# SESSION_ID: {item.get('id')}",
         f"# PROJECT: {item.get('project_path') or ''}",
-        f"# INPUT_CURSOR: L{after_line}",
+        f"# INPUT_CURSOR: {input_cursor if str(input_cursor).startswith('cx1:') else 'L' + str(input_cursor)}",
+        f"# SOURCE_CHANGED: {str(changed).lower()}",
         *(['# FOLLOW_MODE: full selected branch (Pi can change branches)'] if item["source"] == "pi" else []),
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
-        f"# NEXT_CURSOR: L{total_lines}",
+        (f"# NEXT_CURSOR: {codex_source.next_cursor(path, total_lines)}"
+         if item["source"] == "codex" else f"# NEXT_CURSOR: L{total_lines}"),
+        f"# NEXT_LINE: L{total_lines}",
         f"# RETURNED_CONTENT: {'yes' if body.strip() else 'no'}",
         (f"# HISTORICAL_TERMINAL_NOT_CURRENT_STATE: {_observed_terminal(item)}"
          if historical_terminal else f"# EXPLICIT_TERMINAL: {_observed_terminal(item)}"),
@@ -564,7 +578,7 @@ def status_for(path: Path) -> dict:
         "mtime_iso": item.get("mtime_iso"),
         "size": item.get("size"),
         "total_lines": total_lines,
-        "next_cursor": f"L{total_lines}",
+        "next_cursor": codex_source.next_cursor(path, total_lines) if item["source"] == "codex" else f"L{total_lines}",
         "last_recorded_stop_reason": item.get("last_stop_reason"),
         "explicit_terminal": _observed_terminal(item),
         "is_subagent": item["is_subagent"],
@@ -592,13 +606,13 @@ def parse_args(argv=None):
 
     context = sub.add_parser("context", help="render an anchored context snapshot")
     _add_target_filters(context)
-    context.add_argument("--after-line", type=int, default=0)
+    context.add_argument("--after-line", default=0)
 
     follow = sub.add_parser("follow", help="render from a previous cursor, repeating its line once")
     _add_target_filters(follow)
     follow.add_argument(
-        "--cursor-line", "--after-line", dest="after_line", type=int, required=True,
-        help="numeric part of NEXT_CURSOR; Devin returns a full snapshot",
+        "--cursor-line", "--after-line", dest="after_line", required=True,
+        help="NEXT_CURSOR (Codex cx1 token, otherwise numeric line); Devin returns a full snapshot",
     )
 
     status = sub.add_parser("status", help="report observed transcript state")
@@ -607,8 +621,8 @@ def parse_args(argv=None):
     observe = sub.add_parser("observe", help="read runtime facts and incremental conversation")
     _add_target_filters(observe)
     observe.add_argument("--event-cursor", type=int, default=0)
-    observe.add_argument("--native-line-cursor", type=int, default=0)
-    observe.add_argument("--cursor-line", type=int, default=0)
+    observe.add_argument("--native-line-cursor", default=0)
+    observe.add_argument("--cursor-line", default=0)
     observe.add_argument("--limit", type=int, default=50)
 
     evidence = sub.add_parser("evidence", help="read source lines or Devin database nodes around an anchor")
@@ -660,7 +674,7 @@ def main(argv=None) -> int:
         if args.command == "locate":
             _print_json(session_metadata(path))
         elif args.command in {"context", "follow"}:
-            print(render_context(path, after_line=max(0, args.after_line)))
+            print(render_context(path, after_line=args.after_line))
         elif args.command == "status":
             _print_json(status_for(path))
         elif args.command == "observe":
@@ -674,7 +688,7 @@ def main(argv=None) -> int:
                                              args.event_cursor, args.limit),
                 "native": runtime_events.native_events(path, item["source"],
                                                        args.native_line_cursor, args.limit),
-                "conversation": render_context(path, after_line=max(0, args.cursor_line),
+                "conversation": render_context(path, after_line=args.cursor_line,
                                                historical_terminal=True),
                 "interpretation": "Events are observations, not proof of task success. "
                                   "Use turn identities and conversation evidence. Missing events "

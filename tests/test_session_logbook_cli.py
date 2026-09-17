@@ -195,7 +195,7 @@ class SessionLogbookCliTests(unittest.TestCase):
         self.assertEqual([hit["id"] for hit in hits], ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"])
         status = cli.status_for(self.codex)
         self.assertEqual(status["source"], "codex")
-        self.assertEqual(status["next_cursor"], "L4")
+        self.assertEqual(codex_source.resume_cursor(self.codex, status["next_cursor"]), (4, False))
         self.assertEqual(status["explicit_terminal"], "complete")
         self.assertEqual(status["liveness"], "unknown")
 

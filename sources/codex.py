@@ -6,6 +6,7 @@ The interface mirrors the existing Claude path in server.py:
 - extract_conversation(jsonl_path): returns a list of turns
 """
 import json
+import base64
 from sources.activity import activity_fields
 import os
 from datetime import datetime, timezone
@@ -237,6 +238,8 @@ def _scan_lines_for_metadata(lines, is_tail: bool):
                 nm = p.get("thread_name")
                 if nm:
                     out["custom_title"] = nm
+            elif et == "task_started":
+                out["last_stop_reason"] = None
             elif et == "task_complete":
                 out["last_stop_reason"] = "complete"
             elif et == "turn_aborted":
@@ -698,6 +701,66 @@ def extract_transcript(jsonl_path: Path) -> str:
     return header + "\n".join(out_blocks)
 
 
+def rollout_rank(path, meta=None):
+    """Use native segment creation time, never file size or filesystem mtime."""
+    meta = meta if meta is not None else (_read_session_meta(path) or {})
+    stamp = meta.get("timestamp") or ""
+    try:
+        created = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        created = 0
+    return created, not _under_root(path, CODEX_ARCHIVED_ROOT), str(path)
+
+
+def encode_cursor(path, line):
+    """Keep physical line coordinates tied to the rollout that produced them."""
+    name = base64.urlsafe_b64encode(str(Path(path).resolve()).encode()).decode().rstrip("=")
+    return f"cx1:{name}:{line}"
+
+
+def resume_cursor(path, cursor):
+    """Return (physical line, source changed). Bare cursors predate continuations.
+
+    A same-thread history_base identifies a replacement segment, not an append to
+    the previous file. Restart only that segment, retaining physical evidence anchors.
+    Source-qualified cursors make subsequent polls incremental even when the new
+    segment is shorter, longer, or has overlapping native ordinals.
+    """
+    meta = _read_session_meta(path) or {}
+    continued = bool(meta.get("id")) and (meta.get("history_base") or {}).get("thread_id") == meta["id"]
+    value = str(cursor)
+    if value.startswith("cx1:"):
+        try:
+            _, encoded, number = value.split(":")
+            previous = Path(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode())
+            line = int(number)
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("invalid Codex source cursor") from exc
+        if line < 0:
+            raise ValueError("cursor must be nonnegative")
+        if previous.resolve() == Path(path).resolve():
+            return line, False
+        previous_meta = _read_session_meta(previous)
+        if not previous_meta or previous_meta.get("id") != meta.get("id"):
+            raise ValueError("cursor source does not belong to this Codex session")
+        if not continued:
+            raise ValueError("Codex source changed without same-thread continuation evidence")
+        return 0, True
+    line = int(value)
+    if line < 0:
+        raise ValueError("cursor must be nonnegative")
+    # An unqualified old cursor cannot distinguish identical line numbers in two
+    # files. Migrate once to a qualified cursor; never silently skip the new segment.
+    return (0, True) if line and continued else (line, False)
+
+
+def next_cursor(path, line):
+    meta = _read_session_meta(path) or {}
+    if meta.get("id"):
+        return encode_cursor(path, line)
+    return line
+
+
 def find_rollout_by_session_id(session_id: str, root: Path = None):
     """Locate a rollout file by card ID. Return (path, forked_child_id).
 
@@ -715,7 +778,8 @@ def find_rollout_by_session_id(session_id: str, root: Path = None):
 
     Search active sessions plus archived_sessions. Archived sessions move to the latter, so
     conversation/export endpoints would otherwise 404. Active sessions are searched first,
-    so a direct duplicate id prefers the active copy. The `root` parameter is for tests and
+    so an identical segment prefers the active copy. Distinct same-ID segments use
+    session_meta.timestamp, not traversal order, file size, or mtime. The `root` parameter is for tests and
     single-root injection; when provided, only that root is searched.
 
     Two-phase lookup for performance: direct hit is the cold-start path for standalone tabs
@@ -731,14 +795,14 @@ def find_rollout_by_session_id(session_id: str, root: Path = None):
         roots = [CODEX_ROOT, CODEX_ARCHIVED_ROOT]
     existing = [r for r in roots if r.exists()]
 
-    # Phase 1: direct hit, with filename prefilter (uuid is glob-safe hex plus dashes).
-    # Most cold starts return here and open only one file. Root order is active, archived,
-    # so duplicate ids prefer the active copy.
+    direct = []
     for r in existing:
         for p in r.rglob(f"rollout-*{session_id}*.jsonl"):
             meta = _read_session_meta(p)
             if meta and meta.get("id") == session_id:
-                return p, None
+                direct.append((rollout_rank(p, meta), p))
+    if direct:
+        return max(direct)[1], None
 
     # Phase 2: full fallback only after direct hit fails (unknown id or fork). Check both id
     # (so correctness does not depend on filename conventions) and parent_thread_id.
@@ -750,13 +814,16 @@ def find_rollout_by_session_id(session_id: str, root: Path = None):
             if not meta:
                 continue
             if meta.get("id") == session_id:
-                return p, None  # direct-hit fallback
-            if meta.get("parent_thread_id") == session_id:
+                direct.append((rollout_rank(p, meta), p))
+                continue
+            if meta.get("parent_thread_id") == session_id and not _is_subagent(meta, p):
                 try:
                     mt = p.stat().st_mtime
                 except OSError:
                     mt = 0.0
                 children.append((is_active, mt, str(p), p, meta.get("id")))
+    if direct:
+        return max(direct)[1], None
     if children:
         # active first > newest mtime > path name; archived child sessions do not steal the main line
         children.sort(key=lambda c: (c[0], c[1], c[2]), reverse=True)

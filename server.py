@@ -41,7 +41,7 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 7
+CACHE_SCHEMA_VERSION = 8
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -1168,7 +1168,8 @@ def file_fingerprint(path) -> str:
     change on the next poll — the fingerprint can lag behind the content, never run ahead of it.
     """
     st = os.stat(path)
-    return f"{st.st_mtime_ns}:{st.st_size}"
+    version = f"{st.st_mtime_ns}:{st.st_size}"
+    return f"{path}:{version}" if codex_source.is_codex_path(path) else version
 
 
 def extract_conversation(jsonl_path):
@@ -1618,6 +1619,11 @@ def _find_jsonl(session_id):
     been populated yet but the Codex session can be found on disk.
     """
     candidates = [m for m in _cache.values() if m.get('id') == session_id]
+    if any(m.get("source") == "codex" for m in candidates):
+        # A warm cache may still name the previous rollout after a resume.
+        p, _forked_child = codex_source.find_rollout_by_session_id(session_id)
+        if p is not None:
+            return p
     candidates.sort(key=lambda m: m.get('size', 0), reverse=True)
     for meta in candidates:
         p = Path(meta['jsonl_path'])
@@ -1890,7 +1896,12 @@ def _dedup_by_id(metas):
         if not sid:
             continue
         prev = by_id.get(sid)
-        if prev is None or m.get("size", 0) > prev.get("size", 0):
+        newer_codex = (prev is not None and m.get("source") == "codex"
+                       and prev.get("source") == "codex"
+                       and codex_source.rollout_rank(Path(m["jsonl_path"])) >
+                       codex_source.rollout_rank(Path(prev["jsonl_path"])))
+        if (prev is None or newer_codex or
+                (m.get("source") != "codex" and m.get("size", 0) > prev.get("size", 0))):
             by_id[sid] = m
     # Preserve original order (descending mtime)
     seen_ids = set()

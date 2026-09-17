@@ -78,6 +78,12 @@ def read(source, session_id, after=0, limit=50, path=None):
 
 def native_events(path, source, after=0, limit=50):
     """Read complete physical records. Unfinished final lines are retried next time."""
+    from sources import codex
+    changed = False
+    if source == "codex":
+        after, changed = codex.resume_cursor(path, after)
+    else:
+        after = int(after)
     if after < 0 or not 1 <= limit <= 200:
         raise ValueError("invalid native cursor or limit")
     names = {"codex": {"task_started", "task_complete", "turn_aborted", "error"},
@@ -85,6 +91,7 @@ def native_events(path, source, after=0, limit=50):
     result = {"events": [], "next_line_cursor": after, "has_more": False}
     if source not in names:
         return result
+    line = 0
     with Path(path).open("rb") as stream:
         for line, raw in enumerate(stream, 1):
             if line <= after:
@@ -111,4 +118,10 @@ def native_events(path, source, after=0, limit=50):
                     key: event[key] for key in keys if key in event},
                     "timestamp": row.get("timestamp", row.get("time"))})
             result["next_line_cursor"] = line
+    if after > line:
+        raise ValueError("native cursor is beyond the current source; source may have been truncated")
+    if source == "codex":
+        result["next_line_cursor"] = codex.next_cursor(path, result["next_line_cursor"])
+        result["source_path"] = str(Path(path).resolve())
+        result["source_changed"] = changed
     return result

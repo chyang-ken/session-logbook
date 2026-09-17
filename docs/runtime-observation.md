@@ -16,6 +16,29 @@ These cursors belong to the current source files and journal. If either is repla
 restored, or deleted, discard its saved cursor and start that stream at zero. They
 are not durable identities across storage replacement.
 
+## Codex continuation cursors
+
+Codex Desktop can resume the same `session_meta.id` into another rollout. ID lookup
+selects the latest segment by its native metadata timestamp, including with a warm
+HTTP cache; file size and filesystem modification time do not establish recency.
+Explicit paths still read exactly that file. Context is the selected segment, not
+a reconstruction of inherited history from `history_base` or the Desktop database.
+
+For Codex, save and pass the complete `cx1:...` value from conversation `NEXT_CURSOR`
+and `native.next_line_cursor` unchanged to their respective flags. These are opaque
+source-qualified strings, not integers. Physical `[L#]` anchors and native event
+`line` still refer to the reported source file. Use that exact path for evidence.
+A same-thread continuation resets reading to the new segment and reports
+`SOURCE_CHANGED: true` / `native.source_changed: true`; subsequent polls use the new
+source cursor and do not replay its history. Native ordinals can overlap across
+segments, so they are not used to merge or deduplicate unrelated records.
+
+Legacy bare nonzero Codex cursors on a same-thread continuation are migrated by
+reading the selected segment once. Callers must then preserve the returned token;
+continuing to send a bare number cannot distinguish old-file and new-file lines.
+Truncation beyond the saved cursor or an unrelated cursor source is an explicit
+error, not an empty successful poll. None of these signals proves process liveness.
+
 ## Collection setup
 
 Use a stable checkout path. Hook configuration points to this checkout and Python
