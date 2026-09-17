@@ -16,6 +16,31 @@ These cursors belong to the current source files and journal. If either is repla
 restored, or deleted, discard its saved cursor and start that stream at zero. They
 are not durable identities across storage replacement.
 
+## Codex continuation cursors
+
+Codex Desktop can resume the same `session_meta.id` into another rollout. ID lookup
+selects the latest segment by its native metadata timestamp, including with a warm
+HTTP cache; file size and filesystem modification time do not establish recency.
+Explicit paths still read exactly that file. Context is the selected segment, not
+a reconstruction of inherited history from `history_base` or the Desktop database.
+
+Save `transcript_path` alongside the numeric conversation `NEXT_CURSOR` and
+`native.next_line_cursor`. Pass it back as `--cursor-source-path` on `observe`
+and `follow`. Physical `[L#]` anchors remain local to that file.
+
+For Codex, a verified same-thread source change resets both cursors and reports
+`cursor_reset_reason: transcript_changed`. Legacy nonzero cursors without a
+source path report `cursor_source_missing` and replay the selected segment once.
+Subsequent calls with the returned path are incremental, including native pages.
+Consumers must clear old turn state on a reset, and never compare line numbers
+across source files. An unrelated source or truncation is an explicit error.
+
+The additive conversation `SOURCE_CURSOR` and native `source_cursor` fields
+provide opaque `cx1:...` tokens for callers that prefer one value. These may be
+passed unchanged as cursor arguments without `--cursor-source-path`. Existing
+numeric output fields retain their types. Native ordinals may overlap across
+segments and are not used to splice history. No cursor proves process liveness.
+
 ## Collection setup
 
 Use a stable checkout path. Hook configuration points to this checkout and Python

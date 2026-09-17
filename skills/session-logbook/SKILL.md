@@ -26,11 +26,16 @@ python3 scripts/session_logbook.py <command> ...
   selected ID with `context`. Do not load candidate transcripts during discovery.
 - **Follow or monitor:** first record `NEXT_CURSOR` from `context`; later run
   `follow <ID-or-path> --cursor-line <N>` with that value. The script deliberately returns
-  line N again in case it was previously half-written. Ignore the repeated `[L<N>]` when it
-  was already seen, save the new `NEXT_CURSOR`, and report only unseen additions. A quiet log
+  the cursor line again in case it was previously half-written. Ignore the repeated `[L<N>]` when it
+  was already seen, save the new `NEXT_CURSOR`, and report only unseen additions.
+  Save `CURSOR_SOURCE_PATH` alongside the numeric cursor and pass it back with
+  `--cursor-source-path`. On a source change, compare the new segment from its
+  beginning; `[L#]` evidence is local to its reported file. A quiet log
   is not proof that the source Agent is alive or finished.
 - **Runtime observation (Codex, Claude, Kimi, Pi):** run `observe <ID-or-path>`.
   It returns Hook facts, native Codex/Kimi lifecycle facts, and anchored conversation.
+  Save `transcript_path` and pass it back as `--cursor-source-path`. A reported
+  `cursor_reset_reason` requires clearing the old source line and turn state.
   Save all three cursors: `hooks.next_event_cursor`, `native.next_line_cursor`, and
   the conversation's `NEXT_CURSOR`. Supply them as `--event-cursor`,
   `--native-line-cursor`, and `--cursor-line` on the next call. Drain `has_more`
