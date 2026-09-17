@@ -3996,6 +3996,7 @@ function renderConv(data, meta) {
         ${subtitleHtml}
         <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} ${data.source === 'devin' ? 'database nodes' : 'raw lines'}</div>
         ${localMetadataHtml}
+        ${data.context_complete === false ? `<details class="conv-meta"><summary role="alert">Conversation history is incomplete — some earlier context is unavailable.</summary><pre>${escapeHtml(JSON.stringify(data.history_issues || [], null, 2))}</pre></details>` : ''}
       </div>
       ${actionsHtml}
       ${shareHtml}

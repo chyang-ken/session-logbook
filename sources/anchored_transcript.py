@@ -326,7 +326,7 @@ def _clean_output(out):
     return "\n".join(lines).strip()
 
 
-def render_codex(path) -> str:
+def render_codex(path, records=None) -> str:
     """Codex rollout jsonl → anchored-transcript string in the same format as Claude.
 
     Codex differences: reasoning is encrypted and unreadable; AGENTS.md/env/permissions are injected
@@ -335,88 +335,87 @@ def render_codex(path) -> str:
     """
     uturn = 0
     o_lines = []
-    ln = 0
-    with open(path, 'r', errors='replace') as f:
-        for raw in f:
-            ln += 1
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                o = json.loads(raw)
-            except Exception:
-                continue
-            t = o.get('type')
-            p = o.get('payload') or {}
-            ts = (o.get('timestamp') or '')[:19]
-            if t == 'session_meta':
-                cwd = (p.get('cwd') or '')
-                model = (p.get('model') or p.get('model_provider') or '')
-                o_lines.append(f"[L{ln}] [SESSION_META] cwd={cwd} {ts}")
-            elif t == 'response_item':
-                pt = p.get('type')
-                if pt == 'message':
-                    role = p.get('role')
-                    if role == 'developer':
-                        continue
-                    if role == 'user':
-                        injected, txt = _codex_user_parts(p.get('content'))
-                        for context in injected:
-                            o_lines.append(f"[L{ln}]   [CONTEXT injected: {trunc(context,80)}]")
-                        if txt.strip():
-                            uturn += 1
-                            o_lines.append("")
-                            o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts} ━━━━━━━━━━")
-                            o_lines.append(txt)
-                    elif role == 'assistant':
-                        txt = _msg_text(p.get('content'))
-                        if txt.strip():
-                            o_lines.append(f"[L{ln}] ASSISTANT: {txt}")
-                elif pt == 'reasoning':
-                    summ = _msg_text(p.get('summary'))
-                    if summ.strip():
-                        o_lines.append(f"[L{ln}]   💭 THINK: {trunc(summ,1400)}")
-                    # encrypted reasoning with no summary is skipped (no information)
-                elif pt == 'function_call':
-                    nm = p.get('name', '?')
-                    o_lines.append(f"[L{ln}]   🔧 {nm}: {_fc_summary(nm, p.get('arguments'))}")
-                elif pt == 'function_call_output':
-                    raw_output = p.get('output')
-                    is_error = _codex_output_is_error(raw_output)
-                    status = 'ERROR' if is_error else 'OK'
-                    o_lines.append(
-                        f"[L{ln}]   ⮑ OUTPUT {status}: "
-                        f"{_result_index(_clean_output(raw_output), is_error)}"
-                    )
-                elif pt == 'custom_tool_call':
-                    nm = p.get('name', '?')
-                    inp = p.get('input') or p.get('arguments')
-                    o_lines.append(f"[L{ln}]   🔧 {nm}: {trunc(inp,400)}")
-                elif pt == 'custom_tool_call_output':
-                    raw_output = p.get('output')
-                    is_error = _codex_output_is_error(raw_output)
-                    status = 'ERROR' if is_error else 'OK'
-                    o_lines.append(
-                        f"[L{ln}]   ⮑ OUTPUT {status}: "
-                        f"{_result_index(_clean_output(raw_output), is_error)}"
-                    )
-                elif pt == 'web_search_call':
-                    q = ''
-                    act = p.get('action') or {}
-                    if isinstance(act, dict):
-                        q = act.get('query', '')
-                    o_lines.append(f"[L{ln}]   🔧 web_search: {trunc(q,150)}")
-            elif t == 'event_msg':
-                et = p.get('type')
-                if et == 'thread_rolled_back':
-                    o_lines.append(f"[L{ln}] ⏪⏪ USER ROLLED BACK THREAD (strong dissatisfaction signal) {ts}")
-                elif et == 'turn_aborted':
-                    o_lines.append(f"[L{ln}] ⛔ TURN ABORTED by user (interruption signal) {ts}")
-                elif et == 'context_compacted':
-                    o_lines.append(f"[L{ln}] [CONTEXT COMPACTED]")
-                # the remaining event_msg (token_count/agent_message/user_message/task_*) are redundant with response_item, skip
-            elif t == 'compacted':
-                o_lines.append(f"[L{ln}] [COMPACTED SUMMARY]")
+    from sources import codex_history
+    history = codex_history.resolve(path) if records is None else None
+    rows = history['records'] if history is not None else records
+    multi = len({r['path'] for r in rows}) > 1
+    if history is not None and not history['complete']:
+        o_lines.append('# CONTEXT_INCOMPLETE: ' + json.dumps(history['issues']))
+    for entry in rows:
+        ln, o = entry['line'], entry['record']
+        if multi:
+            o_lines.append(f"[L{ln}] [SOURCE {entry['path']}]")
+        t = o.get('type')
+        p = o.get('payload') or {}
+        ts = (o.get('timestamp') or '')[:19]
+        if t == 'session_meta':
+            cwd = (p.get('cwd') or '')
+            model = (p.get('model') or p.get('model_provider') or '')
+            o_lines.append(f"[L{ln}] [SESSION_META] cwd={cwd} {ts}")
+        elif t == 'response_item':
+            pt = p.get('type')
+            if pt == 'message':
+                role = p.get('role')
+                if role == 'developer':
+                    continue
+                if role == 'user':
+                    injected, txt = _codex_user_parts(p.get('content'))
+                    for context in injected:
+                        o_lines.append(f"[L{ln}]   [CONTEXT injected: {trunc(context,80)}]")
+                    if txt.strip():
+                        uturn += 1
+                        o_lines.append("")
+                        o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts} ━━━━━━━━━━")
+                        o_lines.append(txt)
+                elif role == 'assistant':
+                    txt = _msg_text(p.get('content'))
+                    if txt.strip():
+                        o_lines.append(f"[L{ln}] ASSISTANT: {txt}")
+            elif pt == 'reasoning':
+                summ = _msg_text(p.get('summary'))
+                if summ.strip():
+                    o_lines.append(f"[L{ln}]   💭 THINK: {trunc(summ,1400)}")
+                # encrypted reasoning with no summary is skipped (no information)
+            elif pt == 'function_call':
+                nm = p.get('name', '?')
+                o_lines.append(f"[L{ln}]   🔧 {nm}: {_fc_summary(nm, p.get('arguments'))}")
+            elif pt == 'function_call_output':
+                raw_output = p.get('output')
+                is_error = _codex_output_is_error(raw_output)
+                status = 'ERROR' if is_error else 'OK'
+                o_lines.append(
+                    f"[L{ln}]   ⮑ OUTPUT {status}: "
+                    f"{_result_index(_clean_output(raw_output), is_error)}"
+                )
+            elif pt == 'custom_tool_call':
+                nm = p.get('name', '?')
+                inp = p.get('input') or p.get('arguments')
+                o_lines.append(f"[L{ln}]   🔧 {nm}: {trunc(inp,400)}")
+            elif pt == 'custom_tool_call_output':
+                raw_output = p.get('output')
+                is_error = _codex_output_is_error(raw_output)
+                status = 'ERROR' if is_error else 'OK'
+                o_lines.append(
+                    f"[L{ln}]   ⮑ OUTPUT {status}: "
+                    f"{_result_index(_clean_output(raw_output), is_error)}"
+                )
+            elif pt == 'web_search_call':
+                q = ''
+                act = p.get('action') or {}
+                if isinstance(act, dict):
+                    q = act.get('query', '')
+                o_lines.append(f"[L{ln}]   🔧 web_search: {trunc(q,150)}")
+        elif t == 'event_msg':
+            et = p.get('type')
+            if et == 'thread_rolled_back':
+                o_lines.append(f"[L{ln}] ⏪⏪ USER ROLLED BACK THREAD (strong dissatisfaction signal) {ts}")
+            elif et == 'turn_aborted':
+                o_lines.append(f"[L{ln}] ⛔ TURN ABORTED by user (interruption signal) {ts}")
+            elif et == 'context_compacted':
+                o_lines.append(f"[L{ln}] [CONTEXT COMPACTED]")
+            # the remaining event_msg (token_count/agent_message/user_message/task_*) are redundant with response_item, skip
+        elif t == 'compacted':
+            o_lines.append(f"[L{ln}] [COMPACTED SUMMARY]")
     return "\n".join(o_lines)
 
 

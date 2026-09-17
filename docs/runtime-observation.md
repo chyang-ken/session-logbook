@@ -19,27 +19,43 @@ are not durable identities across storage replacement.
 ## Codex continuation cursors
 
 Codex Desktop can resume the same `session_meta.id` into another rollout. ID lookup
-selects the latest segment by its native metadata timestamp, including with a warm
-HTTP cache; file size and filesystem modification time do not establish recency.
-Explicit paths still read exactly that file. Context is the selected segment, not
-a reconstruction of inherited history from `history_base` or the Desktop database.
+selects the latest segment. The shared history reader then follows explicit
+`history_base` references, validating both `end_ordinal_exclusive` and
+`end_byte_offset`. It retains only the inherited prefix before each cutoff, followed
+by the selected continuation. Overlapping ordinals in replaced tails are not used
+as deduplication keys. No history is inferred from timestamps alone.
+
+`context`, the HTTP reader, and exports include verified inherited context. Each
+record retains its physical source path and line. Explicit paths identify that
+segment and its inherited context; `evidence` still reads only the exact raw file.
+A fork may inherit a parent prefix only when its fork metadata agrees with the
+history boundary. Parent activity after the cutoff and child-agent sessions are
+not part of the selected task. Native observation excludes inherited parent events.
 
 Save `transcript_path` alongside the numeric conversation `NEXT_CURSOR` and
-`native.next_line_cursor`. Pass it back as `--cursor-source-path` on `observe`
-and `follow`. Physical `[L#]` anchors remain local to that file.
+`native.next_line_cursor`, passing it back as `--cursor-source-path`. Observation
+drains the unread effective tail of the saved segment and every intermediate
+segment before reaching the latest. `native.has_more` includes remaining segments,
+so drain pages before interpreting the latest task state. Hook cursors are not reset.
+A page may name an earlier segment until its unread content has been delivered.
 
-For Codex, a verified same-thread source change resets both cursors and reports
-`cursor_reset_reason: transcript_changed`. Legacy nonzero cursors without a
-source path report `cursor_source_missing` and replay the selected segment once.
-Subsequent calls with the returned path are incremental, including native pages.
-Consumers must clear old turn state on a reset, and never compare line numbers
-across source files. An unrelated source or truncation is an explicit error.
+Switching a page's source reports `cursor_reset_reason: transcript_changed`.
+Consumers clear old line and turn state, while retaining previously collected
+conversation. Numeric cursor output types remain unchanged; `cx1:...` source tokens
+are also accepted. A bare nonzero cursor cannot identify a prior segment: its
+migration is explicitly marked `cursor_source_missing` and replays verified history.
+Persist the returned source identity so later polls remain incremental.
 
-The additive conversation `SOURCE_CURSOR` and native `source_cursor` fields
-provide opaque `cx1:...` tokens for callers that prefer one value. These may be
-passed unchanged as cursor arguments without `--cursor-source-path`. Existing
-numeric output fields retain their types. Native ordinals may overlap across
-segments and are not used to splice history. No cursor proves process liveness.
+Missing segments, conflicting boundaries, malformed records, and unfinished lines
+are reported with source locations. Context and HTTP responses expose
+`context_complete`/`history_issues` (text uses `CONTEXT_COMPLETE`/`CONTEXT_ISSUES`).
+The anchored export displays `CONTEXT_INCOMPLETE`; the web reader shows a warning.
+`observe` fails explicitly with `context_incomplete` rather than advancing cursors
+through missing evidence. A cursor inside a replaced tail also requires context
+reconciliation; it is not silently reset or treated as successfully read.
+
+No cursor proves process liveness or completion of the user's goal. Runtime facts
+remain evidence for a consuming Agent to interpret.
 
 ## Collection setup
 

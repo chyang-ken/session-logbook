@@ -484,27 +484,141 @@ def _observed_terminal(item: dict) -> str:
     return reason if reason in {"complete", "aborted", "error"} else "unknown"
 
 
+def _codex_context(path, after_line=0, cursor_source_path=None, historical_terminal=False,
+                   records=None, issues=None):
+    from sources import codex_history
+    history = codex_history.resolve(path) if records is None else None
+    rows = history['records'] if history is not None else records
+    issues = history['issues'] if history is not None else (issues or [])
+    changed = bool(cursor_source_path and Path(cursor_source_path).resolve() != Path(path).resolve())
+    if str(after_line).startswith('cx1:'):
+        import base64
+        _, encoded, number = str(after_line).split(':')
+        cursor_source_path = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
+        after_line = int(number)
+        changed = Path(cursor_source_path).resolve() != Path(path).resolve()
+    after_line = int(after_line)
+    if records is None and after_line:
+        source = cursor_source_path or path
+        if cursor_source_path:
+            index = codex_history.cursor_position(history, source, after_line)
+            rows = rows[index:]
+        else:
+            # A bare line number cannot identify a previous segment. Report replay.
+            _, migrated = codex_source.resume_cursor(path, after_line)
+            if not migrated:
+                rows = [row for row in rows if row['path'] == str(Path(path).resolve()) and row['line'] >= after_line]
+            changed = migrated
+    body = anchored_transcript.render_codex(path, records=rows)
+    cursor_rows = history['records'] if history is not None else records
+    last = max((r['line'] for r in cursor_rows if r['path'] == str(Path(path).resolve())), default=0)
+    meta = session_metadata(path)
+    header = [anchored_transcript.digest_header(Path(path).resolve(), 'codex'),
+              '# SESSION_ID: ' + str(meta.get('id')), '# PROJECT: ' + str(meta.get('project_path') or ''),
+              '# CONTEXT_COMPLETE: ' + str(not issues).lower(),
+              '# CONTEXT_ISSUES: ' + json.dumps(issues),
+              '# RETURNED_CONTENT: ' + ('yes' if body.strip() else 'no'),
+              '# INPUT_CURSOR: L' + str(after_line), '# SOURCE_CHANGED: ' + str(changed).lower(),
+              '# NEXT_CURSOR: L' + str(last), '# NEXT_LINE: L' + str(last),
+              '# CURSOR_SOURCE_PATH: ' + str(Path(path).resolve()),
+              '# SOURCE_CURSOR: ' + str(codex_source.next_cursor(path, last)),
+              '# REPEATED_CURSOR_LINE: ' + ('L' + str(after_line) if after_line else 'none'),
+              '# HISTORICAL_TERMINAL_NOT_CURRENT_STATE: ' + _observed_terminal(meta) if historical_terminal else '# EXPLICIT_TERMINAL: ' + _observed_terminal(meta),
+              '# Physical line anchors belong to the accompanying source file.',
+              '# A quiet file is not proof of liveness or task completion.']
+    return '\n'.join(header) + '\n\n' + (body or '[NO NEW RENDERED CONTENT]')
+
+
+def _observe_codex(path, args):
+    from sources import codex_history, runtime_events
+    history = codex_history.resolve(path)
+    codex_history.require_complete(history)
+    sid = session_metadata(path)['id']
+    segments = [s for s in history['segments'] if s['session_id'] == sid]
+    source = str(Path(args.cursor_source_path).resolve()) if args.cursor_source_path else None
+    def decode(value):
+        if not str(value).startswith('cx1:'):
+            return None, int(value)
+        import base64
+        _, encoded, line = str(value).split(':')
+        return str(Path(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()).resolve()), int(line)
+    ns, native = decode(args.native_line_cursor)
+    cs, conversation = decode(args.cursor_line)
+    identities = {value for value in (source, ns, cs) if value is not None}
+    if len(identities) > 1:
+        raise ValueError('native and conversation cursors name different sources')
+    source = next(iter(identities), None)
+    if min(native, conversation) < 0 or not 1 <= args.limit <= 200:
+        raise ValueError('invalid native cursor or limit')
+    unqualified = source is None and bool(native or conversation)
+    if source:
+        matches = [i for i, s in enumerate(segments) if s['path'] == source]
+        if not matches:
+            raise ValueError('cursor source is not in the effective same-thread history')
+        index = matches[0]
+        end = segments[index]['records'][-1]['line']
+        if native > end or conversation > end:
+            raise ValueError('cursor is in a replaced or truncated history tail; reconcile context before continuing')
+        if native == end and conversation == end and index + 1 < len(segments):
+            index += 1
+            native = conversation = 0
+    else:
+        index = 0
+        native = conversation = 0
+    segment = segments[index]
+    changed = source is not None and source != segment['path']
+    selected = [row for row in segment['records'] if row['line'] > native]
+    events, last, more = [], native, False
+    for row in selected:
+        record = row['record']
+        event = record.get('payload', {}) if record.get('type') == 'event_msg' else {}
+        if event.get('type') in {'task_started', 'task_complete', 'turn_aborted', 'error'}:
+            if len(events) >= args.limit:
+                more = True
+                break
+            events.append({'line': row['line'], 'source_path': row['path'],
+                'facts': {k: event[k] for k in ('type', 'turn_id', 'agentId', 'reason') if k in event},
+                'timestamp': record.get('timestamp')})
+        last = row['line']
+    body_rows = [row for row in segment['records'] if row['line'] >= max(1, conversation)]
+    # A page advances to this segment's end for conversation, independently of native paging.
+    context_rows = segment['records']
+    if source is None and index == 0:
+        first = history['records'].index(segment['records'][0])
+        context_rows = history['records'][:first] + context_rows
+    text = _codex_context(Path(segment['path']), records=context_rows, historical_terminal=True)
+    if conversation:
+        text = _codex_context(Path(segment['path']), records=body_rows, historical_terminal=True)
+    result = {'source': 'codex', 'session_id': sid, 'transcript_path': segment['path'],
+        'context_complete': True, 'history_issues': [],
+        'hooks': runtime_events.read('codex', sid, args.event_cursor, args.limit),
+        'native': {'events': events, 'next_line_cursor': last,
+            'source_cursor': codex_source.next_cursor(segment['path'], last),
+            'has_more': more or index + 1 < len(segments)}, 'conversation': text,
+        'interpretation': 'Only verified effective history is returned. Events do not prove task completion.'}
+    if changed:
+        result['cursor_reset_reason'] = 'transcript_changed'
+    elif unqualified:
+        result['cursor_reset_reason'] = 'cursor_source_missing'
+    return result
+
+
 def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False,
                    cursor_source_path=None) -> str:
     item = session_metadata(path)
+    if item["source"] == "codex":
+        return _codex_context(path, after_line, cursor_source_path, historical_terminal)
     if item["source"] == "devin":
         return devin_source.render_context(path, int(after_line))
     input_cursor = after_line
     changed = False
-    if item["source"] == "codex":
-        if cursor_source_path is not None:
-            after_line = codex_source.encode_cursor(cursor_source_path, int(after_line))
-        after_line, changed = codex_source.resume_cursor(path, after_line)
-    else:
-        after_line = int(after_line)
+    after_line = int(after_line)
     total_lines = _line_count(path)
     if after_line > total_lines:
         raise SessionLookupError(
             f"cursor L{after_line} is beyond current end L{total_lines}; restart from line 0"
         )
-    if item["source"] == "codex":
-        body = anchored_transcript.render_codex(path)
-    elif item["source"] == "kimi":
+    if item["source"] == "kimi":
         body = anchored_transcript.render_kimi(path)
     elif item["source"] == "pi":
         body = anchored_transcript.render_pi(path)
@@ -524,8 +638,6 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
         f"# CURSOR_SOURCE_PATH: {path.resolve()}",
-        *([f"# SOURCE_CURSOR: {codex_source.next_cursor(path, total_lines)}"]
-          if item["source"] == "codex" else []),
         f"# NEXT_LINE: L{total_lines}",
         f"# RETURNED_CONTENT: {'yes' if body.strip() else 'no'}",
         (f"# HISTORICAL_TERMINAL_NOT_CURRENT_STATE: {_observed_terminal(item)}"
@@ -692,26 +804,13 @@ def main(argv=None) -> int:
             item = session_metadata(path)
             if item["source"] not in runtime_events.SOURCES:
                 raise ValueError("runtime observation is not supported for this source")
-            native_cursor, conversation_cursor = args.native_line_cursor, args.cursor_line
-            reset = None
             if item["source"] == "codex":
-                if args.cursor_source_path:
-                    native_cursor = codex_source.encode_cursor(args.cursor_source_path, int(native_cursor))
-                    conversation_cursor = codex_source.encode_cursor(args.cursor_source_path, int(conversation_cursor))
-                native_line, native_changed = codex_source.resume_cursor(path, native_cursor)
-                conversation_line, conversation_changed = codex_source.resume_cursor(path, conversation_cursor)
-                if native_changed or conversation_changed:
-                    reset = "transcript_changed" if args.cursor_source_path else "cursor_source_missing"
-                    native_line = conversation_line = 0
-                native_cursor = codex_source.encode_cursor(path, native_line)
-                conversation_cursor = codex_source.encode_cursor(path, conversation_line)
-            elif args.cursor_source_path and Path(args.cursor_source_path).resolve() != path.resolve():
+                _print_json(_observe_codex(path, args))
+                return 0
+            native_cursor, conversation_cursor = int(args.native_line_cursor), int(args.cursor_line)
+            if args.cursor_source_path and Path(args.cursor_source_path).resolve() != path.resolve():
                 raise ValueError("cursor source changed without supported continuation evidence")
             native = runtime_events.native_events(path, item["source"], native_cursor, args.limit)
-            if item["source"] == "codex":
-                native["source_cursor"] = native["next_line_cursor"]
-                native["next_line_cursor"] = codex_source.resume_cursor(path, native["source_cursor"])[0]
-                native["source_changed"] = bool(reset)
             result = {
                 "source": item["source"], "session_id": item.get("id"),
                 "transcript_path": str(path.resolve()),
@@ -724,8 +823,6 @@ def main(argv=None) -> int:
                                   "Use turn identities and conversation evidence. Missing events "
                                   "do not establish liveness or completion.",
             }
-            if reset:
-                result["cursor_reset_reason"] = reset
             _print_json(result)
         elif args.command == "evidence":
             print(read_evidence(

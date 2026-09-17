@@ -425,22 +425,24 @@ def extract_conversation(jsonl_path: Path) -> Optional[dict]:
     if meta_raw is None:
         return None
 
+    from sources import codex_history
+    history = codex_history.resolve(jsonl_path)
+    records = history['records']
+
     # First pass: collect function_call_output / custom_tool_call_output for pairing
     fc_outputs = {}  # call_id -> output text
+    output_origins = {}
     try:
-        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    d = json.loads(line)
-                except Exception:
-                    continue
-                if d.get("type") != "response_item":
-                    continue
-                p = d.get("payload") or {}
-                if p.get("type") in ("function_call_output", "custom_tool_call_output"):
-                    cid = p.get("call_id")
-                    if cid:
-                        fc_outputs[cid] = _normalize_tool_output(p.get("output"))
+        for entry in records:
+            d = entry['record']
+            if d.get("type") != "response_item":
+                continue
+            p = d.get("payload") or {}
+            if p.get("type") in ("function_call_output", "custom_tool_call_output"):
+                cid = p.get("call_id")
+                if cid:
+                    fc_outputs[cid] = _normalize_tool_output(p.get("output"))
+                    output_origins[cid] = {'path': entry['path'], 'line': entry['line']}
     except Exception:
         pass
 
@@ -448,113 +450,116 @@ def extract_conversation(jsonl_path: Path) -> Optional[dict]:
     custom_title = None
     total_lines = 0
     try:
-        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                total_lines += 1
-                try:
-                    d = json.loads(line)
-                except Exception:
-                    continue
-                t = d.get("type")
-                p = d.get("payload") or {}
-                ts = d.get("timestamp")
+        for entry in records:
+            d = entry['record']
+            t = d.get("type")
+            p = d.get("payload") or {}
+            ts = d.get("timestamp")
 
-                if t == "event_msg":
-                    et = p.get("type")
-                    if et == "thread_name_updated":
-                        nm = p.get("thread_name")
-                        if nm:
-                            custom_title = nm
-                    elif et == "collab_agent_spawn_end":
-                        # Actual field names have the new_ prefix (new_agent_nickname/new_agent_role/new_thread_id)
-                        turns.append({
-                            "type": "subagent_spawn",
-                            "name": (
-                                p.get("new_agent_nickname")
-                                or p.get("new_agent_role")
-                                or p.get("agent_nickname")
-                                or p.get("agent_role")
-                                or "worker"
-                            ),
-                            "description": _truncate(p.get("prompt", "") or "", 500),
-                            "ts": ts,
-                        })
-                    # Other event_msg values (including user_message/agent_message duplicates, token_count,
-                    # exec_command_end, etc.) are skipped for now
-                    continue
-
-                if t != "response_item":
-                    # Skip session_meta / turn_context / compacted
-                    continue
-
-                rt = p.get("type")
-
-                if rt == "message":
-                    role = p.get("role")
-                    if role == "developer":
-                        continue  # system injection
-                    text = _extract_text_from_message_content(p.get("content"))
-                    if not text:
-                        continue
-                    if role == "user":
-                        turns.append({
-                            "type": "user",
-                            "text": _truncate(text, CONV_USER_MAX),
-                            "ts": ts,
-                        })
-                    elif role == "assistant":
-                        turns.append({
-                            "type": "assistant",
-                            "text": _truncate(text, CONV_ASSISTANT_MAX),
-                            "ts": ts,
-                        })
-                elif rt == "reasoning":
-                    continue  # filtered to match Claude thinking handling
-                elif rt == "function_call":
-                    name = p.get("name", "?")
-                    # spawn_agent is Codex's low-level hook for launching a subagent and is
-                    # paired with event_msg.collab_agent_spawn_end. The latter has friendlier
-                    # fields (for example new_agent_nickname like Averroes/Hypatia), so the UI
-                    # uses that representation and this low-level call is skipped.
-                    if name == "spawn_agent":
-                        continue
-                    args = p.get("arguments", "")
-                    cid = p.get("call_id")
-                    output = fc_outputs.get(cid, "") if cid else ""
-                    summary = f"{name}({_truncate(args, CONV_TOOL_INPUT_MAX)})"
+            if t == "event_msg":
+                et = p.get("type")
+                if et == "thread_name_updated":
+                    nm = p.get("thread_name")
+                    if nm:
+                        custom_title = nm
+                elif et == "collab_agent_spawn_end":
+                    # Actual field names have the new_ prefix (new_agent_nickname/new_agent_role/new_thread_id)
                     turns.append({
-                        "type": "tool",
-                        "name": name,
-                        "summary": summary,
-                        "result": _truncate(output, CONV_TOOL_RESULT_MAX),
+                        'source_path': entry['path'], 'source_line': entry['line'],
+                        "type": "subagent_spawn",
+                        "name": (
+                            p.get("new_agent_nickname")
+                            or p.get("new_agent_role")
+                            or p.get("agent_nickname")
+                            or p.get("agent_role")
+                            or "worker"
+                        ),
+                        "description": _truncate(p.get("prompt", "") or "", 500),
                         "ts": ts,
                     })
-                elif rt == "custom_tool_call":
-                    name = p.get("name", "?")
-                    inp = p.get("input", "")
-                    cid = p.get("call_id")
-                    output = fc_outputs.get(cid, "") if cid else ""
-                    summary = f"{name}({_truncate(inp, CONV_TOOL_INPUT_MAX)})"
+                # Other event_msg values (including user_message/agent_message duplicates, token_count,
+                # exec_command_end, etc.) are skipped for now
+                continue
+
+            if t != "response_item":
+                # Skip session_meta / turn_context / compacted
+                continue
+
+            rt = p.get("type")
+
+            if rt == "message":
+                role = p.get("role")
+                if role == "developer":
+                    continue  # system injection
+                text = _extract_text_from_message_content(p.get("content"))
+                if not text:
+                    continue
+                if role == "user":
                     turns.append({
-                        "type": "tool",
-                        "name": name,
-                        "summary": summary,
-                        "result": _truncate(output, CONV_TOOL_RESULT_MAX),
+                        'source_path': entry['path'], 'source_line': entry['line'],
+                        "type": "user",
+                        "text": _truncate(text, CONV_USER_MAX),
                         "ts": ts,
                     })
-                elif rt == "web_search_call":
-                    action = p.get("action", {}) or {}
-                    queries = action.get("queries") or [action.get("query", "")]
-                    queries = [q for q in queries if q]
-                    summary = "web_search(" + " | ".join(q[:80] for q in queries) + ")"
+                elif role == "assistant":
                     turns.append({
-                        "type": "tool",
-                        "name": "web_search",
-                        "summary": _truncate(summary, CONV_TOOL_INPUT_MAX + 100),
-                        "result": "",
+                        'source_path': entry['path'], 'source_line': entry['line'],
+                        "type": "assistant",
+                        "text": _truncate(text, CONV_ASSISTANT_MAX),
                         "ts": ts,
                     })
-                # Skip function_call_output / custom_tool_call_output / other types
+            elif rt == "reasoning":
+                continue  # filtered to match Claude thinking handling
+            elif rt == "function_call":
+                name = p.get("name", "?")
+                # spawn_agent is Codex's low-level hook for launching a subagent and is
+                # paired with event_msg.collab_agent_spawn_end. The latter has friendlier
+                # fields (for example new_agent_nickname like Averroes/Hypatia), so the UI
+                # uses that representation and this low-level call is skipped.
+                if name == "spawn_agent":
+                    continue
+                args = p.get("arguments", "")
+                cid = p.get("call_id")
+                output = fc_outputs.get(cid, "") if cid else ""
+                summary = f"{name}({_truncate(args, CONV_TOOL_INPUT_MAX)})"
+                turns.append({
+                    'source_path': entry['path'], 'source_line': entry['line'],
+                    "type": "tool",
+                    "name": name,
+                    "summary": summary,
+                    "result": _truncate(output, CONV_TOOL_RESULT_MAX),
+                    "result_source": output_origins.get(cid),
+                    "ts": ts,
+                })
+            elif rt == "custom_tool_call":
+                name = p.get("name", "?")
+                inp = p.get("input", "")
+                cid = p.get("call_id")
+                output = fc_outputs.get(cid, "") if cid else ""
+                summary = f"{name}({_truncate(inp, CONV_TOOL_INPUT_MAX)})"
+                turns.append({
+                    'source_path': entry['path'], 'source_line': entry['line'],
+                    "type": "tool",
+                    "name": name,
+                    "summary": summary,
+                    "result": _truncate(output, CONV_TOOL_RESULT_MAX),
+                    "result_source": output_origins.get(cid),
+                    "ts": ts,
+                })
+            elif rt == "web_search_call":
+                action = p.get("action", {}) or {}
+                queries = action.get("queries") or [action.get("query", "")]
+                queries = [q for q in queries if q]
+                summary = "web_search(" + " | ".join(q[:80] for q in queries) + ")"
+                turns.append({
+                    'source_path': entry['path'], 'source_line': entry['line'],
+                    "type": "tool",
+                    "name": "web_search",
+                    "summary": _truncate(summary, CONV_TOOL_INPUT_MAX + 100),
+                    "result": "",
+                    "ts": ts,
+                })
+            # Skip function_call_output / custom_tool_call_output / other types
     except Exception:
         pass
 
@@ -567,7 +572,9 @@ def extract_conversation(jsonl_path: Path) -> Optional[dict]:
         "id": meta_raw.get("id"),
         "project_path": _normalize_project_path(cwd),
         "custom_title": custom_title or "",
-        "total_lines": total_lines,
+        "total_lines": len(records),
+        "context_complete": history["complete"],
+        "history_issues": history["issues"],
         "source": "codex",
         "turns": turns,
     }
@@ -585,108 +592,107 @@ def extract_transcript(jsonl_path: Path) -> str:
     if meta_raw is None:
         return ""
 
+    from sources import codex_history
+    history = codex_history.resolve(jsonl_path)
+    records = history['records']
+
     # Pair function_call_output / custom_tool_call_output
     fc_outputs = {}
     try:
-        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    d = json.loads(line)
-                except Exception:
-                    continue
-                if d.get("type") != "response_item":
-                    continue
-                p = d.get("payload") or {}
-                if p.get("type") in ("function_call_output", "custom_tool_call_output"):
-                    cid = p.get("call_id")
-                    if cid:
-                        fc_outputs[cid] = _normalize_tool_output(p.get("output"))
+        for entry in records:
+            d = entry['record']
+            if d.get("type") != "response_item":
+                continue
+            p = d.get("payload") or {}
+            if p.get("type") in ("function_call_output", "custom_tool_call_output"):
+                cid = p.get("call_id")
+                if cid:
+                    fc_outputs[cid] = _normalize_tool_output(p.get("output"))
     except Exception:
         pass
 
     out_blocks = []
-    total_lines = 0
+    def append_block(block):
+        origin = f"<!-- SOURCE {entry['path']} L{entry['line']} -->\n"
+        out_blocks.append(origin + block)
+
+    total_lines = len(records)
     try:
-        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                total_lines += 1
-                try:
-                    d = json.loads(line)
-                except Exception:
-                    continue
-                t = d.get("type")
-                p = d.get("payload") or {}
+        for entry in records:
+            d = entry['record']
+            t = d.get("type")
+            p = d.get("payload") or {}
 
-                if t == "event_msg":
-                    et = p.get("type")
-                    if et == "collab_agent_spawn_end":
-                        name = (
-                            p.get("new_agent_nickname")
-                            or p.get("new_agent_role")
-                            or "worker"
-                        )
-                        prompt = p.get("prompt", "") or ""
-                        block = f"## SUBAGENT_SPAWN\nSpawned subagent: {name}"
-                        if prompt:
-                            block += f"\n{prompt}"
-                        out_blocks.append(block + "\n")
-                    continue
+            if t == "event_msg":
+                et = p.get("type")
+                if et == "collab_agent_spawn_end":
+                    name = (
+                        p.get("new_agent_nickname")
+                        or p.get("new_agent_role")
+                        or "worker"
+                    )
+                    prompt = p.get("prompt", "") or ""
+                    block = f"## SUBAGENT_SPAWN\nSpawned subagent: {name}"
+                    if prompt:
+                        block += f"\n{prompt}"
+                    append_block(block + "\n")
+                continue
 
-                if t != "response_item":
-                    continue
+            if t != "response_item":
+                continue
 
-                rt = p.get("type")
-                if rt == "message":
-                    role = p.get("role")
-                    if role == "developer":
-                        continue
-                    text = _extract_text_from_message_content(p.get("content"))
-                    if not text:
-                        continue
-                    if role == "user":
-                        out_blocks.append(f"## USER\n{text}\n")
-                    elif role == "assistant":
-                        out_blocks.append(f"## ASSISTANT\n{text}\n")
-                elif rt == "reasoning":
+            rt = p.get("type")
+            if rt == "message":
+                role = p.get("role")
+                if role == "developer":
                     continue
-                elif rt == "function_call":
-                    name = p.get("name", "?")
-                    if name == "spawn_agent":
-                        continue  # Paired with collab_agent_spawn_end; the UI only shows the latter
-                    args = p.get("arguments", "")
-                    cid = p.get("call_id")
-                    output = fc_outputs.get(cid, "") if cid else ""
-                    summary = (args or "").strip()
-                    if len(summary) > CONV_TOOL_INPUT_MAX:
-                        summary = summary[:CONV_TOOL_INPUT_MAX] + "…"
-                    result = (output or "").strip()
-                    if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
-                        n = TRANSCRIPT_TOOL_RESULT_MAX
-                        lines = result.count("\n") + 1
-                        result = result[:n].rstrip() + f" …[+{len(result)-n} chars, ~{lines} lines]"
-                    head = f"[tool: {name}({summary})]"
-                    out_blocks.append(head + ("\n" + result + "\n" if result else "\n"))
-                elif rt == "custom_tool_call":
-                    name = p.get("name", "?")
-                    inp = p.get("input", "")
-                    cid = p.get("call_id")
-                    output = fc_outputs.get(cid, "") if cid else ""
-                    summary = (inp or "").strip()
-                    if len(summary) > CONV_TOOL_INPUT_MAX:
-                        summary = summary[:CONV_TOOL_INPUT_MAX] + "…"
-                    result = (output or "").strip()
-                    if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
-                        n = TRANSCRIPT_TOOL_RESULT_MAX
-                        lines = result.count("\n") + 1
-                        result = result[:n].rstrip() + f" …[+{len(result)-n} chars, ~{lines} lines]"
-                    head = f"[tool: {name}({summary})]"
-                    out_blocks.append(head + ("\n" + result + "\n" if result else "\n"))
-                elif rt == "web_search_call":
-                    action = p.get("action", {}) or {}
-                    queries = action.get("queries") or [action.get("query", "")]
-                    queries = [q for q in queries if q]
-                    summary = " | ".join(q[:80] for q in queries)
-                    out_blocks.append(f"[tool: web_search({summary})]\n")
+                text = _extract_text_from_message_content(p.get("content"))
+                if not text:
+                    continue
+                if role == "user":
+                    append_block(f"## USER\n{text}\n")
+                elif role == "assistant":
+                    append_block(f"## ASSISTANT\n{text}\n")
+            elif rt == "reasoning":
+                continue
+            elif rt == "function_call":
+                name = p.get("name", "?")
+                if name == "spawn_agent":
+                    continue  # Paired with collab_agent_spawn_end; the UI only shows the latter
+                args = p.get("arguments", "")
+                cid = p.get("call_id")
+                output = fc_outputs.get(cid, "") if cid else ""
+                summary = (args or "").strip()
+                if len(summary) > CONV_TOOL_INPUT_MAX:
+                    summary = summary[:CONV_TOOL_INPUT_MAX] + "…"
+                result = (output or "").strip()
+                if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
+                    n = TRANSCRIPT_TOOL_RESULT_MAX
+                    lines = result.count("\n") + 1
+                    result = result[:n].rstrip() + f" …[+{len(result)-n} chars, ~{lines} lines]"
+                head = f"[tool: {name}({summary})]"
+                append_block(head + ("\n" + result + "\n" if result else "\n"))
+            elif rt == "custom_tool_call":
+                name = p.get("name", "?")
+                inp = p.get("input", "")
+                cid = p.get("call_id")
+                output = fc_outputs.get(cid, "") if cid else ""
+                summary = (inp or "").strip()
+                if len(summary) > CONV_TOOL_INPUT_MAX:
+                    summary = summary[:CONV_TOOL_INPUT_MAX] + "…"
+                result = (output or "").strip()
+                if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
+                    n = TRANSCRIPT_TOOL_RESULT_MAX
+                    lines = result.count("\n") + 1
+                    result = result[:n].rstrip() + f" …[+{len(result)-n} chars, ~{lines} lines]"
+                head = f"[tool: {name}({summary})]"
+                append_block(head + ("\n" + result + "\n" if result else "\n"))
+            elif rt == "web_search_call":
+                action = p.get("action", {}) or {}
+                queries = action.get("queries") or [action.get("query", "")]
+                queries = [q for q in queries if q]
+                summary = " | ".join(q[:80] for q in queries)
+                append_block(f"[tool: web_search({summary})]\n")
     except Exception:
         pass
 
@@ -698,7 +704,8 @@ def extract_transcript(jsonl_path: Path) -> str:
     header = (f"# Session {sid}\n"
               f"Project: {project_path}\n"
               f"Raw lines: {total_lines}\n\n")
-    return header + "\n".join(out_blocks)
+    warning = "# CONTEXT_INCOMPLETE: " + json.dumps(history["issues"]) + "\n" if not history["complete"] else ""
+    return warning + header + "\n".join(out_blocks)
 
 
 def rollout_rank(path, meta=None):

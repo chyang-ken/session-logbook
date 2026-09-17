@@ -1162,14 +1162,17 @@ def _format_qa_preview(qa_unit, max_chars):
 
 
 def file_fingerprint(path) -> str:
-    """Cheap change signal for a session file: mtime (ns) + size.
+    """Change signal for a session file or its verified Codex history.
 
     Taken *before* the file is parsed, so a write that lands mid-parse is still reported as a
     change on the next poll — the fingerprint can lag behind the content, never run ahead of it.
     """
+    if codex_source.is_codex_path(path):
+        from sources import codex_history
+        return codex_history.fingerprint(path)
     st = os.stat(path)
     version = f"{st.st_mtime_ns}:{st.st_size}"
-    return f"{path}:{version}" if codex_source.is_codex_path(path) else version
+    return version
 
 
 def extract_conversation(jsonl_path):

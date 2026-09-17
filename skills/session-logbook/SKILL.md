@@ -29,8 +29,11 @@ python3 scripts/session_logbook.py <command> ...
   the cursor line again in case it was previously half-written. Ignore the repeated `[L<N>]` when it
   was already seen, save the new `NEXT_CURSOR`, and report only unseen additions.
   Save `CURSOR_SOURCE_PATH` alongside the numeric cursor and pass it back with
-  `--cursor-source-path`. On a source change, compare the new segment from its
-  beginning; `[L#]` evidence is local to its reported file. A quiet log
+  `--cursor-source-path`. Drain all observation pages on a source change: Logbook returns the unread
+  effective tail and intermediate segments before the latest segment. `[L#]` evidence
+  is local to its reported file. Full context includes verified inherited history.
+  A reported incomplete history is a gap to resolve, not permission to infer missing
+  goals or authorization. A quiet log
   is not proof that the source Agent is alive or finished.
 - **Runtime observation (Codex, Claude, Kimi, Pi):** run `observe <ID-or-path>`.
   It returns Hook facts, native Codex/Kimi lifecycle facts, and anchored conversation.
