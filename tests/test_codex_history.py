@@ -111,6 +111,25 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(code,0,err)
         self.assertEqual(json.loads(text)['native']['events'],[])
 
+    def test_observation_manifest_uses_effective_cutoff_without_resolving_again(self):
+        old, middle, latest = self.chain()
+        rows = codex_history.resolve(latest)['segments'][0]['records']
+        with patch.object(codex_history, 'resolve', side_effect=AssertionError('duplicate history read')):
+            text = cli._codex_context(old, records=rows)
+        self.assertIn(str(old) + ' L1-L4', text)
+        self.assertNotIn(str(old) + ' L1-L5', text)
+        self.assertNotIn('Discarded old branch', text)
+
+    def test_deep_history_does_not_depend_on_python_recursion_limit(self):
+        previous = None
+        for n in range(1100):
+            previous = self.segment(str(n), [msg('Segment ' + str(n))],
+                                    base=(previous, 2) if previous else None)
+        history = codex_history.resolve(previous)
+        self.assertTrue(history['complete'], history['issues'])
+        self.assertEqual(len(history['segments']), 1100)
+        self.assertEqual(len(history['records']), 2200)
+
     def test_missing_or_conflicting_boundary_is_explicit(self):
         old,middle,latest=self.chain()
         middle.unlink()
@@ -196,3 +215,64 @@ class HistoryTests(unittest.TestCase):
         middle.write_bytes(contents)
         self.assertNotEqual(server.file_fingerprint(latest),missing)
         self.assertTrue(codex.extract_conversation(latest)['context_complete'])
+
+    def test_stable_id_and_source_manifest_survive_multiple_segments(self):
+        old,middle,latest=self.chain()
+        renamed=latest.with_name('rollout-latest-'+SID+'_dddddddd-dddd-dddd-dddd-dddddddddddd.jsonl')
+        latest.rename(renamed)
+        conv=codex.extract_conversation(renamed)
+        self.assertEqual(conv['id'],SID)
+        self.assertEqual(conv['jsonl_path'],str(renamed))
+        self.assertEqual([f['relation'] for f in conv['source_files']],['continuation','continuation','current'])
+        self.assertEqual([f['last_line'] for f in conv['source_files']],[4,3,3])
+        for command in ('locate','status'):
+            code,text,err=self.cli(command,SID)
+            self.assertEqual(code,0,err)
+            metadata=json.loads(text)
+            self.assertEqual(metadata['id'],SID)
+            self.assertEqual(metadata['jsonl_path'],str(renamed))
+            self.assertEqual(len(metadata['source_files']),3)
+        header=anchored_transcript.digest_header(renamed,'codex')
+        self.assertNotIn('SOURCE (full, authoritative)',header)
+        self.assertIn(str(old),header)
+        self.assertIn(str(renamed),header)
+
+    def test_inherited_source_id_does_not_replace_selected_session_id(self):
+        parent=self.segment('parent',[msg('Inherited restriction')],sid=PARENT)
+        child=self.segment('child',[msg('Own task')],base=(parent,2),fork=True)
+        conv=codex.extract_conversation(child)
+        self.assertEqual(conv['id'],SID)
+        self.assertEqual(conv['source_files'][0]['session_id'],PARENT)
+        self.assertEqual(conv['source_files'][0]['relation'],'inherited')
+        self.assertEqual(conv['source_files'][1]['session_id'],SID)
+        self.assertEqual(conv['source_files'][1]['relation'],'current')
+
+    def test_cli_and_web_search_effective_history_and_keep_snippet_origins(self):
+        old,middle,latest=self.chain()
+        self.stack.enter_context(patch.object(server,'load_state'))
+        self.stack.enter_context(patch.object(server,'_state',{}))
+        server._cache={str(p):codex.extract_metadata(p) for p in (old,middle,latest)}
+        with patch.object(cli,'iter_session_paths',return_value=iter([old,middle,latest])):
+            hits=cli.search_sessions('Goal Latest',source='codex',role='user')
+        self.assertEqual(len(hits),1)
+        self.assertEqual(hits[0]['id'],SID)
+        self.assertEqual(hits[0]['jsonl_path'],str(latest))
+        self.assertEqual({s['source_path'] for s in hits[0]['snippets']},{str(old),str(latest)})
+        self.assertEqual(len(server.search_sessions('Goal Latest')),1)
+        self.assertEqual(server.search_sessions('Discarded old branch'),[])
+        with patch.object(cli,'iter_session_paths',return_value=iter([old,middle,latest])):
+            self.assertEqual(cli.search_sessions('Discarded old branch',source='codex'),[])
+        snippets=server.search_sessions('Old unread')[0]['snippets']
+        self.assertEqual(snippets[0]['source_path'],str(old))
+        self.assertEqual(snippets[0]['line'],4)
+
+    def test_brief_cache_invalidates_when_only_inherited_context_changes(self):
+        old,middle,latest=self.chain()
+        self.stack.enter_context(patch.object(server,'_state',{}))
+        with patch.object(server,'save_state'), patch.object(server,'generate_briefing',return_value='summary') as generate:
+            text=codex.extract_transcript(latest)
+            self.assertEqual(server.get_or_generate_brief(SID,latest,text)[1],'generated')
+            self.assertEqual(server.get_or_generate_brief(SID,latest,text)[1],'cached')
+            old.write_bytes(old.read_bytes().replace(b'Goal: build.',b'Goal: audit.'))
+            self.assertEqual(server.get_or_generate_brief(SID,latest,codex.extract_transcript(latest))[1],'regenerated')
+            self.assertEqual(generate.call_count,2)

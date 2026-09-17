@@ -1539,10 +1539,11 @@ def get_or_generate_brief(sid: str, jsonl_path: Path, transcript_text: str):
     {'cached', 'generated', 'regenerated', 'failed'}. Failures are not cached.
     """
     source_digest = None
-    if devin_source.is_devin_path(jsonl_path):
+    if devin_source.is_devin_path(jsonl_path) or codex_source.is_codex_path(jsonl_path):
         # The selected chain may change without a timestamp/size change.
         size = len(transcript_text.encode())
-        mtime = devin_source.extract_metadata(jsonl_path)["mtime"]
+        mtime = (devin_source.extract_metadata(jsonl_path)["mtime"] if devin_source.is_devin_path(jsonl_path)
+                 else jsonl_path.stat().st_mtime)
         source_digest = hashlib.sha256(transcript_text.encode()).hexdigest()
     else:
         st = jsonl_path.stat()
@@ -1982,12 +1983,36 @@ def _find_ripgrep():
     return None
 
 
+def _search_codex_history(path, terms, metadata=None):
+    from sources import codex_history
+    meta = metadata or codex_source.extract_metadata(path) or {}
+    sid = meta.get('id') or ''
+    title = str(_state.get(sid, {}).get('title_override') or meta.get('custom_title') or '')
+    found = {term for term in terms if term in title.lower()}
+    snippets = [{'text': 'Session title: ' + title, 'role': '', 'term': ''}] if found else []
+    for source_path, line, role, text in codex_history.iter_messages(path):
+        hits = [term for term in terms if term in text.lower()]
+        found.update(hits)
+        if hits and len(snippets) < SEARCH_MAX_SNIPPETS:
+            term = hits[0]
+            at = text.lower().find(term)
+            start, end = max(0, at - SEARCH_SNIPPET_CONTEXT), min(len(text), at + len(term) + SEARCH_SNIPPET_CONTEXT)
+            snippets.append({'text': ('…' if start else '') + re.sub(r'\s+', ' ', text[start:end]).strip() + ('…' if end < len(text) else ''),
+                'role': 'you' if role == 'user' else '', 'term': term,
+                'source_path': source_path, 'line': line})
+    if any(term in sid.lower() for term in terms):
+        return snippets or [{'text': 'Session ID: ' + sid, 'role': '', 'term': ''}]
+    return snippets if len(found) == len(terms) else []
+
+
 def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = None):
     """Full-text search one session by scanning user/assistant messages and returning snippets.
 
     terms is a lowercase search-term list with AND semantics: every term must appear in the
     same session to count as a hit. Return [] for no match.
     """
+    if codex_source.is_codex_path(jsonl_path):
+        return _search_codex_history(jsonl_path, terms, session_meta)
     if pi_source.is_pi_path(jsonl_path):
         meta = session_meta or pi_source.extract_metadata(jsonl_path) or {}
         return pi_source.search(jsonl_path, terms, meta,
@@ -2206,6 +2231,10 @@ def search_sessions(query: str):
 
     # (key, meta) list matching the original traversal order
     ordered = sorted(_cache.items(), key=lambda kv: activity_time(kv[1]), reverse=True)
+    from sources import codex_history
+    selected = {str(path) for path in codex_history.canonical_paths([Path(m['jsonl_path']) for _, m in ordered])}
+    ordered = [(key, meta) for key, meta in ordered if str(meta['jsonl_path']) in selected]
+
 
     # ripgrep prefilter: select files whose content contains every term and skip expensive
     # per-line JSON parsing for the rest. prefiltered=None means rg is unavailable, so scan
@@ -2218,7 +2247,8 @@ def search_sessions(query: str):
         is_devin = devin_source.is_devin_path(jsonl_path)
         if not is_devin and not jsonl_path.exists():
             continue
-        if not is_devin and prefiltered is not None and str(jsonl_path) not in prefiltered:
+        inherited = codex_source.is_codex_path(jsonl_path) and bool((codex_source._read_session_meta(jsonl_path) or {}).get('history_base'))
+        if not inherited and not is_devin and prefiltered is not None and str(jsonl_path) not in prefiltered:
             # Content does not contain all terms. The only exception is a term matching the
             # session id itself, because rg searches content and does not cover pure id-substring
             # search. Use meta.id plus filename stem as an id fallback, covering Claude

@@ -60,6 +60,23 @@ python3 scripts/session_logbook.py <command> ...
 - **Mine historical user facts:** use `search --role user`, plus project, date, source, or
   subagent filters when relevant. Synthesize only after retrieving a bounded result set.
 
+## Read only what the task needs
+
+- Use the stable Session ID for discovery and later checks. A continuation can change
+  the latest file path without changing that ID. Do not derive IDs from filenames.
+- Keep a raw evidence reference as **source path + physical line**, never a line number
+  alone. Expand it with `evidence '<exact-source-path>' --line N --context 1`;
+  resolving the Session ID again may select a newer file with different line numbers.
+- Use `locate` or `status` for identity and observed metadata; do not request a full
+  transcript merely to obtain a path. For new context use `context` once; while following
+  known context, reuse the saved source and independent cursors instead of starting over.
+- Search for a bounded question and expand the returned source anchors when necessary.
+  Missing or contradictory goals require more context; small output alone is not a
+  reason to infer authorization or completion.
+- Incremental output reduces model input. It does not promise incremental disk reads:
+  the current Codex resolver still verifies history on each invocation. Source manifests
+  preserve access to evidence; they are not a substitute for reading needed evidence.
+
 ## Commands
 
 ```bash

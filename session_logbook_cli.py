@@ -19,7 +19,7 @@ from typing import Iterable, Optional
 
 import server
 from sources.activity import activity_time
-from sources import anchored_transcript, session_identity
+from sources import anchored_transcript, session_identity, codex_history
 from sources import codex as codex_source
 from sources import devin as devin_source
 from sources import kimi as kimi_source
@@ -250,7 +250,7 @@ def _parse_since(value: Optional[str]) -> Optional[float]:
 
 def _candidate_paths(source: Optional[str], include_subagents: bool) -> list[Path]:
     """Collect paths cheaply; parse and deduplicate only files that survive prefiltering."""
-    return list(iter_session_paths(source=source, include_subagents=include_subagents))
+    return codex_history.canonical_paths(list(iter_session_paths(source=source, include_subagents=include_subagents)))
 
 
 def search_sessions(
@@ -306,7 +306,8 @@ def search_sessions(
 
     results = []
     for path in paths:
-        if (not devin_source.is_devin_path(path)
+        inherited = codex_source.is_codex_path(path) and bool((codex_source._read_session_meta(path) or {}).get('history_base'))
+        if (not inherited and not devin_source.is_devin_path(path)
                 and prefiltered is not None
                 and str(path) not in prefiltered
                 and str(path) not in title_prefiltered
@@ -340,7 +341,9 @@ def search_sessions(
         if role == "any" and any(term in f"{custom_title} {title_override}".lower() for term in terms):
             snippets.append({"role": "title", "line": None, "text": display_title})
         try:
-            for line_number, message_role, text in iter_messages(path, item["source"]):
+            messages = (codex_history.iter_messages(path) if item['source'] == 'codex' else
+                        ((str(path.resolve()), line, role, text) for line, role, text in iter_messages(path, item['source'])))
+            for evidence_path, line_number, message_role, text in messages:
                 if not text or message_role is None:
                     continue
                 if role != "any" and role != message_role:
@@ -354,7 +357,7 @@ def search_sessions(
                     end = min(len(text), first + 260)
                     excerpt = re.sub(r"\s+", " ", text[start:end]).strip()
                     snippets.append({
-                        "role": message_role, "line": line_number,
+                        "role": message_role, "line": line_number, "source_path": evidence_path,
                         "anchor_kind": "N" if item["source"] == "devin" else "L",
                         "text": ("…" if start else "") + excerpt + ("…" if end < len(text) else ""),
                     })
@@ -513,7 +516,14 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
     cursor_rows = history['records'] if history is not None else records
     last = max((r['line'] for r in cursor_rows if r['path'] == str(Path(path).resolve())), default=0)
     meta = session_metadata(path)
-    header = [anchored_transcript.digest_header(Path(path).resolve(), 'codex'),
+    source_segments = {}
+    for row in cursor_rows:
+        source_segments.setdefault(row['path'], []).append(row)
+    manifest = {'segments': [
+        {'path': source, 'session_id': (codex_source._read_session_meta(Path(source)) or {}).get('id'),
+         'records': entries} for source, entries in source_segments.items()]}
+    header = [anchored_transcript.digest_header(Path(path).resolve(), 'codex',
+              source_files=codex_history.references(path, manifest)),
               '# SESSION_ID: ' + str(meta.get('id')), '# PROJECT: ' + str(meta.get('project_path') or ''),
               '# CONTEXT_COMPLETE: ' + str(not issues).lower(),
               '# CONTEXT_ISSUES: ' + json.dumps(issues),
@@ -692,6 +702,7 @@ def status_for(path: Path) -> dict:
         "source": item["source"],
         "project_path": item.get("project_path"),
         "jsonl_path": item["jsonl_path"],
+        **({'source_files': codex_history.references(path)} if item['source'] == 'codex' else {}),
         "mtime_iso": item.get("mtime_iso"),
         "size": item.get("size"),
         "total_lines": total_lines,
@@ -793,7 +804,12 @@ def main(argv=None) -> int:
 
         path = _resolve_from_args(args)
         if args.command == "locate":
-            _print_json(session_metadata(path))
+            metadata = session_metadata(path)
+            if metadata['source'] == 'codex':
+                history = codex_history.resolve(path)
+                metadata.update(source_files=codex_history.references(path, history),
+                                context_complete=history['complete'], history_issues=history['issues'])
+            _print_json(metadata)
         elif args.command in {"context", "follow"}:
             print(render_context(path, after_line=args.after_line,
                                  cursor_source_path=args.cursor_source_path))

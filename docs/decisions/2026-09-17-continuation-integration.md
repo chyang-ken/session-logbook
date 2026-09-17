@@ -58,3 +58,37 @@ Local real-history readback and browser evidence remain private, outside Git.
 
 Delivery is paused at the maintainer's explicit request: local implementation and
 validation only; no merge or deployment of this follow-up.
+
+## Identity, evidence pointers, and retrieval cost
+
+The maintainer requested checking displayed IDs and file paths across related
+features, and using pointers and demand-driven retrieval to reduce overhead.
+The selected Session ID remains stable. The latest segment path is a separate
+field; historical evidence includes its physical source and line range. Browser
+copy/share/export and CLI/web search now use that distinction. Effective-history
+search excludes replaced tails and supports terms spanning segments.
+
+The packaged Skill instructs callers to retain source-qualified cursors, retrieve
+bounded evidence by exact source path, and avoid repeating full context requests.
+It does not promise that incremental output means incremental disk reads. The
+resolver still verifies history on each invocation; fully demand-driven storage
+reads remain unfinished. Installed Skills and resident services are unchanged.
+
+The resolver now builds boundary indexes once per invocation and traverses ancestry
+iteratively. Synthetic fresh-process measurements on the development machine:
+
+| Input | Before | After | Peak memory after |
+|---|---|---|---|
+| 100 segments, 64.76 MB, 16,100 records | 1.313 s | 0.499 s | 116.8 MB |
+| 1,100 segments, 0.52 MB, 2,200 records | timed out at 55 s | 0.252 s | 20.2 MB |
+
+These measure resolution, not an entire monitoring cycle or arbitrary future
+workloads. The deep-chain case is a regression test. A supplied effective page
+manifest also prevents redundant history resolution and incorrect cutoff labels.
+The installed monitor consumer passes isolated catch-up and quiet-poll checks;
+each observation runs in a fresh process with retained numeric cursors and paths.
+Actual browser checks covered copying IDs, current and historical paths, sharing,
+export, and a fourth continuation with an unchanged ID and refreshed source list.
+
+Validation: 353 tests on Python 3.9 and 3.14, one existing skip on each. Delivery
+remains paused; neither these local changes nor the packaged Skill are deployed.
