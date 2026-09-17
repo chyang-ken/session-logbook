@@ -189,3 +189,33 @@ class ContinuationTests(unittest.TestCase):
             stream.write(json.dumps(event('task_complete', 'new-turn')) + '\n')
             stream.write(json.dumps(event('task_started', 'next-turn')) + '\n')
         self.assertIsNone(codex.extract_metadata(self.new)['last_stop_reason'])
+
+    def test_observe_numeric_contract_switch_paging_and_quiet_poll(self):
+        for n in range(3):
+            with self.new.open('a') as stream:
+                stream.write(json.dumps(event('task_complete', f'turn-{n}')) + '\n')
+        first = json.loads(self.run_cli('observe', SID, '--native-line-cursor', '18',
+            '--cursor-line', '18', '--cursor-source-path', str(self.old), '--limit', '1'))
+        self.assertEqual(first['cursor_reset_reason'], 'transcript_changed')
+        self.assertEqual(first['transcript_path'], str(self.new.resolve()))
+        self.assertIsInstance(first['native']['next_line_cursor'], int)
+        self.assertIn('# NEXT_CURSOR: L6', first['conversation'])
+        second = json.loads(self.run_cli('observe', SID, '--native-line-cursor',
+            str(first['native']['next_line_cursor']), '--cursor-line', '6',
+            '--cursor-source-path', first['transcript_path']))
+        self.assertNotIn('cursor_reset_reason', second)
+        self.assertEqual(len(second['native']['events']), 3)
+        third = json.loads(self.run_cli('observe', SID, '--native-line-cursor',
+            str(second['native']['next_line_cursor']), '--cursor-line', '6',
+            '--cursor-source-path', second['transcript_path']))
+        self.assertEqual(third['native']['events'], [])
+        self.assertNotIn('new request', third['conversation'])
+        followed = self.run_cli('follow', SID, '--cursor-line', '6',
+                               '--cursor-source-path', str(self.new))
+        self.assertNotIn('new request', followed)
+
+    def test_observe_unqualified_cursor_migration_is_explicit(self):
+        page = json.loads(self.run_cli('observe', SID, '--native-line-cursor', '18',
+                                     '--cursor-line', '18'))
+        self.assertEqual(page['cursor_reset_reason'], 'cursor_source_missing')
+        self.assertEqual(page['native']['events'][0]['facts']['turn_id'], 'new-turn')

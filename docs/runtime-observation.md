@@ -24,20 +24,22 @@ HTTP cache; file size and filesystem modification time do not establish recency.
 Explicit paths still read exactly that file. Context is the selected segment, not
 a reconstruction of inherited history from `history_base` or the Desktop database.
 
-For Codex, save and pass the complete `cx1:...` value from conversation `NEXT_CURSOR`
-and `native.next_line_cursor` unchanged to their respective flags. These are opaque
-source-qualified strings, not integers. Physical `[L#]` anchors and native event
-`line` still refer to the reported source file. Use that exact path for evidence.
-A same-thread continuation resets reading to the new segment and reports
-`SOURCE_CHANGED: true` / `native.source_changed: true`; subsequent polls use the new
-source cursor and do not replay its history. Native ordinals can overlap across
-segments, so they are not used to merge or deduplicate unrelated records.
+Save `transcript_path` alongside the numeric conversation `NEXT_CURSOR` and
+`native.next_line_cursor`. Pass it back as `--cursor-source-path` on `observe`
+and `follow`. Physical `[L#]` anchors remain local to that file.
 
-Legacy bare nonzero Codex cursors on a same-thread continuation are migrated by
-reading the selected segment once. Callers must then preserve the returned token;
-continuing to send a bare number cannot distinguish old-file and new-file lines.
-Truncation beyond the saved cursor or an unrelated cursor source is an explicit
-error, not an empty successful poll. None of these signals proves process liveness.
+For Codex, a verified same-thread source change resets both cursors and reports
+`cursor_reset_reason: transcript_changed`. Legacy nonzero cursors without a
+source path report `cursor_source_missing` and replay the selected segment once.
+Subsequent calls with the returned path are incremental, including native pages.
+Consumers must clear old turn state on a reset, and never compare line numbers
+across source files. An unrelated source or truncation is an explicit error.
+
+The additive conversation `SOURCE_CURSOR` and native `source_cursor` fields
+provide opaque `cx1:...` tokens for callers that prefer one value. These may be
+passed unchanged as cursor arguments without `--cursor-source-path`. Existing
+numeric output fields retain their types. Native ordinals may overlap across
+segments and are not used to splice history. No cursor proves process liveness.
 
 ## Collection setup
 

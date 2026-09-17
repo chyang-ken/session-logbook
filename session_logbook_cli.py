@@ -484,13 +484,16 @@ def _observed_terminal(item: dict) -> str:
     return reason if reason in {"complete", "aborted", "error"} else "unknown"
 
 
-def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False) -> str:
+def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False,
+                   cursor_source_path=None) -> str:
     item = session_metadata(path)
     if item["source"] == "devin":
         return devin_source.render_context(path, int(after_line))
     input_cursor = after_line
     changed = False
     if item["source"] == "codex":
+        if cursor_source_path is not None:
+            after_line = codex_source.encode_cursor(cursor_source_path, int(after_line))
         after_line, changed = codex_source.resume_cursor(path, after_line)
     else:
         after_line = int(after_line)
@@ -519,8 +522,10 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         f"# SOURCE_CHANGED: {str(changed).lower()}",
         *(['# FOLLOW_MODE: full selected branch (Pi can change branches)'] if item["source"] == "pi" else []),
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
-        (f"# NEXT_CURSOR: {codex_source.next_cursor(path, total_lines)}"
-         if item["source"] == "codex" else f"# NEXT_CURSOR: L{total_lines}"),
+        f"# NEXT_CURSOR: L{total_lines}",
+        f"# CURSOR_SOURCE_PATH: {path.resolve()}",
+        *([f"# SOURCE_CURSOR: {codex_source.next_cursor(path, total_lines)}"]
+          if item["source"] == "codex" else []),
         f"# NEXT_LINE: L{total_lines}",
         f"# RETURNED_CONTENT: {'yes' if body.strip() else 'no'}",
         (f"# HISTORICAL_TERMINAL_NOT_CURRENT_STATE: {_observed_terminal(item)}"
@@ -578,7 +583,7 @@ def status_for(path: Path) -> dict:
         "mtime_iso": item.get("mtime_iso"),
         "size": item.get("size"),
         "total_lines": total_lines,
-        "next_cursor": codex_source.next_cursor(path, total_lines) if item["source"] == "codex" else f"L{total_lines}",
+        "next_cursor": f"L{total_lines}",
         "last_recorded_stop_reason": item.get("last_stop_reason"),
         "explicit_terminal": _observed_terminal(item),
         "is_subagent": item["is_subagent"],
@@ -607,13 +612,16 @@ def parse_args(argv=None):
     context = sub.add_parser("context", help="render an anchored context snapshot")
     _add_target_filters(context)
     context.add_argument("--after-line", default=0)
+    context.add_argument("--cursor-source-path")
 
     follow = sub.add_parser("follow", help="render from a previous cursor, repeating its line once")
     _add_target_filters(follow)
     follow.add_argument(
         "--cursor-line", "--after-line", dest="after_line", required=True,
-        help="NEXT_CURSOR (Codex cx1 token, otherwise numeric line); Devin returns a full snapshot",
+        help="numeric NEXT_CURSOR line or Codex SOURCE_CURSOR token; Devin returns a full snapshot",
     )
+
+    follow.add_argument("--cursor-source-path")
 
     status = sub.add_parser("status", help="report observed transcript state")
     _add_target_filters(status)
@@ -624,6 +632,7 @@ def parse_args(argv=None):
     observe.add_argument("--native-line-cursor", default=0)
     observe.add_argument("--cursor-line", default=0)
     observe.add_argument("--limit", type=int, default=50)
+    observe.add_argument("--cursor-source-path")
 
     evidence = sub.add_parser("evidence", help="read source lines or Devin database nodes around an anchor")
     _add_target_filters(evidence)
@@ -674,7 +683,8 @@ def main(argv=None) -> int:
         if args.command == "locate":
             _print_json(session_metadata(path))
         elif args.command in {"context", "follow"}:
-            print(render_context(path, after_line=args.after_line))
+            print(render_context(path, after_line=args.after_line,
+                                 cursor_source_path=args.cursor_source_path))
         elif args.command == "status":
             _print_json(status_for(path))
         elif args.command == "observe":
@@ -682,18 +692,41 @@ def main(argv=None) -> int:
             item = session_metadata(path)
             if item["source"] not in runtime_events.SOURCES:
                 raise ValueError("runtime observation is not supported for this source")
-            _print_json({
+            native_cursor, conversation_cursor = args.native_line_cursor, args.cursor_line
+            reset = None
+            if item["source"] == "codex":
+                if args.cursor_source_path:
+                    native_cursor = codex_source.encode_cursor(args.cursor_source_path, int(native_cursor))
+                    conversation_cursor = codex_source.encode_cursor(args.cursor_source_path, int(conversation_cursor))
+                native_line, native_changed = codex_source.resume_cursor(path, native_cursor)
+                conversation_line, conversation_changed = codex_source.resume_cursor(path, conversation_cursor)
+                if native_changed or conversation_changed:
+                    reset = "transcript_changed" if args.cursor_source_path else "cursor_source_missing"
+                    native_line = conversation_line = 0
+                native_cursor = codex_source.encode_cursor(path, native_line)
+                conversation_cursor = codex_source.encode_cursor(path, conversation_line)
+            elif args.cursor_source_path and Path(args.cursor_source_path).resolve() != path.resolve():
+                raise ValueError("cursor source changed without supported continuation evidence")
+            native = runtime_events.native_events(path, item["source"], native_cursor, args.limit)
+            if item["source"] == "codex":
+                native["source_cursor"] = native["next_line_cursor"]
+                native["next_line_cursor"] = codex_source.resume_cursor(path, native["source_cursor"])[0]
+                native["source_changed"] = bool(reset)
+            result = {
                 "source": item["source"], "session_id": item.get("id"),
+                "transcript_path": str(path.resolve()),
                 "hooks": runtime_events.read(item["source"], item.get("id"),
                                              args.event_cursor, args.limit),
-                "native": runtime_events.native_events(path, item["source"],
-                                                       args.native_line_cursor, args.limit),
-                "conversation": render_context(path, after_line=args.cursor_line,
+                "native": native,
+                "conversation": render_context(path, after_line=conversation_cursor,
                                                historical_terminal=True),
                 "interpretation": "Events are observations, not proof of task success. "
                                   "Use turn identities and conversation evidence. Missing events "
                                   "do not establish liveness or completion.",
-            })
+            }
+            if reset:
+                result["cursor_reset_reason"] = reset
+            _print_json(result)
         elif args.command == "evidence":
             print(read_evidence(
                 path,
