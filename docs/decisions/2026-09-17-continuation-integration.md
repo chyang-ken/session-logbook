@@ -192,3 +192,20 @@ remaining user decision is approval to activate that additional local derived st
 as part of a future release. Release is still paused; no production index, installed
 Skill update, push, merge or deployment has occurred. The isolated experiment itself
 is complete and does not require an additional approval to investigate.
+
+## Staging integration authorized
+
+The maintainer subsequently requested completing integration and deploying to local
+Staging for use, lifting the earlier release pause for this work. The production
+implementation in `sources/history_index.py` connects the index to observation,
+source-qualified follow and reader fingerprints. Full context and raw evidence stay
+available. The packaged Skill is updated with the actual cursor/cache contract.
+
+The index is optional for correctness: SQLite contention, corruption or permission
+failure uses the uncached verified snapshot. Independent review reproduced a mixed
+snapshot in the initial fallback; retaining resolver records in memory for that
+fallback fixes it without persisting message bodies. Tests cover both disabled and
+unavailable paths. Other acceptance covers inherited histories, exact origins,
+appends, retry after undelivered output, missing/replaced/conflicting records, and
+fresh/concurrent processes. Delivery evidence is recorded by the existing PR/CI and
+deployed-tag flow; this authorization excludes main promotion or a versioned release.

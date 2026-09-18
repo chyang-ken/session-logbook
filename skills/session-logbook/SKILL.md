@@ -73,9 +73,11 @@ python3 scripts/session_logbook.py <command> ...
 - Search for a bounded question and expand the returned source anchors when necessary.
   Missing or contradictory goals require more context; small output alone is not a
   reason to infer authorization or completion.
-- Incremental output reduces model input. It does not promise incremental disk reads:
-  the current Codex resolver still verifies history on each invocation. Source manifests
-  preserve access to evidence; they are not a substitute for reading needed evidence.
+- Codex observation and source-qualified follow reuse a rebuildable local history
+  index. Keep the caller cursors anyway: the index is not a delivery acknowledgement.
+  Changed history is revalidated; an unavailable index falls back to source reads.
+  Large current segments still require prefix verification after append. Source
+  manifests preserve access to evidence; they do not replace reading needed evidence.
 
 ## Commands
 

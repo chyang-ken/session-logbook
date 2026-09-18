@@ -145,3 +145,26 @@ These are not grounds for converting missing events into a completion claim.
 Local private reproduction inputs and source references are retained in
 `_private/runtime_probe.py`, `_private/runtime-probe-results.json`, and
 `_private/runtime-probe-followup.json`; these are intentionally excluded from Git.
+
+## Rebuildable Codex history index
+
+Codex `observe`, source-qualified `follow`, and reader change checks use
+`~/.session-logbook/history-index.sqlite3`. The standard-library SQLite index
+stores source identities, validated byte/line/ordinal coordinates and prefix hashes,
+not message bodies or consumer cursors. Each caller must still retain its independent
+Hook/native/conversation cursors and transcript source path. Reading the index never
+acknowledges delivery, so retrying an old caller cursor returns the same evidence.
+
+Unchanged sources reuse verification. Appends verify the current segment's old prefix;
+old segments stay unread. A large single segment still needs its full prefix checked.
+Replacement, missing ancestry, changed candidates or conflicting copies invalidate the
+plan. Incomplete sources never advance observation. Concurrent callers use transactions;
+a locked, corrupt or unwritable index falls back to the uncached verified snapshot.
+A structurally corrupt SQLite file is bypassed, not automatically overwritten. Deleting
+this derived index allows a rebuild; never delete original logs to repair it.
+
+`SESSION_LOGBOOK_HISTORY_INDEX=/absolute/path` isolates experiments; `off` disables
+the index. Synthetic source roots do not use the resident index by default. An index
+rebuild incurs extra reads once; warm observation still pays metadata discovery and
+small requested evidence reads. The `history_cache` observation field reports `hit`,
+`append`, `rebuilt`, `disabled`, or `unavailable`; it is not a runtime task status.

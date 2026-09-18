@@ -8,12 +8,13 @@ import json
 from pathlib import Path
 
 
-def read_segment(path, stop=None):
+def read_segment(path, stop=None, start=0, first_line=1):
     path = Path(path).resolve()
-    records, issues, offset = [], [], 0
+    records, issues, offset = [], [], start
     try:
         with path.open('rb') as stream:
-            line = 0
+            stream.seek(start)
+            line = first_line - 1
             while stop is None or offset < stop:
                 raw = stream.readline(-1 if stop is None else stop - offset)
                 if not raw:
@@ -179,6 +180,12 @@ def resolve(path):
 
 
 def fingerprint(path):
+    from sources import history_index
+    if history_index.index_path() is not None:
+        plan = history_index.plan(path, resolve)
+        if plan['complete'] and all('prefix_hash' in s for s in plan['segments']):
+            identity = [(s['path'], s['coordinates'][-1], s['prefix_hash']) for s in plan['segments']]
+            return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     history = resolve(path)
     # Include inherited records and gaps: repairing a missing ancestor must refresh UI.
     payload = [(r['path'], r['line'], r['record']) for r in history['records']]

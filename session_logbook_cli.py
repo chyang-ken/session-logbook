@@ -490,6 +490,28 @@ def _observed_terminal(item: dict) -> str:
 def _codex_context(path, after_line=0, cursor_source_path=None, historical_terminal=False,
                    records=None, issues=None):
     from sources import codex_history
+    if records is None and (cursor_source_path or str(after_line).startswith('cx1:')):
+        source, line = cursor_source_path, after_line
+        if str(line).startswith('cx1:'):
+            import base64
+            _, encoded, number = str(line).split(':')
+            source = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
+            line = int(number)
+        line = int(line)
+        if line > 0:
+            from sources import history_index
+            plan = history_index.plan(path, codex_history.resolve)
+            source = str(Path(source).resolve())
+            matches = [i for i, s in enumerate(plan['segments']) if s['path'] == source]
+            if not matches:
+                raise ValueError('cursor source is not in the effective history')
+            segment = plan['segments'][matches[0]]
+            if line > segment['coordinates'][-1][0]:
+                raise ValueError('cursor is in a replaced or truncated history tail; reconcile context before continuing')
+            selected = history_index.window(segment, line)
+            for later in plan['segments'][matches[0] + 1:]:
+                selected.extend(history_index.window(later))
+            return _codex_context(path, line, source, historical_terminal, records=selected, issues=plan['issues'])
     history = codex_history.resolve(path) if records is None else None
     rows = history['records'] if history is not None else records
     issues = history['issues'] if history is not None else (issues or [])
@@ -541,10 +563,11 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
 
 def _observe_codex(path, args):
     from sources import codex_history, runtime_events
-    history = codex_history.resolve(path)
-    codex_history.require_complete(history)
+    from sources import history_index
+    plan = history_index.plan(path, codex_history.resolve)
+    codex_history.require_complete(plan)
     sid = session_metadata(path)['id']
-    segments = [s for s in history['segments'] if s['session_id'] == sid]
+    segments = [s for s in plan['segments'] if s['session_id'] == sid]
     source = str(Path(args.cursor_source_path).resolve()) if args.cursor_source_path else None
     def decode(value):
         if not str(value).startswith('cx1:'):
@@ -566,7 +589,7 @@ def _observe_codex(path, args):
         if not matches:
             raise ValueError('cursor source is not in the effective same-thread history')
         index = matches[0]
-        end = segments[index]['records'][-1]['line']
+        end = segments[index]['coordinates'][-1][0]
         if native > end or conversation > end:
             raise ValueError('cursor is in a replaced or truncated history tail; reconcile context before continuing')
         if native == end and conversation == end and index + 1 < len(segments):
@@ -577,7 +600,8 @@ def _observe_codex(path, args):
         native = conversation = 0
     segment = segments[index]
     changed = source is not None and source != segment['path']
-    selected = [row for row in segment['records'] if row['line'] > native]
+    page_rows = history_index.window(segment, min(native + 1, max(1, conversation)))
+    selected = [row for row in page_rows if row['line'] > native]
     events, last, more = [], native, False
     for row in selected:
         record = row['record']
@@ -590,17 +614,20 @@ def _observe_codex(path, args):
                 'facts': {k: event[k] for k in ('type', 'turn_id', 'agentId', 'reason') if k in event},
                 'timestamp': record.get('timestamp')})
         last = row['line']
-    body_rows = [row for row in segment['records'] if row['line'] >= max(1, conversation)]
+    body_rows = [row for row in page_rows if row['line'] >= max(1, conversation)]
     # A page advances to this segment's end for conversation, independently of native paging.
-    context_rows = segment['records']
+    context_rows = body_rows
     if source is None and index == 0:
-        first = history['records'].index(segment['records'][0])
-        context_rows = history['records'][:first] + context_rows
+        inherited = []
+        for prior in plan['segments']:
+            if prior['path'] == segment['path']:
+                break
+            inherited.extend(history_index.window(prior))
+        context_rows = inherited + context_rows
     text = _codex_context(Path(segment['path']), records=context_rows, historical_terminal=True)
-    if conversation:
-        text = _codex_context(Path(segment['path']), records=body_rows, historical_terminal=True)
     result = {'source': 'codex', 'session_id': sid, 'transcript_path': segment['path'],
         'context_complete': True, 'history_issues': [],
+        'history_cache': plan.get('cache', 'disabled'),
         'hooks': runtime_events.read('codex', sid, args.event_cursor, args.limit),
         'native': {'events': events, 'next_line_cursor': last,
             'source_cursor': codex_source.next_cursor(segment['path'], last),
