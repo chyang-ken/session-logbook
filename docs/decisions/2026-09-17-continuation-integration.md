@@ -110,3 +110,85 @@ This reduces unnecessary disk reads but does not reuse previously verified histo
 across separate process invocations. Cross-process reuse would need a recoverable
 local index or a caller-carried validation checkpoint, with explicit invalidation
 on changes to history. Neither is implemented or enabled by this change.
+
+## Isolated cross-process index experiment (not enabled)
+
+The maintainer's approved local performance investigation continues while release
+is paused. The experiment in `tests/history_index_prototype.py` has no production
+entry point and refuses state paths outside its named temporary test directory.
+Run `python3 tests/history_index_experiment.py`; its fixtures and index are removed
+on exit. It uses standard-library modules only and never installs or starts a service.
+
+### Existing cache assessment
+
+`server.py`'s scan cache stores session-card metadata and project lookup information.
+It does not store verified ancestry boundaries or prefix hashes. Reuse its policy
+(rebuildable, atomic replacement, no writes on unchanged data), not its current
+format: a CLI writer sharing that JSON file could overwrite the dashboard's data.
+The experiment therefore uses a separate explicit temporary index.
+
+### Measured result
+
+Every request starts a fresh Python process against 100 synthetic segments totaling
+67,805,992 bytes. The index contains file identities, sizes, timestamps including
+ctime, a verified current-file byte/line/ordinal boundary and prefix hash, plus a
+format version and checksum. It contains no transcript body or generated summary.
+
+| Request | Source bytes read | Reader time (Python 3.14) |
+|---|---:|---:|
+| Cold verification | 69,328,856 | 0.4304 s |
+| No changes, new process | 0 | 0.0057 s |
+| One appended message, new process | 678,330 | 0.0094 s |
+| Retry after result was not delivered | 678,330 | 0.0071 s |
+
+The initial index is 22,598 bytes. Append reads decrease by 99.02% relative to cold
+verification. These counters measure bytes returned by application reads of source
+JSONL files, not physical device I/O. They exclude reading the small index and stat
+calls. Reader timing excludes Python startup and result serialization. An unchanged
+poll still lists/stats source files; metadata work scales with file count.
+
+### Single-large-segment control
+
+Run `python3 tests/history_index_experiment.py --single-segment`. With the same
+roughly 65 MB in one segment, a quiet check still reads no source body, but append
+verification reads 67,781,170 bytes: the full old prefix plus the new message.
+Cold setup reads 135,562,026 bytes because it both parses and hashes the initial
+segment. Reusing the in-progress hash removes a redundant second prefix read on
+append. This does not make a mutable large file append-only or remove the need to
+verify its prefix. Do not generalize the multi-segment 99% result to single files.
+
+### Correctness and invalidation
+
+- Unchanged file inventory and signatures allow reuse without reading source bodies.
+- File growth alone is insufficient. Rehash the current segment's old prefix before
+  accepting appended rows; retained historical files can stay unread.
+- Same-size ancestor edits, even with restored mtime, and atomic replacements trigger
+  full reconstruction. New segments also rebuild conservatively.
+- Missing ancestry or unfinished records report incompleteness without advancing the
+  stored checkpoint. Restored files are revalidated.
+- Deleted or corrupted indexes rebuild from source; they are never the only copy.
+- The cache checkpoint is distinct from the caller's delivery cursor. Repeating an
+  older caller cursor after an undelivered result returns the same appended message.
+- Every successful rebuild/delta is compared with the uncached resolver, including
+  physical origins; no semantic summary substitutes for original messages.
+
+The experiment covers 14 cold/warm/mutation/recovery requests on Python 3.9 and
+3.14, plus the four-request single-large-segment control on Python 3.14. It is a single-writer
+prototype, not an integrated CLI/HTTP cache. Production concurrency, eviction and
+consumer integration have not been implemented or accepted by this experiment.
+
+### Recommendation and actual user boundary
+
+The measured benefit supports a rebuildable index. For a production implementation,
+use a separate `~/.session-logbook/history-index.sqlite3` under the existing Logbook
+state directory, with standard-library SQLite transactions for multiple readers and
+writers. Keep shared file metadata once and keep caller cursors outside the index.
+Do not add backups or a service. Deleting the index should cost only a cold rebuild;
+source histories must never be deleted or changed. Storage grows with indexed file
+metadata, not transcript text; the prototype's JSON size is not a SQLite size claim.
+
+This is a concrete proposed runtime artifact, not an enabled location. The only
+remaining user decision is approval to activate that additional local derived state
+as part of a future release. Release is still paused; no production index, installed
+Skill update, push, merge or deployment has occurred. The isolated experiment itself
+is complete and does not require an additional approval to investigate.
