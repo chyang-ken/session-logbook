@@ -5,6 +5,7 @@ an explicitly selected ancestry, not globally unique deduplication keys.
 """
 import hashlib
 import json
+import re
 from pathlib import Path
 
 
@@ -76,6 +77,18 @@ def _meta(records):
     return {}
 
 
+def segment_alias(path, meta):
+    """Recognize an observed physical-page alias without changing logical identity."""
+    sid = meta.get('id')
+    if not sid or meta.get('session_id') != sid or meta.get('history_mode') != 'paginated':
+        return None
+    parts = Path(path).stem.rsplit('_', 1)
+    if (len(parts) == 2 and parts[0].endswith('-' + sid) and
+            re.fullmatch(r'[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}', parts[1])):
+        return parts[1]
+    return None
+
+
 def resolve(path):
     """Resolve a linear ancestry iteratively, indexing each candidate snapshot once."""
     from sources import codex
@@ -89,7 +102,7 @@ def resolve(path):
             snapshots[key] = read_segment(p, stop)
         return snapshots[key]
 
-    def boundaries(sid, byte):
+    def boundaries(sid, byte, logical_owner=None):
         nonlocal metadata_index
         if metadata_index is None:
             metadata_index = {}
@@ -98,10 +111,14 @@ def resolve(path):
                     for candidate in root.rglob('rollout-*.jsonl'):
                         meta = codex._read_session_meta(candidate) or {}
                         metadata_index.setdefault(meta.get('id'), set()).add(candidate.resolve())
-        key = (sid, byte)
+                        alias = segment_alias(candidate, meta)
+                        if alias:
+                            metadata_index.setdefault((meta.get('id'), alias), set()).add(candidate.resolve())
+        identity = (logical_owner, sid) if logical_owner else sid
+        key = (identity, byte)
         if key not in boundary_indexes:
             index = {}
-            for candidate in sorted(metadata_index.get(sid, ())):
+            for candidate in sorted(metadata_index.get(identity, ())):
                 # Probe the explicit byte boundary before loading a candidate prefix.
                 ordinal = boundary_ordinal(candidate, byte)
                 if ordinal is not None:
@@ -143,13 +160,15 @@ def resolve(path):
         if not valid:
             errors.append({**issue, 'reason': 'incomplete_history_boundary'})
             break
-        if sid != meta.get('id') and not (meta.get('forked_from_id') == sid and meta.get('forked_from_ordinal_exclusive') == end):
+        physical_alias = sid != meta.get('id') and not (
+            meta.get('forked_from_id') == sid and meta.get('forked_from_ordinal_exclusive') == end)
+        if physical_alias and (not isinstance(meta.get('id'), str) or not meta['id']):
             errors.append({**issue, 'reason': 'unverified_parent_history'})
             break
         if rows and rows[0]['record'].get('ordinal') != end:
             errors.append({**issue, 'reason': 'continuation_start_conflict'})
             break
-        matches = [candidate for candidate in boundaries(sid, byte).get(end, ())
+        matches = [candidate for candidate in boundaries(sid, byte, meta.get('id') if physical_alias else None).get(end, ())
                    if candidate != p and candidate not in visited]
         # Equivalent active/archive copies have the same records, not merely equal ordinals.
         groups = {}
@@ -163,7 +182,9 @@ def resolve(path):
                 digest.update(b'\n')
             groups.setdefault(digest.digest(), []).append(candidate)
         if len(groups) != 1:
-            errors.append({**issue, 'reason': 'missing_history_segment' if not groups else 'ambiguous_history_segment'})
+            reason = ('unverified_parent_history' if physical_alias and not matches else
+                      'missing_history_segment' if not groups else 'ambiguous_history_segment')
+            errors.append({**issue, 'reason': reason})
             break
         copies = next(iter(groups.values()))
         p = min(copies, key=lambda c: (codex._under_root(c, codex.CODEX_ARCHIVED_ROOT), str(c)))
