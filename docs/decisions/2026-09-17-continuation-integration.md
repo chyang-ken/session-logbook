@@ -209,3 +209,15 @@ unavailable paths. Other acceptance covers inherited histories, exact origins,
 appends, retry after undelivered output, missing/replaced/conflicting records, and
 fresh/concurrent processes. Delivery evidence is recorded by the existing PR/CI and
 deployed-tag flow; this authorization excludes main promotion or a versioned release.
+
+### Deployment readback: physical page aliases
+
+The first Staging readback found another real format: `history_base.thread_id` can
+name the physical page suffix of an earlier same-session file. The logical `id` and
+`session_id` remain unchanged. Accept that alias only for an explicitly paginated
+page whose filename prefix and both metadata identities agree, and only after the
+existing ordinal/byte cutoff and ambiguity checks succeed. A filename never becomes
+the task identity. An unqualified cursor on any history-bearing segment replays
+conservatively rather than skipping potentially unread prior pages. Synthetic tests
+cover the alias, preserved logical identity, rejected metadata mismatch and cursor
+migration; the real affected chain is re-read privately before the follow-up deploy.

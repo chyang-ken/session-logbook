@@ -68,6 +68,42 @@ class HistoryTests(unittest.TestCase):
         latest = self.segment('c', [msg('Latest request'), event('task_started','t2')], base=(middle,3))
         return old, middle, latest
 
+    def test_physical_page_alias_keeps_logical_identity_and_verified_boundaries(self):
+        old, middle, latest = self.chain()
+        alias = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+        renamed = middle.with_name(middle.stem + '_' + alias + '.jsonl')
+        rows = [json.loads(line) for line in middle.read_text().splitlines()]
+        rows[0]['payload'].update(session_id=SID, history_mode='paginated')
+        renamed.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        middle.unlink()
+        rows = [json.loads(line) for line in latest.read_text().splitlines()]
+        rows[0]['payload']['history_base'].update(thread_id=alias, end_byte_offset=renamed.stat().st_size)
+        latest.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        history = codex_history.resolve(latest)
+        self.assertTrue(history['complete'], history['issues'])
+        self.assertEqual([s['session_id'] for s in history['segments']], [SID] * 3)
+        text = anchored_transcript.render_codex(latest)
+        self.assertIn('Middle unread request', text)
+        self.assertNotIn('Discarded old branch', text)
+        replay = cli.render_context(latest, 2)
+        self.assertIn('Goal: build.', replay)
+        self.assertIn('SOURCE_CHANGED: true', replay)
+        # A filename alone is insufficient: the page must affirm the same logical ID.
+        changed = [json.loads(line) for line in renamed.read_text().splitlines()]
+        changed[0]['payload']['session_id'] = PARENT
+        renamed.write_text(''.join(json.dumps(row) + '\n' for row in changed))
+        self.assertFalse(codex_history.resolve(latest)['complete'])
+
+    def test_alias_lookup_never_falls_back_without_logical_owner(self):
+        old, middle, latest = self.chain()
+        rows = [json.loads(line) for line in latest.read_text().splitlines()]
+        for value in (None, ''):
+            rows[0]['payload']['id'] = value
+            latest.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            history = codex_history.resolve(latest)
+            self.assertFalse(history['complete'])
+            self.assertEqual(history['issues'][0]['reason'], 'unverified_parent_history')
+
     def test_complete_history_excludes_replaced_tail_with_provenance(self):
         old, middle, latest = self.chain()
         history = codex_history.resolve(latest)

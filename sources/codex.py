@@ -731,13 +731,13 @@ def encode_cursor(path, line):
 def resume_cursor(path, cursor):
     """Return (physical line, source changed). Bare cursors predate continuations.
 
-    A same-thread history_base identifies a replacement segment, not an append to
-    the previous file. Restart only that segment, retaining physical evidence anchors.
+    A history_base may identify an inherited or continued page, including a physical
+    page alias. An unqualified line cannot identify its old source; replay conservatively.
     Source-qualified cursors make subsequent polls incremental even when the new
     segment is shorter, longer, or has overlapping native ordinals.
     """
     meta = _read_session_meta(path) or {}
-    continued = bool(meta.get("id")) and (meta.get("history_base") or {}).get("thread_id") == meta["id"]
+    continued = bool(meta.get("id")) and bool(meta.get("history_base"))
     value = str(cursor)
     if value.startswith("cx1:"):
         try:
