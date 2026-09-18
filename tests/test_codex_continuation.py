@@ -56,13 +56,17 @@ class ContinuationTests(unittest.TestCase):
     def write(self, label, sid, stamp, rows, continued=False, child=False):
         path = self.active / f'rollout-{label}-{sid}.jsonl'
         meta = {'id': sid, 'timestamp': stamp, 'cwd': '/Users/alice/my-app'}
+        ordinal = 0
         if continued:
-            meta['history_base'] = {'thread_id': sid, 'end_ordinal_exclusive': 12}
+            previous = self.old.read_bytes()
+            ordinal = len(previous.splitlines())
+            meta['history_base'] = {'thread_id': sid, 'end_ordinal_exclusive': ordinal,
+                                    'end_byte_offset': len(previous)}
         if child:
             meta['parent_thread_id'] = SID
             meta['source'] = {'subagent': {'thread_spawn': {'parent_thread_id': SID}}}
         records = [{'type': 'session_meta', 'payload': meta}, *rows]
-        path.write_text(''.join(json.dumps(row) + '\n' for row in records))
+        path.write_text(''.join(json.dumps(dict(row, ordinal=ordinal+i)) + '\n' for i, row in enumerate(records)))
         return path
 
     def run_cli(self, *args):
@@ -79,12 +83,16 @@ class ContinuationTests(unittest.TestCase):
         # An old cursor can exceed the new file length; migrate rather than stall.
         followed = self.run_cli('follow', SID, '--cursor-line', '18')
         self.assertIn('new request', followed)
-        self.assertNotIn('old request', followed)
+        self.assertIn('old request', followed)
         self.assertIn('SOURCE_CHANGED: true', followed)
         observed = json.loads(self.run_cli('observe', SID, '--native-line-cursor', '18', '--cursor-line', '18'))
+        self.assertEqual(observed['cursor_reset_reason'], 'cursor_source_missing')
+        self.assertTrue(observed['native']['has_more'])
+        self.assertIn('old request', observed['conversation'])
+        observed = json.loads(self.run_cli('observe', SID, '--native-line-cursor', '18',
+            '--cursor-line', '18', '--cursor-source-path', str(self.old)))
         self.assertEqual(observed['native']['events'][0]['facts']['turn_id'], 'new-turn')
         self.assertIn('new request', observed['conversation'])
-        self.assertIn('HISTORICAL_TERMINAL_NOT_CURRENT_STATE: unknown', observed['conversation'])
 
     def test_qualified_cursor_switch_and_subsequent_increment(self):
         old_cursor = codex.next_cursor(self.old, 18)
@@ -109,7 +117,7 @@ class ContinuationTests(unittest.TestCase):
     def test_longer_replacement_and_native_pagination(self):
         with self.new.open('a') as stream:
             for n in range(25):
-                stream.write(json.dumps(event('task_complete', f'turn-{n}')) + '\n')
+                stream.write(json.dumps(dict(event('task_complete', f'turn-{n}'), ordinal=21+n)) + '\n')
         # Even when line 18 exists in the new file, it belongs to the old source.
         first = runtime_events.native_events(self.new, 'codex', 18, limit=1)
         self.assertEqual(first['events'][0]['facts']['turn_id'], 'new-turn')
@@ -125,7 +133,7 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(server._find_jsonl(SID), self.new)
         conversation = codex.extract_conversation(server._find_jsonl(SID))
         self.assertIn('new request', json.dumps(conversation))
-        self.assertNotIn('old request', json.dumps(conversation))
+        self.assertIn('old request', json.dumps(conversation))
         with patch.object(cli, 'iter_session_paths', return_value=iter([self.old, self.new])):
             found = cli.search_sessions('request', source='codex')
         self.assertEqual(found[0]['jsonl_path'], str(self.new.resolve()))
@@ -150,12 +158,12 @@ class ContinuationTests(unittest.TestCase):
                 result = json.load(response)
             self.assertNotIn('unchanged', result)
             self.assertIn('new request', json.dumps(result))
-            self.assertNotIn('old request', json.dumps(result))
+            self.assertIn('old request', json.dumps(result))
             with urllib.request.urlopen(base + '/anchored') as response:
                 body = response.read().decode()
             self.assertIn('new request', body)
             self.assertIn(str(self.new), body)
-            self.assertNotIn('old request', body)
+            self.assertIn('old request', body)
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -193,7 +201,7 @@ class ContinuationTests(unittest.TestCase):
     def test_observe_numeric_contract_switch_paging_and_quiet_poll(self):
         for n in range(3):
             with self.new.open('a') as stream:
-                stream.write(json.dumps(event('task_complete', f'turn-{n}')) + '\n')
+                stream.write(json.dumps(dict(event('task_complete', f'turn-{n}'), ordinal=21+n)) + '\n')
         first = json.loads(self.run_cli('observe', SID, '--native-line-cursor', '18',
             '--cursor-line', '18', '--cursor-source-path', str(self.old), '--limit', '1'))
         self.assertEqual(first['cursor_reset_reason'], 'transcript_changed')
@@ -218,4 +226,33 @@ class ContinuationTests(unittest.TestCase):
         page = json.loads(self.run_cli('observe', SID, '--native-line-cursor', '18',
                                      '--cursor-line', '18'))
         self.assertEqual(page['cursor_reset_reason'], 'cursor_source_missing')
-        self.assertEqual(page['native']['events'][0]['facts']['turn_id'], 'new-turn')
+        self.assertEqual(page['native']['events'][0]['facts']['turn_id'], 'old-turn')
+        self.assertTrue(page['native']['has_more'])
+
+
+    def test_nonstandard_filenames_keep_current_segment_selection(self):
+        self.old.rename(self.active / 'rollout-first.jsonl')
+        current = self.new.rename(self.active / 'rollout-second.jsonl')
+        self.assertEqual(codex.find_rollout_by_session_id(SID)[0], current)
+        self.assertEqual(cli.resolve_target(SID), current.resolve())
+
+    def test_source_reset_preserves_independent_hook_cursor(self):
+        hooks = {'events': [], 'next_event_cursor': 42, 'has_more': False}
+        with patch.object(runtime_events, 'read', return_value=hooks) as read:
+            page = json.loads(self.run_cli('observe', SID, '--event-cursor', '42',
+                '--native-line-cursor', '18', '--cursor-line', '18',
+                '--cursor-source-path', str(self.old)))
+            self.assertEqual(read.call_args.args[2], 42)
+            self.assertEqual(page['hooks']['next_event_cursor'], 42)
+            self.assertEqual(page['cursor_reset_reason'], 'transcript_changed')
+            self.assertEqual(page['native']['events'][0]['facts']['turn_id'], 'new-turn')
+            self.assertIn('new request', page['conversation'])
+
+    def test_exact_old_path_retains_original_evidence(self):
+        self.assertEqual(cli.resolve_target(str(self.old)), self.old.resolve())
+        context = self.run_cli('context', str(self.old))
+        self.assertIn('old request', context)
+        self.assertNotIn('new request', context)
+        evidence = cli.read_evidence(self.old, 3, context=0)
+        self.assertIn('old-turn', evidence)
+        self.assertNotIn('new-turn', evidence)

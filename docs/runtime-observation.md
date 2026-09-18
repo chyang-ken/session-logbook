@@ -19,27 +19,43 @@ are not durable identities across storage replacement.
 ## Codex continuation cursors
 
 Codex Desktop can resume the same `session_meta.id` into another rollout. ID lookup
-selects the latest segment by its native metadata timestamp, including with a warm
-HTTP cache; file size and filesystem modification time do not establish recency.
-Explicit paths still read exactly that file. Context is the selected segment, not
-a reconstruction of inherited history from `history_base` or the Desktop database.
+selects the latest segment. The shared history reader then follows explicit
+`history_base` references, validating both `end_ordinal_exclusive` and
+`end_byte_offset`. It retains only the inherited prefix before each cutoff, followed
+by the selected continuation. Overlapping ordinals in replaced tails are not used
+as deduplication keys. No history is inferred from timestamps alone.
+
+`context`, the HTTP reader, and exports include verified inherited context. Each
+record retains its physical source path and line. Explicit paths identify that
+segment and its inherited context; `evidence` still reads only the exact raw file.
+A fork may inherit a parent prefix only when its fork metadata agrees with the
+history boundary. Parent activity after the cutoff and child-agent sessions are
+not part of the selected task. Native observation excludes inherited parent events.
 
 Save `transcript_path` alongside the numeric conversation `NEXT_CURSOR` and
-`native.next_line_cursor`. Pass it back as `--cursor-source-path` on `observe`
-and `follow`. Physical `[L#]` anchors remain local to that file.
+`native.next_line_cursor`, passing it back as `--cursor-source-path`. Observation
+drains the unread effective tail of the saved segment and every intermediate
+segment before reaching the latest. `native.has_more` includes remaining segments,
+so drain pages before interpreting the latest task state. Hook cursors are not reset.
+A page may name an earlier segment until its unread content has been delivered.
 
-For Codex, a verified same-thread source change resets both cursors and reports
-`cursor_reset_reason: transcript_changed`. Legacy nonzero cursors without a
-source path report `cursor_source_missing` and replay the selected segment once.
-Subsequent calls with the returned path are incremental, including native pages.
-Consumers must clear old turn state on a reset, and never compare line numbers
-across source files. An unrelated source or truncation is an explicit error.
+Switching a page's source reports `cursor_reset_reason: transcript_changed`.
+Consumers clear old line and turn state, while retaining previously collected
+conversation. Numeric cursor output types remain unchanged; `cx1:...` source tokens
+are also accepted. A bare nonzero cursor cannot identify a prior segment: its
+migration is explicitly marked `cursor_source_missing` and replays verified history.
+Persist the returned source identity so later polls remain incremental.
 
-The additive conversation `SOURCE_CURSOR` and native `source_cursor` fields
-provide opaque `cx1:...` tokens for callers that prefer one value. These may be
-passed unchanged as cursor arguments without `--cursor-source-path`. Existing
-numeric output fields retain their types. Native ordinals may overlap across
-segments and are not used to splice history. No cursor proves process liveness.
+Missing segments, conflicting boundaries, malformed records, and unfinished lines
+are reported with source locations. Context and HTTP responses expose
+`context_complete`/`history_issues` (text uses `CONTEXT_COMPLETE`/`CONTEXT_ISSUES`).
+The anchored export displays `CONTEXT_INCOMPLETE`; the web reader shows a warning.
+`observe` fails explicitly with `context_incomplete` rather than advancing cursors
+through missing evidence. A cursor inside a replaced tail also requires context
+reconciliation; it is not silently reset or treated as successfully read.
+
+No cursor proves process liveness or completion of the user's goal. Runtime facts
+remain evidence for a consuming Agent to interpret.
 
 ## Collection setup
 
@@ -129,3 +145,26 @@ These are not grounds for converting missing events into a completion claim.
 Local private reproduction inputs and source references are retained in
 `_private/runtime_probe.py`, `_private/runtime-probe-results.json`, and
 `_private/runtime-probe-followup.json`; these are intentionally excluded from Git.
+
+## Rebuildable Codex history index
+
+Codex `observe`, source-qualified `follow`, and reader change checks use
+`~/.session-logbook/history-index.sqlite3`. The standard-library SQLite index
+stores source identities, validated byte/line/ordinal coordinates and prefix hashes,
+not message bodies or consumer cursors. Each caller must still retain its independent
+Hook/native/conversation cursors and transcript source path. Reading the index never
+acknowledges delivery, so retrying an old caller cursor returns the same evidence.
+
+Unchanged sources reuse verification. Appends verify the current segment's old prefix;
+old segments stay unread. A large single segment still needs its full prefix checked.
+Replacement, missing ancestry, changed candidates or conflicting copies invalidate the
+plan. Incomplete sources never advance observation. Concurrent callers use transactions;
+a locked, corrupt or unwritable index falls back to the uncached verified snapshot.
+A structurally corrupt SQLite file is bypassed, not automatically overwritten. Deleting
+this derived index allows a rebuild; never delete original logs to repair it.
+
+`SESSION_LOGBOOK_HISTORY_INDEX=/absolute/path` isolates experiments; `off` disables
+the index. Synthetic source roots do not use the resident index by default. An index
+rebuild incurs extra reads once; warm observation still pays metadata discovery and
+small requested evidence reads. The `history_cache` observation field reports `hit`,
+`append`, `rebuilt`, `disabled`, or `unavailable`; it is not a runtime task status.

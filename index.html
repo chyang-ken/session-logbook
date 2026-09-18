@@ -1933,6 +1933,7 @@
     padding-top: 2px;
   }
   .conv-detail span { margin-right: 16px; }
+  .conv-sources { overflow-wrap: anywhere; }
   /* session id row: same style as the card's .card-sid-wrap —— the id text itself is click-to-copy (no separate button),
      icon button is borderless ghost. No more bordered "copy" pill / bordered icon (violates the no-border rule in design-system §7,
      and would diverge from the card version). Same component stays consistent across surfaces. */
@@ -3231,7 +3232,7 @@ function renderCard(m) {
         <span class="card-sid-wrap">
           ${sourceChip}
           <span class="card-sid" data-act="copy-id" data-tooltip="Click to copy session ID">${escapeHtml(m.id)}</span>
-          <button class="sid-link-btn" data-act="copy-path" data-tooltip="Copy source reference" aria-label="Copy source reference">${ICONS.link}</button>
+          <button class="sid-link-btn" data-act="copy-path" data-tooltip="${m.source === 'codex' ? 'Copy latest segment path' : 'Copy source reference'}" aria-label="${m.source === 'codex' ? 'Copy latest segment path' : 'Copy source reference'}">${ICONS.link}</button>
           <button class="sid-link-btn" data-act="copy-link" data-tooltip="Copy shareable link" aria-label="Copy shareable link">${ICONS.share}</button>
         </span>
         <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(activityISO(m))}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(activityISO(m))}</span>
@@ -3974,16 +3975,20 @@ function renderConv(data, meta) {
   const sourcePillHtml = `<span class="conv-source-pill ${sourceClass}" title="${sourceLabel} session">${sourceLabel}</span>`;
   // Metadata row (ID + size + mtime + jsonl_path) — placed in head as the sticky last line
   // Historically this section sat at the top of body and scrolled away with the turns, so the user lost sight of the ID once scrolled into the middle
-  const sizeKB = meta ? (meta.size / 1024).toFixed(1) + ' KB' : '';
-  const pathBtnHtml = meta?.jsonl_path
-    ? `<button class="conv-link-btn" data-copy-path="${escapeHtml(meta.jsonl_path)}" data-tooltip="Copy source reference" aria-label="Copy source reference">${ICONS.link}</button>`
+  const sizeKB = sourceVal === 'codex' ? (Number.isFinite(data.segment_size) ? (data.segment_size / 1024).toFixed(1) + ' KB latest segment' : '') : meta ? (meta.size / 1024).toFixed(1) + ' KB' : '';
+  const sourcePath = data.jsonl_path || meta?.jsonl_path;
+  const pathLabel = sourceVal === 'codex' ? 'Copy latest segment path' : 'Copy source reference';
+  const sourceFilesHtml = data.source_files?.length ? `<details class="conv-sources"><summary>History sources (${data.source_files.length} files)</summary>${data.source_files.map(f => `<div>${escapeHtml(f.relation)} · Session ${escapeHtml(f.session_id)} · L${f.first_line}–L${f.last_line}<br><span>${escapeHtml(f.path)}</span><button class="conv-link-btn" data-copy-path="${escapeHtml(f.path)}" data-tooltip="Copy this source path" aria-label="Copy this source path">${ICONS.link}</button></div>`).join('')}</details>` : '';
+  const pathBtnHtml = sourcePath
+    ? `<button class="conv-link-btn" data-copy-path="${escapeHtml(sourcePath)}" data-tooltip="${pathLabel}" aria-label="${pathLabel}">${ICONS.link}</button>`
     : '';
   const detailHtml = `
     <div class="conv-detail">
       <span class="conv-sid-wrap"><span class="conv-copy-id" data-copy-id="${escapeHtml(data.id)}" data-tooltip="Click to copy session ID">${escapeHtml(data.id)}</span>${pathBtnHtml}</span>
       ${sizeKB ? `<span>${sizeKB}</span>` : ''}
       ${meta ? `<span>${escapeHtml(fmtAbsTime(activityISO(meta)))}</span>` : ''}
-      ${meta?.jsonl_path ? `<div style="margin-top:2px">${escapeHtml(meta.jsonl_path)}</div>` : ''}
+      ${sourcePath ? `<div style="margin-top:2px">${sourceVal === 'codex' ? 'Latest segment: ' : ''}${escapeHtml(sourcePath)}</div>` : ''}
+      ${sourceFilesHtml}
     </div>`;
 
   head.innerHTML = `
@@ -3996,6 +4001,7 @@ function renderConv(data, meta) {
         ${subtitleHtml}
         <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} ${data.source === 'devin' ? 'database nodes' : 'raw lines'}</div>
         ${localMetadataHtml}
+        ${data.context_complete === false ? `<details class="conv-meta"><summary role="alert">Conversation history is incomplete — some earlier context is unavailable.</summary><pre>${escapeHtml(JSON.stringify(data.history_issues || [], null, 2))}</pre></details>` : ''}
       </div>
       ${actionsHtml}
       ${shareHtml}
@@ -4209,10 +4215,10 @@ function renderConv(data, meta) {
     navigator.clipboard.writeText(e.currentTarget.dataset.copyId).then(() => toast('Copied session ID'), () => toast('Copy failed'));
   });
   // Bind the JSONL path copy button
-  head.querySelector('[data-copy-path]')?.addEventListener('click', (e) => {
+  head.querySelectorAll('[data-copy-path]').forEach(button => button.addEventListener('click', (e) => {
     e.stopPropagation();
     navigator.clipboard.writeText(e.currentTarget.dataset.copyPath).then(() => toast('Copied source reference'), () => toast('Copy failed'));
-  });
+  }));
 
   // Bind tool collapse events
   body.querySelectorAll('.conv-tool-head').forEach(el => {
