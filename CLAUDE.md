@@ -173,8 +173,9 @@ State lives at `~/.session-logbook/state.json`, with rotating backups under
 | `server.py` `extract_conversation` | conversation view (pairs tool_use/tool_result, filters thinking, detects skill injection) |
 | `server.py` `compute_scope` / `_effective_archived` | backend scope (pure function, unit-tested); `_effective_archived` derives archived state (explicit state > Codex file location) |
 | `server.py` `load_scan_cache` / `save_scan_cache` / `CACHE_SCHEMA_VERSION` | persistent warm scan cache (`~/.session-logbook/scan-cache.json`): load on start + incremental scan. Bump the schema version on any meta-shape change, or stale caches break |
-| `server.py` `search_sessions` / `_rg_prefilter` / `_search_session` | full-text search (ripgrep prefilter → per-session AND match; pure-Python fallback) |
+| `server.py` `search_sessions` / `_rg_prefilter` / `_rg_matching_lines` / `_search_session` | full-text search (ripgrep file prefilter → ripgrep streams only lines containing a term, JSON keys excluded → per-session AND match; whole-file Python fallback). See `docs/decisions/2026-09-19-search-matching-lines.md` |
 | `server.py` `list_recent_files` / `find_files_by_name` | Files panel backends |
+| `sources/codex_history.py` `load` | the single entry point for a Codex session's effective history (continued pages and forks stitched across rollout files, served from the history index when available). Readers must call `load`, never `resolve`; `tests/test_history_entry_point.py` enforces this. If another client starts splitting sessions across files, give its source module the same kind of single entry point and route its readers through it, rather than generalizing Codex's format |
 | `sources/codex.py` `is_codex_path` / `CODEX_ARCHIVED_ROOT` | Codex (`~/.codex`) data source; `is_codex_path` is the centralized dual-root predicate (active `sessions` + `archived_sessions`) |
 | `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source |
 | `sources/pi.py` | Pi JSONL selected-branch reader, metadata, search, and exports; no source writes. CLI follow returns the full branch; raw evidence retains physical line numbers. |
@@ -206,6 +207,23 @@ python3 scripts/check_no_cjk.py
 
 `tests/` uses Python `unittest` with synthetic fixtures. All tests must pass before merge;
 CI runs the same command on every push and PR.
+
+**Search is the primary capability; changing it has two extra gates.**
+
+- `tests/test_search_contract.py` is the behavioural contract: one synthetic corpus with
+  every source, a table of queries and expected sessions, and a check that the fast
+  (ripgrep line-streaming) path and the whole-file path agree and that the fast path
+  really ran. New search behaviour gets a row there.
+- For any change meant to keep results identical, also run
+  `python3 scripts/search_compare.py --baseline origin/staging --queries <file>` against
+  the maintainer's real history before merging. It isolates state, cache and index, and
+  writes results to `_private/` because they contain real session data.
+- A fallback that silently takes over hides fast-path bugs, because both paths return
+  correct results. Tests must assert which path ran, and a deliberate break of each
+  safeguard should fail them.
+- Source adapters that bind a data root as a default argument (for example
+  `antigravity.scan_sessions`) ignore patched module constants; tests must pass the
+  root explicitly, or they read the developer's real history.
 
 CI's floor is Python 3.9 and its runners have no git identity. Before pushing, run the suite once
 under a 3.9 interpreter too (on macOS, `/usr/bin/python3` is 3.9), and never let a test rely on

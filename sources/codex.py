@@ -335,6 +335,10 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
     user_turn_count = tail_info["user_count"]
     if size > HEAD_BUFFER + TAIL_BUFFER:
         user_turn_count = max(user_turn_count, 2)
+    # A continued page or fork carries earlier turns in other files. Its own first user
+    # message is not the session's first turn, so never report it as single-turn.
+    if meta_raw.get("history_base") and user_turn_count >= 1:
+        user_turn_count = max(user_turn_count, 2)
     # - recent_msgs: take the last N per track (same as Claude), then merge by ts.
     #   Taking the last N user/assistant messages separately keeps tool-heavy sessions from
     #   pushing user input out of the preview. Sorting by ts shows the true conversation order.
@@ -426,7 +430,7 @@ def extract_conversation(jsonl_path: Path) -> Optional[dict]:
         return None
 
     from sources import codex_history
-    history = codex_history.resolve(jsonl_path)
+    history = codex_history.load(jsonl_path)
     records = history['records']
 
     # First pass: collect function_call_output / custom_tool_call_output for pairing
@@ -596,7 +600,7 @@ def extract_transcript(jsonl_path: Path) -> str:
         return ""
 
     from sources import codex_history
-    history = codex_history.resolve(jsonl_path)
+    history = codex_history.load(jsonl_path)
     records = history['records']
 
     # Pair function_call_output / custom_tool_call_output

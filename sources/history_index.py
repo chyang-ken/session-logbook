@@ -119,9 +119,12 @@ def validate(value):
     return True
 
 
-def _plan(connection, target, resolver):
+def _plan(connection, target, resolver, catalogue=None):
     from sources import codex_history
-    catalogue = catalog(connection)
+    # A caller planning many targets may share one catalogue; changed histories still
+    # re-catalog below before being saved.
+    if catalogue is None:
+        catalogue = catalog(connection)
     row = connection.execute('SELECT payload, checksum FROM histories WHERE path=?', (str(target),)).fetchone()
     saved = None
     if row:
@@ -189,6 +192,23 @@ def _plan(connection, target, resolver):
     return value
 
 
+def _connect(location):
+    location.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(str(location), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(descriptor)
+    except FileExistsError:
+        pass
+    connection = sqlite3.connect(str(location), timeout=0.2)
+    try:
+        connection.execute('CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, signature TEXT NOT NULL, session_id TEXT)')
+        connection.execute('CREATE TABLE IF NOT EXISTS histories(path TEXT PRIMARY KEY, payload TEXT NOT NULL, checksum TEXT NOT NULL)')
+    except sqlite3.Error:
+        connection.close()
+        raise
+    return connection
+
+
 def plan(path, resolver):
     """Cache availability can affect performance, never the returned source truth."""
     location = index_path()
@@ -196,20 +216,42 @@ def plan(path, resolver):
         return from_history(resolver(path), retain_records=True)
     connection = None
     try:
-        location.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            descriptor = os.open(str(location), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(descriptor)
-        except FileExistsError:
-            pass
-        connection = sqlite3.connect(str(location), timeout=0.2)
-        connection.execute('CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, signature TEXT NOT NULL, session_id TEXT)')
-        connection.execute('CREATE TABLE IF NOT EXISTS histories(path TEXT PRIMARY KEY, payload TEXT NOT NULL, checksum TEXT NOT NULL)')
+        connection = _connect(location)
         return _plan(connection, Path(path).resolve(), resolver)
     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, IndexError):
         result = from_history(resolver(path), retain_records=True)
         result['cache'] = 'unavailable'
         return result
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def segment_paths(paths, resolver):
+    """Map each target to [(physical file, last effective line)] in history order, or None.
+
+    The last line bounds an inherited prefix; later lines of that file belong to
+    another branch or page.
+
+    Planning shares one catalogue across targets, so warm lookups avoid rescanning the
+    Codex tree per target. None means the index is unavailable or a history is
+    incomplete; callers must then read that history in full.
+    """
+    location = index_path()
+    if location is None:
+        return None
+    connection = None
+    try:
+        connection = _connect(location)
+        catalogue = catalog(connection)
+        result = {}
+        for path in paths:
+            value = _plan(connection, Path(path).resolve(), resolver, catalogue)
+            result[path] = ([(s['path'], s['coordinates'][-1][0]) for s in value['segments']]
+                            if value['complete'] and value['segments'] else None)
+        return result
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, IndexError):
+        return None
     finally:
         if connection is not None:
             connection.close()

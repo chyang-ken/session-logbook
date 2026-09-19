@@ -345,7 +345,7 @@ def render_codex(path, records=None) -> str:
     uturn = 0
     o_lines = []
     from sources import codex_history
-    history = codex_history.resolve(path) if records is None else None
+    history = codex_history.load(path) if records is None else None
     rows = history['records'] if history is not None else records
     multi = len({r['path'] for r in rows}) > 1
     if history is not None and not history['complete']:

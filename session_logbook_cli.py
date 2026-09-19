@@ -513,7 +513,7 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
             for later in plan['segments'][matches[0] + 1:]:
                 selected.extend(history_index.window(later))
             return _codex_context(path, line, source, historical_terminal, records=selected, issues=plan['issues'])
-    history = codex_history.resolve(path) if records is None else None
+    history = codex_history.load(path) if records is None else None
     rows = history['records'] if history is not None else records
     issues = history['issues'] if history is not None else (issues or [])
     changed = bool(cursor_source_path and Path(cursor_source_path).resolve() != Path(path).resolve())
@@ -853,7 +853,7 @@ def main(argv=None) -> int:
         if args.command == "locate":
             metadata = session_metadata(path)
             if metadata['source'] == 'codex':
-                history = codex_history.resolve(path)
+                history = codex_history.load(path)
                 metadata.update(source_files=codex_history.references(path, history),
                                 context_complete=history['complete'], history_issues=history['issues'])
             if metadata['source'] == 'claude':

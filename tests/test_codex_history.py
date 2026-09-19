@@ -94,6 +94,76 @@ class HistoryTests(unittest.TestCase):
         renamed.write_text(''.join(json.dumps(row) + '\n' for row in changed))
         self.assertFalse(codex_history.resolve(latest)['complete'])
 
+    def test_load_matches_resolve_and_survives_growth(self):
+        old, middle, latest = self.chain()
+        for _ in range(2):  # second pass reads through a warm index when one is enabled
+            self.assertEqual(codex_history.load(latest), codex_history.resolve(latest))
+        with latest.open('a') as stream:
+            stream.write(json.dumps(dict(msg('Appended request'), ordinal=99)) + '\n')
+        self.assertEqual(codex_history.load(latest), codex_history.resolve(latest))
+
+    def test_fresh_continued_page_is_not_single_turn(self):
+        old, middle, latest = self.chain()
+        self.assertEqual(codex.extract_metadata(latest)['user_turn_count'], 2)
+        plain = self.segment('d', [msg('Only request')], sid=PARENT)
+        self.assertEqual(codex.extract_metadata(plain)['user_turn_count'], 1)
+
+    def search_both_ways(self, query):
+        """Search with matching lines and with whole-file reads; both must agree."""
+        # The fast path must really run; a silent fallback would make this comparison vacuous.
+        with patch.object(server, '_warn_search_fallback', side_effect=AssertionError):
+            fast = server.search_sessions(query)
+        with patch.object(server, '_rg_matching_lines', side_effect=RuntimeError('forced')):
+            full = server.search_sessions(query)
+        self.assertEqual(fast, full)
+        return fast
+
+    def test_line_search_matches_whole_file_search(self):
+        old, middle, latest = self.chain()
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        claude = Path(other.name) / 'cccccccc-cccc-cccc-cccc-cccccccccccc.jsonl'
+        claude.write_text(''.join(json.dumps(row) + '\n' for row in [
+            {'type': 'user', 'message': {'content': 'Deploy the widget'}},
+            {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Bash', 'input': {'command': 'grep widget launch.json'}}]}},
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Widget deployed'}]}},
+            {'type': 'user', 'message': {'content': 'Why is {"sessionId": 1} in the log?'}},
+        ]))
+        server._cache.update({str(latest): codex.extract_metadata(latest),
+                              str(claude): {'id': claude.stem, 'jsonl_path': str(claude), 'mtime': 1}})
+        hits = lambda query: [r['id'] for r in self.search_both_ways(query)]
+        self.assertEqual(hits('Goal: build'), [SID])           # inherited prefix
+        self.assertEqual(hits('Latest request'), [SID])        # current page
+        self.assertEqual(hits('Discarded old branch'), [])     # replaced tail
+        self.assertEqual(hits('launch.json'), [])              # tool input only
+        self.assertEqual(hits('widget'), [claude.stem])
+        self.assertEqual(hits('widget deployed'), [claude.stem])
+        self.assertEqual(hits('unread widget'), [])            # AND across sessions
+        self.assertEqual(hits('sessionid'), [claude.stem])     # key-like text in a message
+        self.assertEqual(hits('parentuuid'), [])               # JSON keys only
+        with patch.dict(server._RG_PCRE2, {server._find_ripgrep(): False}):
+            self.assertEqual(hits('sessionid'), [claude.stem])  # literal-match ripgrep
+            self.assertEqual(hits('Goal: build'), [SID])
+        plain = self.segment('d', [msg('Complete note')], sid=PARENT)
+        server._cache[str(plain)] = codex.extract_metadata(plain)
+        with plain.open('a') as stream:                        # unfinished record
+            stream.write(json.dumps(dict(msg('Half written note'), ordinal=9)))
+        self.assertEqual(hits('Half written'), [])
+        self.assertEqual(hits('Complete note'), [PARENT])
+
+    def test_line_search_failure_mid_stream_falls_back(self):
+        old, middle, latest = self.chain()
+        server._cache[str(latest)] = codex.extract_metadata(latest)
+        real = server._rg_matching_lines
+
+        def broken(terms, paths):
+            yield from real(terms, paths)
+            raise RuntimeError('ripgrep exited with status 2')
+        expected = server.search_sessions('request')
+        with patch.object(server, '_rg_matching_lines', broken):
+            self.assertEqual(server.search_sessions('request'), expected)
+        self.assertEqual([r['id'] for r in expected], [SID])
+
     def test_alias_lookup_never_falls_back_without_logical_owner(self):
         old, middle, latest = self.chain()
         rows = [json.loads(line) for line in latest.read_text().splitlines()]
