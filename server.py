@@ -2241,14 +2241,42 @@ def search_sessions(query: str):
     # every file as before.
     prefiltered = _rg_prefilter(terms, [Path(m["jsonl_path"]) for _, m in ordered])
 
+    # A Codex continuation also carries text from ancestor files, so its own file is not
+    # enough evidence to skip it. Prefilter it against every physical file of its
+    # effective history instead; without a complete indexed history, read it in full.
+    inherited = {
+        Path(m["jsonl_path"]) for _, m in ordered
+        if codex_source.is_codex_path(Path(m["jsonl_path"]))
+        and (codex_source._read_session_meta(Path(m["jsonl_path"])) or {}).get("history_base")
+    }
+    chain_hit = {}
+    if inherited and prefiltered is not None:
+        from sources import history_index
+        chains = history_index.segment_paths(inherited, codex_history.resolve) or {}
+        chain_files = sorted({f for files in chains.values() if files for f in files})
+        term_hits = []
+        for term in terms:
+            hits = _rg_prefilter([term], [Path(f) for f in chain_files]) if chain_files else set()
+            if hits is None:
+                term_hits = None
+                break
+            term_hits.append(hits)
+        if term_hits is not None:
+            for path, files in chains.items():
+                if files:
+                    chain_hit[str(path)] = all(any(f in hits for f in files) for hits in term_hits)
+
     results = []
     for key, meta in ordered:
         jsonl_path = Path(meta["jsonl_path"])
         is_devin = devin_source.is_devin_path(jsonl_path)
         if not is_devin and not jsonl_path.exists():
             continue
-        inherited = codex_source.is_codex_path(jsonl_path) and bool((codex_source._read_session_meta(jsonl_path) or {}).get('history_base'))
-        if not inherited and not is_devin and prefiltered is not None and str(jsonl_path) not in prefiltered:
+        passed = chain_hit.get(str(jsonl_path))
+        if passed is None:
+            passed = (is_devin or jsonl_path in inherited or prefiltered is None
+                      or str(jsonl_path) in prefiltered)
+        if not passed:
             # Content does not contain all terms. The only exception is a term matching the
             # session id itself, because rg searches content and does not cover pure id-substring
             # search. Use meta.id plus filename stem as an id fallback, covering Claude

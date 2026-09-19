@@ -89,6 +89,27 @@ def segment_alias(path, meta):
     return None
 
 
+_IDENTITY_CACHE = {}
+
+
+def _identity(candidate):
+    """Return a rollout's (session id, page alias), rereading only a changed file."""
+    from sources import codex
+    try:
+        st = candidate.stat()
+        signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    except OSError:
+        signature = None
+    cached = _IDENTITY_CACHE.get(candidate)
+    if signature is not None and cached and cached[0] == signature:
+        return cached[1]
+    meta = codex._read_session_meta(candidate) or {}
+    value = (meta.get('id'), segment_alias(candidate, meta))
+    if signature is not None:
+        _IDENTITY_CACHE[candidate] = (signature, value)
+    return value
+
+
 def resolve(path):
     """Resolve a linear ancestry iteratively, indexing each candidate snapshot once."""
     from sources import codex
@@ -109,11 +130,10 @@ def resolve(path):
             for root in (codex.CODEX_ROOT, codex.CODEX_ARCHIVED_ROOT):
                 if root.exists():
                     for candidate in root.rglob('rollout-*.jsonl'):
-                        meta = codex._read_session_meta(candidate) or {}
-                        metadata_index.setdefault(meta.get('id'), set()).add(candidate.resolve())
-                        alias = segment_alias(candidate, meta)
+                        owner, alias = _identity(candidate)
+                        metadata_index.setdefault(owner, set()).add(candidate.resolve())
                         if alias:
-                            metadata_index.setdefault((meta.get('id'), alias), set()).add(candidate.resolve())
+                            metadata_index.setdefault((owner, alias), set()).add(candidate.resolve())
         identity = (logical_owner, sid) if logical_owner else sid
         key = (identity, byte)
         if key not in boundary_indexes:
