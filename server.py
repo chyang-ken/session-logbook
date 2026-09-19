@@ -2170,6 +2170,16 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     return snippets
 
 
+def _raw_forms(term):
+    """Return the forms a term can take in raw JSONL bytes.
+
+    JSON escapes quotes, backslashes and control characters inside strings, so a term
+    containing them appears in the file only in escaped form.
+    """
+    escaped = json.dumps(term, ensure_ascii=False)[1:-1]
+    return [term] if escaped == term else [term, escaped]
+
+
 def _rg_prefilter(terms, paths):
     """Use ripgrep to quickly prefilter file paths whose content contains every term.
 
@@ -2195,7 +2205,10 @@ def _rg_prefilter(terms, paths):
     candidate = None  # None = unconstrained so far; intersect per term to implement AND
     for term in terms:
         # -i is case-insensitive and -F is literal matching, aligned with _search_session lower()+substring semantics
-        fixed = [rg_executable, "-l", "-i", "-F", "--no-messages", "--", term]
+        fixed = [rg_executable, "-l", "-i", "-F", "--no-messages"]
+        for form in _raw_forms(term):
+            fixed += ["-e", form]
+        fixed.append("--")
         fixed_bytes = sum(len(os.fsencode(arg)) + 1 for arg in fixed)
         batches = []
         batch = []
@@ -2264,15 +2277,16 @@ def _rg_matching_lines(terms, paths):
     if _rg_has_pcre2(rg_executable):
         # Skip occurrences inside JSON keys ("timestamp", "sessionId", ...), which appear
         # on nearly every line. Inside a JSON string a quote is always escaped, so a term
-        # followed by identifier characters and '":' can only be (part of) a key. Callers
-        # exclude terms containing quotes or backslashes, so \Q...\E quoting is exact.
+        # followed by identifier characters and '":' can only be (part of) a key.
         fixed.append("-P")
         for term in terms:
-            fixed += ["-e", "\\Q" + term + '\\E(?![A-Za-z0-9_]*":)']
+            for form in _raw_forms(term):
+                fixed += ["-e", re.escape(form) + '(?![A-Za-z0-9_]*":)']
     else:
         fixed.append("-F")
         for term in terms:
-            fixed += ["-e", term]
+            for form in _raw_forms(term):
+                fixed += ["-e", form]
     fixed.append("--")
     fixed_bytes = sum(len(os.fsencode(arg)) + 1 for arg in fixed)
     batches, batch, batch_bytes = [], [], fixed_bytes
@@ -2497,10 +2511,9 @@ def search_sessions(query: str):
 
     # Read only the lines that contain a term instead of whole files, whose size is
     # mostly tool output. Every matcher already skips other lines, so results are
-    # unchanged. Terms that JSON escapes (quotes, backslashes, control characters) can
-    # hide from a raw-line match, so those queries read whole files as before.
+    # unchanged. Terms that JSON escapes are also matched in their escaped raw form.
     found = None
-    line_mode = prefiltered is not None and not any(c in t for t in terms for c in '"\\\n\r\t')
+    line_mode = prefiltered is not None
     if line_mode:
         entries, line_chains = [], {}
         for meta, jsonl_path in candidates:

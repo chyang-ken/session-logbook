@@ -51,3 +51,15 @@ assert the fast path really ran.
 ## Commit
 
 The commit that introduces this record.
+
+## Follow-up: escaped terms and the search contract
+
+Building `tests/test_search_contract.py` exposed a pre-existing miss: a term containing
+a quote or backslash never matched, because files store it JSON-escaped and the ripgrep
+prefilter searched the raw term only. Skipping the prefilter for such queries was tried
+and rejected: it read every file (82 s on real data versus 1.4 s). Search now matches
+both the raw and the JSON-escaped form of each term (`_raw_forms`), which keeps these
+queries on the fast path (4 s). A query equal to a JSON key in quotes, such as
+`"type"`, still matches every line and stays slow (about 80 s before and after).
+
+`scripts/search_compare.py` is the reusable real-data comparison used above.

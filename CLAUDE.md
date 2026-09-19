@@ -208,6 +208,23 @@ python3 scripts/check_no_cjk.py
 `tests/` uses Python `unittest` with synthetic fixtures. All tests must pass before merge;
 CI runs the same command on every push and PR.
 
+**Search is the primary capability; changing it has two extra gates.**
+
+- `tests/test_search_contract.py` is the behavioural contract: one synthetic corpus with
+  every source, a table of queries and expected sessions, and a check that the fast
+  (ripgrep line-streaming) path and the whole-file path agree and that the fast path
+  really ran. New search behaviour gets a row there.
+- For any change meant to keep results identical, also run
+  `python3 scripts/search_compare.py --baseline origin/staging --queries <file>` against
+  the maintainer's real history before merging. It isolates state, cache and index, and
+  writes results to `_private/` because they contain real session data.
+- A fallback that silently takes over hides fast-path bugs, because both paths return
+  correct results. Tests must assert which path ran, and a deliberate break of each
+  safeguard should fail them.
+- Source adapters that bind a data root as a default argument (for example
+  `antigravity.scan_sessions`) ignore patched module constants; tests must pass the
+  root explicitly, or they read the developer's real history.
+
 CI's floor is Python 3.9 and its runners have no git identity. Before pushing, run the suite once
 under a 3.9 interpreter too (on macOS, `/usr/bin/python3` is 3.9), and never let a test rely on
 the developer's global git config — the `Z` timezone suffix and `git tag -a` without an identity
