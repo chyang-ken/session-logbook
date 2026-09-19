@@ -133,7 +133,7 @@ class TestRipgrepDiscovery(unittest.TestCase):
         for call in run.call_args_list:
             cmd = call.args[0]
             self.assertLessEqual(sum(len(os.fsencode(arg)) + 1 for arg in cmd), 160)
-            passed_paths.extend(cmd[7:])
+            passed_paths.extend(cmd[cmd.index("--") + 1:])
         self.assertEqual(passed_paths, [str(path) for path in paths])
 
     def test_runtime_failure_warns_and_falls_back(self):
