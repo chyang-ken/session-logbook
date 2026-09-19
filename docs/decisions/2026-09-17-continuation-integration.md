@@ -221,3 +221,34 @@ the task identity. An unqualified cursor on any history-bearing segment replays
 conservatively rather than skipping potentially unread prior pages. Synthetic tests
 cover the alias, preserved logical identity, rejected metadata mismatch and cursor
 migration; the real affected chain is re-read privately before the follow-up deploy.
+
+## 2026-09-19: one reader entry point; other clients surveyed
+
+Readers now obtain Codex history only through `codex_history.load()`, which serves the
+index's verified coordinates and falls back to `resolve()`;
+`tests/test_history_entry_point.py` rejects direct `resolve()` calls. Search prefilters
+continuations against every file of their effective history. A freshly continued page
+with one own user message is no longer reported as single-turn.
+
+A survey of the maintainer's local history (not committed) checked whether other
+clients split sessions across files:
+
+- Codex: yes since 0.149 (first seen 2026-08-23), explicit pointers (`history_base`),
+  both same-session pages and forks; the number per client version is growing.
+- Claude Code: branches, not length-driven splits. A branch file copies the earlier
+  records in full (same record uuids, new session id) and records no pointer to its
+  origin; about 4% of sessions, since at least April 2026. Evidence it is not
+  length-driven: one origin can have up to four branches from the same point, and
+  origin sizes vary from under 0.5 MB to over 5 MB. Each file is complete on its own,
+  so nothing is missing; the only effect is that text in the copied part is found in
+  the origin and in every branch. Decision (maintainer): leave as is.
+- Kimi, Pi, Antigravity, Devin: no cross-session copies or pointers found (shared text
+  was the same prompt sent to several sessions).
+
+If another client starts splitting sessions, give its source module a single
+entry point like `load()` and route its readers through it; do not generalize the
+Codex pointer format, because Claude Code already shows a different (copying) design.
+
+Open items: a Codex continuation still re-catalogs the Codex tree (about 0.09 s) per
+index lookup; the earlier observation of a warm loop slowing from 3.2 s to 6.9 s did
+not reproduce over later repeated runs and remains unexplained.
