@@ -228,7 +228,10 @@ def plan(path, resolver):
 
 
 def segment_paths(paths, resolver):
-    """Map each target to the physical files of its effective history, or None.
+    """Map each target to [(physical file, last effective line)] in history order, or None.
+
+    The last line bounds an inherited prefix; later lines of that file belong to
+    another branch or page.
 
     Planning shares one catalogue across targets, so warm lookups avoid rescanning the
     Codex tree per target. None means the index is unavailable or a history is
@@ -244,7 +247,7 @@ def segment_paths(paths, resolver):
         result = {}
         for path in paths:
             value = _plan(connection, Path(path).resolve(), resolver, catalogue)
-            result[path] = ([s['path'] for s in value['segments']]
+            result[path] = ([(s['path'], s['coordinates'][-1][0]) for s in value['segments']]
                             if value['complete'] and value['segments'] else None)
         return result
     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, IndexError):

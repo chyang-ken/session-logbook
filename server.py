@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Session Logbook - a minimal local retrieval layer for AI-agent sessions."""
 import argparse
+import contextlib
 import json
 import hashlib
 import sqlite3
@@ -1983,14 +1984,22 @@ def _find_ripgrep():
     return None
 
 
-def _search_codex_history(path, terms, metadata=None):
+def _search_codex_history(path, terms, metadata=None, messages=None):
+    """Search a Codex session's effective history.
+
+    messages, when given, replaces reading the history: an iterable of
+    (source_path, line, role, text) in history order that must include every message
+    whose text contains a term (search_sessions supplies only such messages).
+    """
     from sources import codex_history
     meta = metadata or codex_source.extract_metadata(path) or {}
     sid = meta.get('id') or ''
     title = str(_state.get(sid, {}).get('title_override') or meta.get('custom_title') or '')
     found = {term for term in terms if term in title.lower()}
     snippets = [{'text': 'Session title: ' + title, 'role': '', 'term': ''}] if found else []
-    for source_path, line, role, text in codex_history.iter_messages(path):
+    if messages is None:
+        messages = codex_history.iter_messages(path)
+    for source_path, line, role, text in messages:
         hits = [term for term in terms if term in text.lower()]
         found.update(hits)
         if hits and len(snippets) < SEARCH_MAX_SNIPPETS:
@@ -2005,11 +2014,15 @@ def _search_codex_history(path, terms, metadata=None):
     return snippets if len(found) == len(terms) else []
 
 
-def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = None):
+def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = None, lines=None):
     """Full-text search one session by scanning user/assistant messages and returning snippets.
 
     terms is a lowercase search-term list with AND semantics: every term must appear in the
     same session to count as a hit. Return [] for no match.
+
+    lines, when given, replaces reading a Claude, Antigravity or Kimi file: the raw lines
+    that contain at least one term, in file order. Every other line is skipped by the
+    line prefilter below anyway, so the result is the same. Other sources ignore it.
     """
     if codex_source.is_codex_path(jsonl_path):
         return _search_codex_history(jsonl_path, terms, session_meta)
@@ -2082,9 +2095,12 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     prefilter_safe = not any(c in t for t in terms for c in '"\\\n\r\t')
 
     try:
-        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+        with contextlib.ExitStack() as stack:
+            f = lines if lines is not None else stack.enter_context(
+                open(jsonl_path, "r", encoding="utf-8", errors="replace"))
             for line in f:
-                if prefilter_safe:
+                # Supplied lines were already selected by ripgrep for containing a term.
+                if prefilter_safe and lines is None:
                     line_lower = line.lower()
                     if not any(term in line_lower for term in terms):
                         continue
@@ -2219,6 +2235,193 @@ def _rg_prefilter(terms, paths):
     return candidate or set()
 
 
+_RG_PCRE2 = {}
+
+
+def _rg_has_pcre2(rg_executable):
+    if rg_executable not in _RG_PCRE2:
+        try:
+            r = subprocess.run([rg_executable, "--pcre2-version"], capture_output=True, timeout=5)
+            _RG_PCRE2[rg_executable] = r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            _RG_PCRE2[rg_executable] = False
+    return _RG_PCRE2[rg_executable]
+
+
+def _rg_matching_lines(terms, paths):
+    """Yield (path, line_number, byte_offset, raw_line) for lines containing any term.
+
+    Lines of one file arrive together and in file order; ripgrep prints each file's
+    matches as one block. Matching is case-insensitive and literal, like the file-level
+    prefilter. Raises RuntimeError when ripgrep is unavailable or fails, so the caller
+    can fall back to reading whole files.
+    """
+    rg_executable = _find_ripgrep()
+    if not rg_executable:
+        raise RuntimeError("ripgrep executable not found")
+    fixed = [rg_executable, "--no-messages", "-a", "-i", "-n", "-b", "-H", "--null",
+             "--no-heading", "--color", "never"]
+    if _rg_has_pcre2(rg_executable):
+        # Skip occurrences inside JSON keys ("timestamp", "sessionId", ...), which appear
+        # on nearly every line. Inside a JSON string a quote is always escaped, so a term
+        # followed by identifier characters and '":' can only be (part of) a key. Callers
+        # exclude terms containing quotes or backslashes, so \Q...\E quoting is exact.
+        fixed.append("-P")
+        for term in terms:
+            fixed += ["-e", "\\Q" + term + '\\E(?![A-Za-z0-9_]*":)']
+    else:
+        fixed.append("-F")
+        for term in terms:
+            fixed += ["-e", term]
+    fixed.append("--")
+    fixed_bytes = sum(len(os.fsencode(arg)) + 1 for arg in fixed)
+    batches, batch, batch_bytes = [], [], fixed_bytes
+    for path_str in paths:
+        arg_bytes = len(os.fsencode(path_str)) + 1
+        if batch and batch_bytes + arg_bytes > RIPGREP_ARG_CHUNK_BYTES:
+            batches.append(batch)
+            batch, batch_bytes = [], fixed_bytes
+        batch.append(path_str)
+        batch_bytes += arg_bytes
+    if batch:
+        batches.append(batch)
+    for path_batch in batches:
+        try:
+            proc = subprocess.Popen([*fixed, *path_batch], stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL)
+        except OSError as e:
+            raise RuntimeError(f"ripgrep could not start ({type(e).__name__})")
+        try:
+            for raw in proc.stdout:
+                path, sep, rest = raw.partition(b"\0")
+                number, _, rest = rest.partition(b":")
+                offset, _, content = rest.partition(b":")
+                if not sep or not number.isdigit() or not offset.isdigit():
+                    raise RuntimeError("unexpected ripgrep output")
+                if content.endswith(b"\n"):
+                    content = content[:-1]
+                yield os.fsdecode(path), int(number), int(offset), content
+        finally:
+            proc.stdout.close()
+            code = proc.wait()
+        # rg exit codes: 0=matches, 1=no matches (both normal), >=2=real error
+        if code not in (0, 1):
+            raise RuntimeError(f"ripgrep exited with status {code}")
+
+
+def _codex_message(raw):
+    """Return (role, text) when a raw Codex record is a user/assistant message, else None.
+
+    Mirrors codex_history.read_segment's record validation and iter_messages' selection.
+    """
+    try:
+        row = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(row, dict) or row.get("type") != "response_item":
+        return None
+    payload = row.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "message":
+        return None
+    role = payload.get("role")
+    if role not in {"user", "assistant"}:
+        return None
+    text = codex_source._extract_text_from_message_content(payload.get("content"))
+    return (role, text) if text else None
+
+
+def _search_by_matching_lines(terms, entries, chains):
+    """Search entries using only lines that contain a term; return {path: snippets}.
+
+    entries: [(meta, jsonl_path, kind)] with kind "generic", "codex" or "full".
+    chains: {str(codex path): [(resolved file, last line or None)]} in history order.
+    Every candidate file is streamed: a session may match one term by title or id and
+    another in content. A file ripgrep reports in two separate blocks is read in full.
+    """
+    by_path = {str(path): (meta, path) for meta, path, kind in entries if kind == "generic"}
+    codex_files = {f for chain in chains.values() for f, _ in chain}
+    stream_files = sorted(set(by_path) | codex_files)
+    results, codex_hits, finished, reread = {}, {}, set(), set()
+    sizes = {}
+
+    def lines_of(first, rest):
+        yield first
+        yield from rest
+
+    records = _rg_matching_lines(terms, stream_files)
+    failure = []
+
+    def advance():
+        # A matcher below swallows exceptions from its line source, so a ripgrep
+        # failure must be recorded here and re-raised after the stream ends.
+        try:
+            return next(records, None)
+        except RuntimeError as e:
+            failure.append(e)
+            return None
+
+    pending = advance()
+    while pending is not None:
+        path = pending[0]
+
+        def same_file():
+            nonlocal pending
+            while pending is not None and pending[0] == path:
+                yield pending
+                pending = advance()
+
+        if path in finished:
+            reread.add(path)
+            for _ in same_file():
+                pass
+            continue
+        finished.add(path)
+        if path in by_path:
+            meta, jsonl_path = by_path[path]
+            rows = (raw.decode("utf-8", "replace") for _, _, _, raw in same_file())
+            results[path] = _search_session(jsonl_path, terms, meta, lines=rows)
+            for _ in same_file():  # drain lines left after an early stop
+                pass
+        else:
+            if path not in sizes:
+                try:
+                    sizes[path] = os.path.getsize(path)
+                except OSError:
+                    sizes[path] = 0
+            for _, number, offset, raw in same_file():
+                # A final line without a newline is still being written; the history
+                # reader skips it, so search does too.
+                if offset + len(raw) + 1 > sizes[path]:
+                    continue
+                message = _codex_message(raw)
+                if message and any(term in message[1].lower() for term in terms):
+                    codex_hits.setdefault(path, []).append((number, *message))
+
+    if failure:
+        raise failure[0]
+    for path in reread:
+        if path in by_path:
+            meta, jsonl_path = by_path[path]
+            results[path] = _search_session(jsonl_path, terms, meta)
+    for meta, jsonl_path, kind in entries:
+        key = str(jsonl_path)
+        if kind == "generic" and key not in results:
+            results[key] = _search_session(jsonl_path, terms, meta, lines=[])
+        elif kind == "codex":
+            chain = chains[key]
+            if any(f in reread for f, _ in chain):
+                results[key] = _search_session(jsonl_path, terms, meta)
+                continue
+            messages = [(f, number, role, text)
+                        for f, last in chain
+                        for number, role, text in codex_hits.get(f, ())
+                        if last is None or number <= last]
+            results[key] = _search_codex_history(jsonl_path, terms, meta, messages=messages)
+        elif kind == "full":
+            results[key] = _search_session(jsonl_path, terms, meta)
+    return results
+
+
 def search_sessions(query: str):
     """Full-text search all sessions. Return [{id, snippets}, ...] sorted by existing cache mtime descending."""
     terms = [t.lower() for t in query.split() if t]
@@ -2249,11 +2452,12 @@ def search_sessions(query: str):
         if codex_source.is_codex_path(Path(m["jsonl_path"]))
         and (codex_source._read_session_meta(Path(m["jsonl_path"])) or {}).get("history_base")
     }
+    chains = {}
     chain_hit = {}
     if inherited and prefiltered is not None:
         from sources import history_index
         chains = history_index.segment_paths(inherited, codex_history.resolve) or {}
-        chain_files = sorted({f for files in chains.values() if files for f in files})
+        chain_files = sorted({f for files in chains.values() if files for f, _ in files})
         term_hits = []
         for term in terms:
             hits = _rg_prefilter([term], [Path(f) for f in chain_files]) if chain_files else set()
@@ -2264,9 +2468,9 @@ def search_sessions(query: str):
         if term_hits is not None:
             for path, files in chains.items():
                 if files:
-                    chain_hit[str(path)] = all(any(f in hits for f in files) for hits in term_hits)
+                    chain_hit[str(path)] = all(any(f in hits for f, _ in files) for hits in term_hits)
 
-    results = []
+    candidates = []
     for key, meta in ordered:
         jsonl_path = Path(meta["jsonl_path"])
         is_devin = devin_source.is_devin_path(jsonl_path)
@@ -2289,7 +2493,44 @@ def search_sessions(query: str):
             ).lower()
             if not any(t in id_blob or t in title_blob for t in terms):
                 continue
-        snippets = _search_session(jsonl_path, terms, meta)
+        candidates.append((meta, jsonl_path))
+
+    # Read only the lines that contain a term instead of whole files, whose size is
+    # mostly tool output. Every matcher already skips other lines, so results are
+    # unchanged. Terms that JSON escapes (quotes, backslashes, control characters) can
+    # hide from a raw-line match, so those queries read whole files as before.
+    found = None
+    line_mode = prefiltered is not None and not any(c in t for t in terms for c in '"\\\n\r\t')
+    if line_mode:
+        entries, line_chains = [], {}
+        for meta, jsonl_path in candidates:
+            key = str(jsonl_path)
+            if devin_source.is_devin_path(jsonl_path) or pi_source.is_pi_path(jsonl_path):
+                entries.append((meta, jsonl_path, "full"))
+            elif codex_source.is_codex_path(jsonl_path):
+                if jsonl_path in inherited:
+                    chain = chains.get(jsonl_path)
+                    if not chain:
+                        entries.append((meta, jsonl_path, "full"))
+                        continue
+                    line_chains[key] = [(f, last) for f, last in chain[:-1]] + [(chain[-1][0], None)]
+                else:
+                    line_chains[key] = [(str(jsonl_path.resolve()), None)]
+                entries.append((meta, jsonl_path, "codex"))
+            else:
+                entries.append((meta, jsonl_path, "generic"))
+        try:
+            found = _search_by_matching_lines(terms, entries, line_chains)
+        except RuntimeError as e:
+            _warn_search_fallback(f"line search unavailable ({e})")
+            found = None
+
+    results = []
+    for meta, jsonl_path in candidates:
+        if found is not None:
+            snippets = found.get(str(jsonl_path), [])
+        else:
+            snippets = _search_session(jsonl_path, terms, meta)
         if snippets:
             results.append({"id": meta["id"], "snippets": snippets})
 
