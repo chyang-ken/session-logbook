@@ -94,6 +94,20 @@ class HistoryTests(unittest.TestCase):
         renamed.write_text(''.join(json.dumps(row) + '\n' for row in changed))
         self.assertFalse(codex_history.resolve(latest)['complete'])
 
+    def test_load_matches_resolve_and_survives_growth(self):
+        old, middle, latest = self.chain()
+        for _ in range(2):  # second pass reads through a warm index when one is enabled
+            self.assertEqual(codex_history.load(latest), codex_history.resolve(latest))
+        with latest.open('a') as stream:
+            stream.write(json.dumps(dict(msg('Appended request'), ordinal=99)) + '\n')
+        self.assertEqual(codex_history.load(latest), codex_history.resolve(latest))
+
+    def test_fresh_continued_page_is_not_single_turn(self):
+        old, middle, latest = self.chain()
+        self.assertEqual(codex.extract_metadata(latest)['user_turn_count'], 2)
+        plain = self.segment('d', [msg('Only request')], sid=PARENT)
+        self.assertEqual(codex.extract_metadata(plain)['user_turn_count'], 1)
+
     def test_alias_lookup_never_falls_back_without_logical_owner(self):
         old, middle, latest = self.chain()
         rows = [json.loads(line) for line in latest.read_text().splitlines()]

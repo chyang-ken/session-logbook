@@ -220,6 +220,33 @@ def resolve(path):
     return {'records': records, 'segments': segments, 'issues': issues, 'complete': not issues}
 
 
+def load(path):
+    """Return a session's effective history; the single entry point for readers.
+
+    Same shape as resolve(). When the history index is available, verified coordinates
+    replace re-deriving the ancestry and only the needed byte ranges are read. Any index
+    miss, source change during the read, or index failure falls back to resolve().
+    Readers must call this rather than resolve() (enforced by tests), so the physical
+    layout of a session never leaks into features.
+    """
+    from sources import history_index
+    if history_index.index_path() is None:
+        return resolve(path)
+    plan = history_index.plan(path, resolve)
+    records, segments = [], []
+    try:
+        for segment in plan['segments']:
+            rows = history_index.window(segment)
+            records.extend(rows)
+            if rows:
+                segments.append({'path': segment['path'], 'session_id': segment['session_id'], 'records': rows})
+    except (OSError, ValueError):
+        return resolve(path)
+    if not segments and not plan['complete']:
+        return resolve(path)
+    return {'records': records, 'segments': segments, 'issues': plan['issues'], 'complete': plan['complete']}
+
+
 def fingerprint(path):
     from sources import history_index
     if history_index.index_path() is not None:
@@ -253,7 +280,7 @@ def cursor_position(history, source, line):
 
 def references(path, history=None):
     """Describe physical sources separately from the selected task's stable ID."""
-    history = resolve(path) if history is None else history
+    history = load(path) if history is None else history
     current = str(Path(path).resolve())
     from sources import codex
     sid = (codex._read_session_meta(path) or {}).get('id')
@@ -269,7 +296,7 @@ def references(path, history=None):
 def iter_messages(path):
     """Yield effective message text and its original physical evidence reference."""
     from sources import codex
-    history = resolve(path)
+    history = load(path)
     for entry in history['records']:
         record = entry['record']
         payload = record.get('payload') or {}

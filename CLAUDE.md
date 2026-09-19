@@ -175,6 +175,7 @@ State lives at `~/.session-logbook/state.json`, with rotating backups under
 | `server.py` `load_scan_cache` / `save_scan_cache` / `CACHE_SCHEMA_VERSION` | persistent warm scan cache (`~/.session-logbook/scan-cache.json`): load on start + incremental scan. Bump the schema version on any meta-shape change, or stale caches break |
 | `server.py` `search_sessions` / `_rg_prefilter` / `_search_session` | full-text search (ripgrep prefilter → per-session AND match; pure-Python fallback) |
 | `server.py` `list_recent_files` / `find_files_by_name` | Files panel backends |
+| `sources/codex_history.py` `load` | the single entry point for a Codex session's effective history (continued pages and forks stitched across rollout files, served from the history index when available). Readers must call `load`, never `resolve`; `tests/test_history_entry_point.py` enforces this. If another client starts splitting sessions across files, give its source module the same kind of single entry point and route its readers through it, rather than generalizing Codex's format |
 | `sources/codex.py` `is_codex_path` / `CODEX_ARCHIVED_ROOT` | Codex (`~/.codex`) data source; `is_codex_path` is the centralized dual-root predicate (active `sessions` + `archived_sessions`) |
 | `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source |
 | `sources/pi.py` | Pi JSONL selected-branch reader, metadata, search, and exports; no source writes. CLI follow returns the full branch; raw evidence retains physical line numbers. |

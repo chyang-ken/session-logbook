@@ -41,7 +41,7 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 8
+CACHE_SCHEMA_VERSION = 9
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
