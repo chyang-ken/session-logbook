@@ -19,7 +19,7 @@ from sources import antigravity as ag_source
 from sources import anchored_transcript
 from sources.claude_text import strip_leading_reminders
 from sources.activity import activity_fields, activity_time
-from sources import claude_history
+from sources import claude_history, claude_desktop
 from sources import codex as codex_source
 from sources import devin as devin_source
 
@@ -42,7 +42,7 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 8
+CACHE_SCHEMA_VERSION = 9
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -787,6 +787,18 @@ def extract_metadata(jsonl_path: Path):
     tail_text = tail_bytes.decode("utf-8", errors="replace")
     lines = [l for l in tail_text.split("\n") if l.strip()]
 
+    # A persisted CLI branch selection also governs previews and turn counts.
+    selected_branch = False
+    if '"last-prompt"' in tail_text:
+        selected_branch = claude_history.rewind_status(jsonl_path)['status'] == 'selected'
+        if selected_branch:
+            rows = [row for _, row in claude_history.records(jsonl_path)]
+            lines = [json.dumps(row) for row in rows]
+            first_user_msg = next(({'role': 'user',
+                'text': _truncate(_user_text(row.get('message', {}).get('content')), SNIPPET_MAX),
+                'ts': row.get('timestamp')} for row in rows
+                if row.get('type') == 'user' and _user_text(row.get('message', {}).get('content'))), None)
+
     # Count real user turns to detect claude -p one-shot sessions, which have only the head
     # user message. When tail covers the whole file (size <= TAIL_BUFFER), the count is exact;
     # otherwise the file is large enough to be multi-turn, so clamp to 2 to avoid one-shot
@@ -800,7 +812,7 @@ def extract_metadata(jsonl_path: Path):
         if _selection_user_turn(d):
             user_turn_count += 1
     single_turn = user_turn_count == 1
-    if size > TAIL_BUFFER:
+    if size > TAIL_BUFFER and not selected_branch:
         if user_turn_count < 2:
             observed = 0
             try:
@@ -1178,7 +1190,7 @@ def file_fingerprint(path) -> str:
     return version
 
 
-def extract_conversation(jsonl_path):
+def extract_conversation(jsonl_path, include_rewound=False):
     """Read the full JSONL and extract conversation content, filtering metadata/thinking/image and pairing tool_use with result."""
     turns = []
     pending_tools = {}  # tool_use_id -> {name, summary, ts}
@@ -1193,7 +1205,7 @@ def extract_conversation(jsonl_path):
     custom_title = None  # title set by /title; take the last one in the file
 
     total_lines = claude_history.summary(jsonl_path)['physical_lines']
-    for _line_number, d in claude_history.records(jsonl_path):
+    for _line_number, d in claude_history.records(jsonl_path, include_rewound=include_rewound):
         t = d.get('type')
         ts = d.get('timestamp', '')
 
@@ -1397,6 +1409,7 @@ def extract_conversation(jsonl_path):
         'turns': turns,
         'custom_title': custom_title,
         'source': 'claude',
+        'include_rewound': include_rewound,
         'jsonl_path': str(jsonl_path),
         **claude_history.describe(jsonl_path),
     }
@@ -1950,7 +1963,7 @@ def enriched_sessions():
         item["display_title"] = item["title_override"] or item.get("custom_title", "")
         item["human_confirmed"] = bool(st.get("human_confirmed"))
         result.append(item)
-    return result
+    return claude_desktop.annotate_sessions(result)
 
 
 # ---------- Full-text search ----------
@@ -2827,6 +2840,13 @@ class Handler(BaseHTTPRequestHandler):
                     fingerprint = conv['fingerprint']
                 else:
                     fingerprint = file_fingerprint(jsonl)
+                include_rewound = (qs.get('include_rewound') or [''])[0] == '1'
+                desktop_meta = {}
+                if Path(PROJECTS_DIR).resolve() in Path(jsonl).resolve().parents:
+                    desktop_meta = claude_desktop.metadata_for_session(sid, scan_sessions())
+                    fingerprint += ':' + hashlib.sha256(json.dumps(
+                        desktop_meta, sort_keys=True).encode()).hexdigest()
+                    fingerprint += ':all' if include_rewound else ':current'
                 seen = (qs.get('fingerprint') or [''])[0]
                 if seen and seen == fingerprint:
                     return self._send_json(200, {'id': sid, 'unchanged': True, 'fingerprint': fingerprint})
@@ -2841,7 +2861,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif pi_source.is_pi_path(jsonl):
                     conv = pi_source.extract_conversation(jsonl)
                 else:
-                    conv = extract_conversation(jsonl)
+                    conv = extract_conversation(jsonl, include_rewound=include_rewound)
+                    conv.update(desktop_meta)
                 st = _state.get(sid, {})
                 conv['title_override'] = st.get('title_override', '')
                 conv['display_title'] = conv['title_override'] or conv.get('custom_title', '')

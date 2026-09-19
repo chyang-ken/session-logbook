@@ -102,3 +102,38 @@ continuity as a product capability, its native desktop-to-CLI identity mapping a
 rewind semantics would need explicit support; the current shared-history reader
 alone does not provide that capability. No long-context reproduction or paid model
 call is needed to explain the observed sample now that its causal log is available.
+
+## Approved product behavior: current conversation first
+
+The user approved showing one current conversation by default, retaining earlier
+records behind an explicit reader entry, and keeping independently forked sessions
+visible. This implementation remains on the feature branch for personal acceptance;
+it does not replace the resident service or publish a release.
+
+Desktop relationships now come from read-only native session descriptors. An explicit
+`rewindEdges` chain must end at `cliSessionId`, with all source files available in the
+same project. The UI folds proven ancestors and provides links back to the current
+conversation. `priorCliSessionIds`, copied content, names, and modification times do
+not justify folding. Conflicting ownership, including an ancestor still selected by
+another desktop conversation, leaves the entire chain visible. Descriptors without
+explicit edges remain unchanged; absence of evidence is not evidence of no rewind.
+
+CLI history uses a different rule: an explicit `last-prompt.leafUuid` plus a complete,
+consistent parent graph can identify the saved selected ancestry inside one file.
+Native samples confirmed a leaf after the assistant reply, not merely the last user
+prompt. Local inspection did not find a `rewound` marker. Message reparenting also
+creates branches, so the UI calls these earlier saved records without attributing a
+user action. Missing links, compaction, uncertain roots, partial writes, and stale
+pointers preserve all records. This conservative coverage is intentional.
+
+The default reader and exports use verified selected ancestry. The historical reader
+opts into all saved records, labels that view explicitly, and keeps it separate from
+the current conversation. Original physical anchors and source files remain intact.
+Claude follow returns a full selected-branch snapshot when selection excludes records;
+consumers must reconcile removed entries rather than append blindly. Desktop grouping
+is presentation metadata, not permission to migrate an Agent's supervision target.
+
+Synthetic tests cover native mapping conflicts, independent forks, unavailable files,
+CLI graph uncertainty, current versus historical rendering, previews, exports, and
+follow reconciliation. The local acceptance preview isolates its state and caches
+from the resident dashboard and uses existing source records read-only.

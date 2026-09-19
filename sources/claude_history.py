@@ -14,7 +14,7 @@ import sqlite3
 from sources import history_index
 from sources.claude_text import anchored_user_text
 
-SCHEMA = 3
+SCHEMA = 4
 _MEMORY = {}
 
 
@@ -109,6 +109,8 @@ def summary(path):
             value['rows'].append({'line': line, 'offset': offset, 'end': stream.tell(),
                                   'uuid': uuid, 'hash': _payload(row),
                                   'parent': row.get('parentUuid'), 'type': row.get('type'),
+                                  'leaf': row.get('leafUuid'),
+                                  'sidechain': row.get('isSidechain', False),
                                   'user_turn': bool(anchored_user_text(row))})
             if row.get('subtype') == 'compact_boundary':
                 compact = row.get('compactMetadata') or {}
@@ -179,6 +181,7 @@ def describe(path):
             'unshared_records': sum(bool(r['uuid']) and r['uuid'] not in shared for r in candidate['rows'])})
     return {'source_files': sources, 'history_semantics': 'selected_file_only',
             'continuation_status': 'unconfirmed', 'compactions': current['compactions'],
+            'rewind': _selection(current)[1],
             'history_issues': issues, 'history_fingerprint': _hash(sources + [current['signature']]),
             'history_note': 'Shared records prove overlap, not continuation versus fork. '
                             'Related files are evidence only; no automatic target migration.'}
@@ -222,12 +225,100 @@ def remap_cursor(path, source, line):
     return mapped
 
 
-def records(path, first=0):
-    """Read only the indexed suffix, retaining physical anchors and retrying partial rows."""
+def _selection(value):
+    """Select a fully evidenced parent chain; uncertainty always preserves records.
+
+    A last-prompt leaf is an explicit client pointer, unlike physical recency.
+    Compaction can rewrite parentage, so it requires a separate format adapter.
+    This selects saved history; it does not infer who initiated a rewind.
+    """
+    info = {'status': 'unchanged', 'evidence': None, 'hidden_record_count': 0,
+            'hidden_message_count': 0, 'active_leaf_uuid': None, 'reason': None}
+
+    def uncertain(reason):
+        info.update(status='unverified', reason=reason)
+        return None, info
+
+    pointers = [row for row in value['rows'] if row['type'] == 'last-prompt']
+    if not pointers:
+        return uncertain('missing_leaf_pointer')
+    if value['compactions']:
+        return uncertain('compacted_history')
+    if value['issues'] or value['physical_lines'] != value['total_lines']:
+        return uncertain('incomplete_or_invalid_records')
+    if len(value['session_ids']) != 1:
+        return uncertain('ambiguous_session_identity')
+    nodes = {}
+    for row in value['rows']:
+        if row['type'] in {'user', 'assistant'} and not row['uuid']:
+            return uncertain('message_without_uuid')
+        if not row['uuid']:
+            continue
+        if row['sidechain']:
+            return uncertain('embedded_sidechain')
+        existing = nodes.get(row['uuid'])
+        if existing and (existing['hash'], existing['parent']) != (row['hash'], row['parent']):
+            return uncertain('conflicting_record_uuid')
+        nodes.setdefault(row['uuid'], row)
+    pointer = pointers[-1]
+    leaf = pointer['leaf']
+    if not isinstance(leaf, str) or leaf not in nodes:
+        return uncertain('missing_leaf_record')
+    roots = [uuid for uuid, row in nodes.items() if row['parent'] is None]
+    if len(roots) != 1:
+        return uncertain('ambiguous_history_roots')
+    # Validate every node before hiding anything, including abandoned branches.
+    # Missing links or cycles may indicate incomplete copies rather than rewind.
+    valid = set()
+    for uuid in nodes:
+        visiting = set()
+        current = uuid
+        while current is not None and current not in valid:
+            if current not in nodes:
+                return uncertain('missing_parent_record')
+            if current in visiting:
+                return uncertain('cyclic_parent_chain')
+            visiting.add(current)
+            current = nodes[current]['parent']
+        valid.update(visiting)
+    # A running turn can append after its last saved pointer. Accept only one
+    # contiguous extension of that exact leaf, never "the newest row wins".
+    for row in value['rows']:
+        if row['line'] <= pointer['line'] or not row['uuid']:
+            continue
+        if nodes[row['uuid']]['line'] != row['line']:
+            continue
+        if row['parent'] != leaf:
+            return uncertain('ambiguous_records_after_pointer')
+        leaf = row['uuid']
+    selected = set()
+    current = leaf
+    while current is not None:
+        selected.add(current)
+        current = nodes[current]['parent']
+    hidden = [row for uuid, row in nodes.items() if uuid not in selected]
+    if any(row['parent'] == leaf for row in hidden):
+        return uncertain('leaf_has_unselected_descendants')
+    info.update(evidence='last_prompt_leaf', active_leaf_uuid=leaf,
+                hidden_record_count=len(hidden),
+                hidden_message_count=sum(row['type'] in {'user', 'assistant'} for row in hidden))
+    if hidden:
+        info['status'] = 'selected'
+    return selected, info
+
+
+def rewind_status(path):
+    """Return selected-chain facts without scanning sibling files."""
+    return _selection(summary(path))[1]
+
+
+def records(path, first=0, include_rewound=False):
+    """Read selected history with original physical anchors; opt in to all branches."""
     path = Path(path).resolve()
     value = summary(path)
     if int(first) > value['physical_lines'] or int(first) < 0:
         raise ValueError('cursor is outside current source; reconcile context')
+    selected = None if include_rewound else _selection(value)[0]
     seen = set()
     user_turn = 0
     with path.open('rb') as stream:
@@ -237,6 +328,8 @@ def records(path, first=0):
             if key:
                 seen.add(key)
             if duplicate:
+                continue
+            if selected is not None and row['uuid'] and row['uuid'] not in selected:
                 continue
             user_turn += int(row['user_turn'])
             if row['line'] < int(first):

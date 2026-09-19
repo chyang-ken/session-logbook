@@ -656,6 +656,11 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         after_line = claude_history.remap_cursor(path, cursor_source_path, after_line)
     elif cursor_source_path and Path(cursor_source_path).resolve() != path.resolve():
         raise ValueError("cursor source changed without supported continuation evidence")
+    claude_selection = claude_history.rewind_status(path) if item['source'] == 'claude' else {}
+    full_claude_branch = (item['source'] == 'claude' and
+                          claude_selection.get('reason') != 'missing_leaf_pointer')
+    if full_claude_branch:
+        after_line = 0
     total_lines = (claude_history.summary(path)['physical_lines'] if item["source"] == "claude"
                    else _line_count(path))
     if after_line > total_lines:
@@ -681,6 +686,10 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         *(['# HISTORY_SWITCH: caller selected this target; shared UUID maps the cursor, not supervision authority.',
            '# Reconcile any prior branch-only context; related files remain available separately.']
           if changed and item['source'] == 'claude' else []),
+        *(['# FOLLOW_MODE: full selected branch; reconcile removed entries after rewind'
+           if claude_selection.get('evidence') else
+           '# FOLLOW_MODE: full saved history; selected branch unverified, reconcile previous context']
+          if full_claude_branch else []),
         *(['# FOLLOW_MODE: full selected branch (Pi can change branches)'] if item["source"] == "pi" else []),
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
@@ -690,7 +699,7 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         (f"# HISTORICAL_TERMINAL_NOT_CURRENT_STATE: {_observed_terminal(item)}"
          if historical_terminal else f"# EXPLICIT_TERMINAL: {_observed_terminal(item)}"),
         ("# Compare the full selected branch with the previous snapshot, including removed entries."
-         if item["source"] == "pi" else
+         if item["source"] == "pi" or full_claude_branch else
          "# The cursor line is returned again on follow; ignore it when its [L#] was already seen."),
         "# A quiet file is not proof that its Agent is still running or has finished.",
     ])
@@ -892,6 +901,11 @@ def main(argv=None) -> int:
             }
             if item['source'] == 'claude':
                 result.update(claude_history.describe(path))
+                if result.get('rewind', {}).get('reason') != 'missing_leaf_pointer':
+                    result['conversation_follow_mode'] = (
+                        'full_selected_branch' if result['rewind'].get('evidence')
+                        else 'full_saved_history_unverified')
+                    result['conversation_reconciliation_required'] = True
                 result['source_changed'] = source_changed
                 result['session_changed'] = session_changed
                 result['conversation_cursor_mapped'] = conversation_cursor
