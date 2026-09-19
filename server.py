@@ -19,6 +19,7 @@ from sources import antigravity as ag_source
 from sources import anchored_transcript
 from sources.claude_text import strip_leading_reminders
 from sources.activity import activity_fields, activity_time
+from sources import claude_history
 from sources import codex as codex_source
 from sources import devin as devin_source
 
@@ -1162,7 +1163,7 @@ def _format_qa_preview(qa_unit, max_chars):
 
 
 def file_fingerprint(path) -> str:
-    """Change signal for a session file or its verified Codex history.
+    """Change signal for a session file and its observed history references.
 
     Taken *before* the file is parsed, so a write that lands mid-parse is still reported as a
     change on the next poll — the fingerprint can lag behind the content, never run ahead of it.
@@ -1170,6 +1171,8 @@ def file_fingerprint(path) -> str:
     if codex_source.is_codex_path(path):
         from sources import codex_history
         return codex_history.fingerprint(path)
+    if Path(PROJECTS_DIR).resolve() in Path(path).resolve().parents:
+        return claude_history.describe(path)['history_fingerprint']
     st = os.stat(path)
     version = f"{st.st_mtime_ns}:{st.st_size}"
     return version
@@ -1189,209 +1192,203 @@ def extract_conversation(jsonl_path):
     project_path = None
     custom_title = None  # title set by /title; take the last one in the file
 
-    with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            total_lines += 1
-            try:
-                d = json.loads(line)
-            except Exception:
+    total_lines = claude_history.summary(jsonl_path)['physical_lines']
+    for _line_number, d in claude_history.records(jsonl_path):
+        t = d.get('type')
+        ts = d.get('timestamp', '')
+
+        if project_path is None and d.get('cwd'):
+            project_path = d['cwd']
+
+        if t == 'custom-title':
+            cleaned = _clean_custom_title(d.get('customTitle'))
+            if cleaned:
+                custom_title = cleaned
+            continue
+
+        if t == 'assistant':
+            content = d.get('message', {}).get('content', [])
+            if not isinstance(content, list):
                 continue
-
-            t = d.get('type')
-            ts = d.get('timestamp', '')
-
-            if project_path is None and d.get('cwd'):
-                project_path = d['cwd']
-
-            if t == 'custom-title':
-                cleaned = _clean_custom_title(d.get('customTitle'))
-                if cleaned:
-                    custom_title = cleaned
-                continue
-
-            if t == 'assistant':
-                content = d.get('message', {}).get('content', [])
-                if not isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if not isinstance(block, dict):
                     continue
-                text_parts = []
-                for block in content:
+                bt = block.get('type')
+                if bt == 'text':
+                    txt = block.get('text', '')
+                    if txt:
+                        text_parts.append(txt)
+                elif bt == 'tool_use':
+                    tool_id = block.get('id', '')
+                    tname = block.get('name', '?')
+                    # Translate Agent (subagent dispatch) into a subagent_spawn turn. The
+                    # corresponding tool_result is not expanded yet, but the tool_id must be
+                    # recorded with a spawn sentinel so the later tool_result branch skips it.
+                    # Otherwise it falls through to the unknown-tool fallback and renders an
+                    # anonymous tool block alongside subagent_spawn, violating spec section 6.2.
+                    if tname == 'Agent':
+                        inp = block.get('input', {}) or {}
+                        sub_name = inp.get('subagent_type') or 'general-purpose'
+                        desc = inp.get('description') or ''
+                        if not desc:
+                            # Fallback: when description is missing, use the first 120 prompt characters
+                            prompt = inp.get('prompt', '') or ''
+                            desc = prompt[:120]
+                        turns.append({
+                            'type': 'subagent_spawn',
+                            'name': sub_name,
+                            'description': _truncate_conv(desc, 500),
+                            'ts': ts,
+                        })
+                        pending_tools[tool_id] = {'__spawn__': True}
+                        continue
+                    pending_tools[tool_id] = {
+                        'name': tname,
+                        'summary': _tool_input_summary(
+                            tname, block.get('input', {})),
+                        'ts': ts,
+                        # Only AskUserQuestion keeps raw input for later QA unit synthesis
+                        '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
+                    }
+                    # AI called the Skill tool: mark the next user-array text block as the skill body
+                    if tname == 'Skill':
+                        pending_skill_body = True
+                # thinking: skip entirely
+            if text_parts:
+                turns.append({
+                    'type': 'assistant',
+                    'text': _truncate_conv(
+                        '\n'.join(text_parts), CONV_ASSISTANT_MAX),
+                    'ts': ts,
+                })
+
+        elif t == 'user':
+            msg_content = d.get('message', {}).get('content')
+            if isinstance(msg_content, str):
+                text = strip_leading_reminders(msg_content).strip()
+                if not text:
+                    next_is_skill = False
+                elif text.startswith('<command-'):
+                    # slash-command injection: the next user message is the skill body
+                    next_is_skill = True
+                elif text.startswith(('<local-command-', '<system-reminder>')):
+                    # silent injection only: skip without affecting next_is_skill
+                    next_is_skill = False
+                elif (event := _parse_system_event(text)) is not None:
+                    # System events (task-notification / bash output / teammate) become
+                    # independent turns, not user/skill, and do not affect next_is_skill.
+                    next_is_skill = False
+                    turns.append({
+                        **event,
+                        'text': _truncate_conv(event['text'], CONV_USER_MAX),
+                        'ts': ts,
+                    })
+                else:
+                    turn_type = 'skill' if next_is_skill else 'user'
+                    next_is_skill = False
+                    turns.append({
+                        'type': turn_type,
+                        'text': _truncate_conv(text, CONV_USER_MAX),
+                        'ts': ts,
+                    })
+            elif isinstance(msg_content, list):
+                user_texts = []
+                for block in msg_content:
                     if not isinstance(block, dict):
                         continue
                     bt = block.get('type')
-                    if bt == 'text':
-                        txt = block.get('text', '')
-                        if txt:
-                            text_parts.append(txt)
-                    elif bt == 'tool_use':
-                        tool_id = block.get('id', '')
-                        tname = block.get('name', '?')
-                        # Translate Agent (subagent dispatch) into a subagent_spawn turn. The
-                        # corresponding tool_result is not expanded yet, but the tool_id must be
-                        # recorded with a spawn sentinel so the later tool_result branch skips it.
-                        # Otherwise it falls through to the unknown-tool fallback and renders an
-                        # anonymous tool block alongside subagent_spawn, violating spec section 6.2.
-                        if tname == 'Agent':
-                            inp = block.get('input', {}) or {}
-                            sub_name = inp.get('subagent_type') or 'general-purpose'
-                            desc = inp.get('description') or ''
-                            if not desc:
-                                # Fallback: when description is missing, use the first 120 prompt characters
-                                prompt = inp.get('prompt', '') or ''
-                                desc = prompt[:120]
+                    if bt == 'tool_result':
+                        tool_id = block.get('tool_use_id', '')
+                        raw = _tool_result_content(
+                            block.get('content', ''))
+                        is_err = block.get('is_error', False)
+                        if tool_id in pending_tools:
+                            tc = pending_tools.pop(tool_id)
+                            # Agent (subagent spawn) tool_result is not expanded yet
+                            if tc.get('__spawn__'):
+                                continue
+                            # AskUserQuestion becomes a QA turn, a conversation subtype, not a truncated tool path
+                            if tc['name'] == 'AskUserQuestion':
+                                qa_unit = _build_qa_unit(
+                                    tc.get('_raw_input'),
+                                    d.get('toolUseResult'))
+                                if qa_unit:
+                                    turns.append({
+                                        'type': 'qa',
+                                        'questions': qa_unit['questions'],
+                                        'ts': tc.get('ts', ts),
+                                    })
+                                    continue
+                                # fallback: on parse failure, use the tool path
+                            tc.pop('_raw_input', None)
+                            tc['result'] = _truncate_tool_result(
+                                raw, CONV_TOOL_RESULT_MAX)
+                            tc['is_error'] = is_err
+                            turns.append({'type': 'tool', **tc})
+                        else:
                             turns.append({
-                                'type': 'subagent_spawn',
-                                'name': sub_name,
-                                'description': _truncate_conv(desc, 500),
-                                'ts': ts,
+                                'type': 'tool', 'name': '?',
+                                'summary': '',
+                                'result': _truncate_tool_result(
+                                    raw, CONV_TOOL_RESULT_MAX),
+                                'is_error': is_err, 'ts': ts,
                             })
-                            pending_tools[tool_id] = {'__spawn__': True}
-                            continue
-                        pending_tools[tool_id] = {
-                            'name': tname,
-                            'summary': _tool_input_summary(
-                                tname, block.get('input', {})),
-                            'ts': ts,
-                            # Only AskUserQuestion keeps raw input for later QA unit synthesis
-                            '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
-                        }
-                        # AI called the Skill tool: mark the next user-array text block as the skill body
-                        if tname == 'Skill':
-                            pending_skill_body = True
-                    # thinking: skip entirely
-                if text_parts:
-                    turns.append({
-                        'type': 'assistant',
-                        'text': _truncate_conv(
-                            '\n'.join(text_parts), CONV_ASSISTANT_MAX),
-                        'ts': ts,
-                    })
-
-            elif t == 'user':
-                msg_content = d.get('message', {}).get('content')
-                if isinstance(msg_content, str):
-                    text = strip_leading_reminders(msg_content).strip()
-                    if not text:
+                    elif bt == 'text':
+                        txt = strip_leading_reminders(block.get('text', ''))
+                        if txt and not txt.lstrip().startswith(
+                                '<system-reminder>'):
+                            user_texts.append(txt)
+                    elif bt == 'image':
+                        user_texts.append('[image]')
+                if user_texts:
+                    full = '\n'.join(user_texts).strip()
+                    if not full or full.startswith((
+                            '<local-command-', '<command-')):
                         next_is_skill = False
-                    elif text.startswith('<command-'):
-                        # slash-command injection: the next user message is the skill body
-                        next_is_skill = True
-                    elif text.startswith(('<local-command-', '<system-reminder>')):
-                        # silent injection only: skip without affecting next_is_skill
-                        next_is_skill = False
-                    elif (event := _parse_system_event(text)) is not None:
-                        # System events (task-notification / bash output / teammate) become
-                        # independent turns, not user/skill, and do not affect next_is_skill.
-                        next_is_skill = False
+                        pending_skill_body = False
+                    elif full.startswith('[Request interrupted by user'):
+                        # User interrupted the agent: system-injected event text, not user input
                         turns.append({
-                            **event,
-                            'text': _truncate_conv(event['text'], CONV_USER_MAX),
+                            'type': 'system_notification',
+                            'text': 'Request interrupted by user',
                             'ts': ts,
                         })
+                        next_is_skill = False
+                        pending_skill_body = False
+                    elif full == 'Continue from where you left off.':
+                        # Resume prompt injected by --resume / Continue button, not user input
+                        turns.append({
+                            'type': 'system_notification',
+                            'text': 'Continue from where you left off',
+                            'ts': ts,
+                        })
+                        next_is_skill = False
+                        pending_skill_body = False
+                    elif pending_skill_body or full.startswith(
+                            'Base directory for this skill: '):
+                        # Body injected after the AI called Skill: classify as skill, not user
+                        turns.append({
+                            'type': 'skill',
+                            'text': _truncate_conv(full, CONV_USER_MAX),
+                            'ts': ts,
+                        })
+                        next_is_skill = False
+                        pending_skill_body = False
                     else:
                         turn_type = 'skill' if next_is_skill else 'user'
                         next_is_skill = False
+                        pending_skill_body = False
                         turns.append({
                             'type': turn_type,
-                            'text': _truncate_conv(text, CONV_USER_MAX),
+                            'text': _truncate_conv(
+                                full, CONV_USER_MAX),
                             'ts': ts,
                         })
-                elif isinstance(msg_content, list):
-                    user_texts = []
-                    for block in msg_content:
-                        if not isinstance(block, dict):
-                            continue
-                        bt = block.get('type')
-                        if bt == 'tool_result':
-                            tool_id = block.get('tool_use_id', '')
-                            raw = _tool_result_content(
-                                block.get('content', ''))
-                            is_err = block.get('is_error', False)
-                            if tool_id in pending_tools:
-                                tc = pending_tools.pop(tool_id)
-                                # Agent (subagent spawn) tool_result is not expanded yet
-                                if tc.get('__spawn__'):
-                                    continue
-                                # AskUserQuestion becomes a QA turn, a conversation subtype, not a truncated tool path
-                                if tc['name'] == 'AskUserQuestion':
-                                    qa_unit = _build_qa_unit(
-                                        tc.get('_raw_input'),
-                                        d.get('toolUseResult'))
-                                    if qa_unit:
-                                        turns.append({
-                                            'type': 'qa',
-                                            'questions': qa_unit['questions'],
-                                            'ts': tc.get('ts', ts),
-                                        })
-                                        continue
-                                    # fallback: on parse failure, use the tool path
-                                tc.pop('_raw_input', None)
-                                tc['result'] = _truncate_tool_result(
-                                    raw, CONV_TOOL_RESULT_MAX)
-                                tc['is_error'] = is_err
-                                turns.append({'type': 'tool', **tc})
-                            else:
-                                turns.append({
-                                    'type': 'tool', 'name': '?',
-                                    'summary': '',
-                                    'result': _truncate_tool_result(
-                                        raw, CONV_TOOL_RESULT_MAX),
-                                    'is_error': is_err, 'ts': ts,
-                                })
-                        elif bt == 'text':
-                            txt = strip_leading_reminders(block.get('text', ''))
-                            if txt and not txt.lstrip().startswith(
-                                    '<system-reminder>'):
-                                user_texts.append(txt)
-                        elif bt == 'image':
-                            user_texts.append('[image]')
-                    if user_texts:
-                        full = '\n'.join(user_texts).strip()
-                        if not full or full.startswith((
-                                '<local-command-', '<command-')):
-                            next_is_skill = False
-                            pending_skill_body = False
-                        elif full.startswith('[Request interrupted by user'):
-                            # User interrupted the agent: system-injected event text, not user input
-                            turns.append({
-                                'type': 'system_notification',
-                                'text': 'Request interrupted by user',
-                                'ts': ts,
-                            })
-                            next_is_skill = False
-                            pending_skill_body = False
-                        elif full == 'Continue from where you left off.':
-                            # Resume prompt injected by --resume / Continue button, not user input
-                            turns.append({
-                                'type': 'system_notification',
-                                'text': 'Continue from where you left off',
-                                'ts': ts,
-                            })
-                            next_is_skill = False
-                            pending_skill_body = False
-                        elif pending_skill_body or full.startswith(
-                                'Base directory for this skill: '):
-                            # Body injected after the AI called Skill: classify as skill, not user
-                            turns.append({
-                                'type': 'skill',
-                                'text': _truncate_conv(full, CONV_USER_MAX),
-                                'ts': ts,
-                            })
-                            next_is_skill = False
-                            pending_skill_body = False
-                        else:
-                            turn_type = 'skill' if next_is_skill else 'user'
-                            next_is_skill = False
-                            pending_skill_body = False
-                            turns.append({
-                                'type': turn_type,
-                                'text': _truncate_conv(
-                                    full, CONV_USER_MAX),
-                                'ts': ts,
-                            })
-                    else:
-                        # Pure tool_result messages (for example Skill launch reports) do not
-                        # consume pending_skill_body / next_is_skill; the following real text inherits it.
-                        pass
+                else:
+                    # Pure tool_result messages (for example Skill launch reports) do not
+                    # consume pending_skill_body / next_is_skill; the following real text inherits it.
+                    pass
 
     return {
         'id': jsonl_path.stem,
@@ -1399,6 +1396,9 @@ def extract_conversation(jsonl_path):
         'total_lines': total_lines,
         'turns': turns,
         'custom_title': custom_title,
+        'source': 'claude',
+        'jsonl_path': str(jsonl_path),
+        **claude_history.describe(jsonl_path),
     }
 
 
@@ -1414,122 +1414,123 @@ def extract_transcript(jsonl_path: Path) -> str:
     project_path = None
     total_lines = 0
 
-    with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            total_lines += 1
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            t = d.get('type')
-            if project_path is None and d.get('cwd'):
-                project_path = d['cwd']
+    total_lines = claude_history.summary(jsonl_path)['physical_lines']
+    for _line_number, d in claude_history.records(jsonl_path):
+        t = d.get('type')
+        if project_path is None and d.get('cwd'):
+            project_path = d['cwd']
 
-            if t == 'assistant':
-                content = d.get('message', {}).get('content', [])
-                if not isinstance(content, list):
+        if t == 'assistant':
+            content = d.get('message', {}).get('content', [])
+            if not isinstance(content, list):
+                continue
+            text_parts = []
+            for block in content:
+                if not isinstance(block, dict):
                     continue
-                text_parts = []
-                for block in content:
+                bt = block.get('type')
+                if bt == 'text':
+                    txt = block.get('text', '')
+                    if txt:
+                        text_parts.append(txt)
+                elif bt == 'tool_use':
+                    tname = block.get('name', '?')
+                    pending_tools[block.get('id', '')] = {
+                        'name': tname,
+                        'summary': _tool_input_summary(
+                            tname, block.get('input', {})),
+                        # Keep raw AskUserQuestion input for QA synthesis
+                        '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
+                    }
+            if text_parts:
+                out_blocks.append('## ASSISTANT\n' + '\n'.join(text_parts) + '\n')
+
+        elif t == 'user':
+            msg_content = d.get('message', {}).get('content')
+            if isinstance(msg_content, str):
+                text = strip_leading_reminders(msg_content).strip()
+                if not text:
+                    next_is_skill = False
+                elif text.startswith('<command-'):
+                    next_is_skill = True
+                elif text.startswith(('<local-command-', '<system-reminder>')):
+                    next_is_skill = False
+                elif (event := _parse_system_event(text)) is not None:
+                    # Keep system events as independent labeled export blocks so later LLM readers can distinguish actors
+                    next_is_skill = False
+                    label_map = {
+                        'system_notification': 'NOTIFICATION',
+                        'bash_output': 'BASH-OUTPUT',
+                        'teammate_message': 'TEAMMATE',
+                    }
+                    label = label_map.get(event['type'], 'SYSTEM')
+                    out_blocks.append(f'## {label}\n{event["text"]}\n')
+                else:
+                    label = 'SKILL' if next_is_skill else 'USER'
+                    next_is_skill = False
+                    out_blocks.append(f'## {label}\n{text}\n')
+            elif isinstance(msg_content, list):
+                user_texts = []
+                for block in msg_content:
                     if not isinstance(block, dict):
                         continue
                     bt = block.get('type')
-                    if bt == 'text':
-                        txt = block.get('text', '')
-                        if txt:
-                            text_parts.append(txt)
-                    elif bt == 'tool_use':
-                        tname = block.get('name', '?')
-                        pending_tools[block.get('id', '')] = {
-                            'name': tname,
-                            'summary': _tool_input_summary(
-                                tname, block.get('input', {})),
-                            # Keep raw AskUserQuestion input for QA synthesis
-                            '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
-                        }
-                if text_parts:
-                    out_blocks.append('## ASSISTANT\n' + '\n'.join(text_parts) + '\n')
-
-            elif t == 'user':
-                msg_content = d.get('message', {}).get('content')
-                if isinstance(msg_content, str):
-                    text = strip_leading_reminders(msg_content).strip()
-                    if not text:
-                        next_is_skill = False
-                    elif text.startswith('<command-'):
-                        next_is_skill = True
-                    elif text.startswith(('<local-command-', '<system-reminder>')):
-                        next_is_skill = False
-                    elif (event := _parse_system_event(text)) is not None:
-                        # Keep system events as independent labeled export blocks so later LLM readers can distinguish actors
-                        next_is_skill = False
-                        label_map = {
-                            'system_notification': 'NOTIFICATION',
-                            'bash_output': 'BASH-OUTPUT',
-                            'teammate_message': 'TEAMMATE',
-                        }
-                        label = label_map.get(event['type'], 'SYSTEM')
-                        out_blocks.append(f'## {label}\n{event["text"]}\n')
-                    else:
+                    if bt == 'tool_result':
+                        tool_id = block.get('tool_use_id', '')
+                        # AskUserQuestion becomes a ## QA block; answer is not truncated
+                        if tool_id in pending_tools and pending_tools[tool_id]['name'] == 'AskUserQuestion':
+                            tc = pending_tools.pop(tool_id)
+                            qa_unit = _build_qa_unit(
+                                tc.get('_raw_input'),
+                                d.get('toolUseResult'))
+                            if qa_unit:
+                                out_blocks.append(
+                                    '## QA\n' + _format_qa_transcript(qa_unit) + '\n')
+                                continue
+                            # fallback: treat input/result as a tool path, a rare defensive case
+                            pending_tools[tool_id] = tc
+                        raw = _tool_result_content(block.get('content', ''))
+                        result = (raw or '').strip()
+                        if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
+                            n = TRANSCRIPT_TOOL_RESULT_MAX
+                            lines = result.count('\n') + 1
+                            result = (result[:n].rstrip() +
+                                      f' …[+{len(result)-n} chars, ~{lines} lines]')
+                        err_tag = ' [ERROR]' if block.get('is_error') else ''
+                        if tool_id in pending_tools:
+                            tc = pending_tools.pop(tool_id)
+                            tc.pop('_raw_input', None)
+                            head = f"[tool: {tc['name']}({tc['summary']})]{err_tag}"
+                        else:
+                            head = f"[tool: ?()]{err_tag}"
+                        out_blocks.append(head + ('\n' + result + '\n' if result else '\n'))
+                    elif bt == 'text':
+                        txt = strip_leading_reminders(block.get('text', ''))
+                        if txt and not txt.lstrip().startswith('<system-reminder>'):
+                            user_texts.append(txt)
+                    elif bt == 'image':
+                        user_texts.append('[image]')
+                if user_texts:
+                    full = '\n'.join(user_texts).strip()
+                    if full and not full.startswith(('<local-command-', '<command-')):
                         label = 'SKILL' if next_is_skill else 'USER'
                         next_is_skill = False
-                        out_blocks.append(f'## {label}\n{text}\n')
-                elif isinstance(msg_content, list):
-                    user_texts = []
-                    for block in msg_content:
-                        if not isinstance(block, dict):
-                            continue
-                        bt = block.get('type')
-                        if bt == 'tool_result':
-                            tool_id = block.get('tool_use_id', '')
-                            # AskUserQuestion becomes a ## QA block; answer is not truncated
-                            if tool_id in pending_tools and pending_tools[tool_id]['name'] == 'AskUserQuestion':
-                                tc = pending_tools.pop(tool_id)
-                                qa_unit = _build_qa_unit(
-                                    tc.get('_raw_input'),
-                                    d.get('toolUseResult'))
-                                if qa_unit:
-                                    out_blocks.append(
-                                        '## QA\n' + _format_qa_transcript(qa_unit) + '\n')
-                                    continue
-                                # fallback: treat input/result as a tool path, a rare defensive case
-                                pending_tools[tool_id] = tc
-                            raw = _tool_result_content(block.get('content', ''))
-                            result = (raw or '').strip()
-                            if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
-                                n = TRANSCRIPT_TOOL_RESULT_MAX
-                                lines = result.count('\n') + 1
-                                result = (result[:n].rstrip() +
-                                          f' …[+{len(result)-n} chars, ~{lines} lines]')
-                            err_tag = ' [ERROR]' if block.get('is_error') else ''
-                            if tool_id in pending_tools:
-                                tc = pending_tools.pop(tool_id)
-                                tc.pop('_raw_input', None)
-                                head = f"[tool: {tc['name']}({tc['summary']})]{err_tag}"
-                            else:
-                                head = f"[tool: ?()]{err_tag}"
-                            out_blocks.append(head + ('\n' + result + '\n' if result else '\n'))
-                        elif bt == 'text':
-                            txt = strip_leading_reminders(block.get('text', ''))
-                            if txt and not txt.lstrip().startswith('<system-reminder>'):
-                                user_texts.append(txt)
-                        elif bt == 'image':
-                            user_texts.append('[image]')
-                    if user_texts:
-                        full = '\n'.join(user_texts).strip()
-                        if full and not full.startswith(('<local-command-', '<command-')):
-                            label = 'SKILL' if next_is_skill else 'USER'
-                            next_is_skill = False
-                            out_blocks.append(f'## {label}\n{full}\n')
-                        else:
-                            next_is_skill = False
+                        out_blocks.append(f'## {label}\n{full}\n')
                     else:
                         next_is_skill = False
+                else:
+                    next_is_skill = False
 
     header = (f'# Session {jsonl_path.stem}\n'
               f'Project: {project_path or "(unknown)"}\n'
               f'Raw lines: {total_lines}\n\n')
-    return header + '\n'.join(out_blocks)
+    history = claude_history.describe(jsonl_path)
+    header += ('History: selected file only; shared history does not establish '
+               'continuation or fork. Other source branches are not merged.\n')
+    for source in history.get('source_files', []):
+        header += (f"Source ({source['relation']}): Session {source['session_id']} "
+                   f"{source['path']} [L{source['first_line']}-L{source['last_line']}]\n")
+    return header + '\n' + '\n'.join(out_blocks)
 
 
 def get_or_generate_brief(sid: str, jsonl_path: Path, transcript_text: str):

@@ -3104,6 +3104,7 @@ function bindGroupEvents() {
 // ---------- Inline SVG icons (feathericons style, 24x24 viewBox) ----------
 // stroke uses currentColor, driven by the button's text color; the filled state (e.g. starred) is controlled by CSS
 const ICONS = {
+  externalLink: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg>',
   // Five-pointed star: when starred, CSS sets fill: currentColor; when not lit, only the outline is drawn
   star: '<svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
   // archive: box + down arrow (feather archive)
@@ -3941,7 +3942,7 @@ function renderConv(data, meta) {
       ${rawBtnHtml}${exportMenuHtml}${metaBtnsHtml}
     </div>`;
   const popoutHtml = _convStandalone ? '' :
-    `<button class="conv-popout" id="conv-popout" data-tooltip="Open in new tab" aria-label="Open in new tab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg></button>`;
+    `<button class="conv-popout" id="conv-popout" data-tooltip="Open in new tab" aria-label="Open in new tab">${ICONS.externalLink}</button>`;
   // Share button: shown in both modes (in standalone the popout is hidden, but copying the URL from the address bar is annoying, so we keep this)
   const shareHtml =
     `<button class="conv-share" id="conv-share" data-tooltip="Copy link to this session" aria-label="Copy link to this session">${ICONS.share}</button>`;
@@ -3978,7 +3979,11 @@ function renderConv(data, meta) {
   const sizeKB = sourceVal === 'codex' ? (Number.isFinite(data.segment_size) ? (data.segment_size / 1024).toFixed(1) + ' KB latest segment' : '') : meta ? (meta.size / 1024).toFixed(1) + ' KB' : '';
   const sourcePath = data.jsonl_path || meta?.jsonl_path;
   const pathLabel = sourceVal === 'codex' ? 'Copy latest segment path' : 'Copy source reference';
-  const sourceFilesHtml = data.source_files?.length ? `<details class="conv-sources"><summary>History sources (${data.source_files.length} files)</summary>${data.source_files.map(f => `<div>${escapeHtml(f.relation)} · Session ${escapeHtml(f.session_id)} · L${f.first_line}–L${f.last_line}<br><span>${escapeHtml(f.path)}</span><button class="conv-link-btn" data-copy-path="${escapeHtml(f.path)}" data-tooltip="Copy this source path" aria-label="Copy this source path">${ICONS.link}</button></div>`).join('')}</details>` : '';
+  const sourceFilesHtml = data.source_files?.length ? `<details class="conv-sources"><summary>History sources (${data.source_files.length} files)</summary>${data.history_semantics === 'selected_file_only' ? '<div>Selected file only. Other source branches are not merged.</div>' : ''}${data.source_files.map(f => {
+    const relation = f.relation === 'shared_history' ? (f.relationship_kind === 'same_id_copy' ? 'Same-ID history copy; select source explicitly' : 'Shared history; continuation or fork undetermined') : f.relation;
+    const openSource = f.relation === 'shared_history' && f.session_id ? `<a class="conv-link-btn" href="/?session=${encodeURIComponent(f.session_id)}" target="_blank" rel="noopener" data-tooltip="Open this source session" aria-label="Open this source session">${ICONS.externalLink}</a>` : '';
+    return `<div>${escapeHtml(relation)} · Session <span class="conv-copy-id" data-copy-id="${escapeHtml(f.session_id)}" data-tooltip="Click to copy session ID">${escapeHtml(f.session_id)}</span>${openSource} · L${f.first_line}–L${f.last_line}<br><span>${escapeHtml(f.path)}</span><button class="conv-link-btn" data-copy-path="${escapeHtml(f.path)}" data-tooltip="Copy this source path" aria-label="Copy this source path">${ICONS.link}</button></div>`;
+  }).join('')}</details>` : '';
   const pathBtnHtml = sourcePath
     ? `<button class="conv-link-btn" data-copy-path="${escapeHtml(sourcePath)}" data-tooltip="${pathLabel}" aria-label="${pathLabel}">${ICONS.link}</button>`
     : '';
@@ -4210,10 +4215,10 @@ function renderConv(data, meta) {
   });
 
   // Bind the session ID copy button (detail has moved to the head sticky area)
-  head.querySelector('[data-copy-id]')?.addEventListener('click', (e) => {
+  head.querySelectorAll('[data-copy-id]').forEach(button => button.addEventListener('click', (e) => {
     e.stopPropagation();
     navigator.clipboard.writeText(e.currentTarget.dataset.copyId).then(() => toast('Copied session ID'), () => toast('Copy failed'));
-  });
+  }));
   // Bind the JSONL path copy button
   head.querySelectorAll('[data-copy-path]').forEach(button => button.addEventListener('click', (e) => {
     e.stopPropagation();

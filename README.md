@@ -76,6 +76,12 @@ python3 session_logbook_cli.py follow '<session-id-or-path>' --cursor-line 427
 python3 session_logbook_cli.py search 'payment retry' --role user --since 30d
 ```
 
+Claude Desktop can copy history into another Session ID. Related source files are
+shown as evidence links; the selected file stays the transcript, and shared history
+never automatically changes a supervisor's target. Explicit source-qualified follow
+checks copied record identity and rejects divergent cursors. See the
+[Claude history contract](docs/decisions/2026-09-19-claude-copied-history.md).
+
 The repository also ships one Agent Skill, [`session-logbook`](skills/session-logbook/SKILL.md),
 covering handoff, follow-up observation, evidence expansion, discovery, and historical mining.
 Install it by linking the repository copy into your Agent's Skill directory so the Skill and
