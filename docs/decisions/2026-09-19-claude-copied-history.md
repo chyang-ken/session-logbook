@@ -53,8 +53,8 @@ Same-ID copies are reported as such when both native IDs are known; an exact pat
 selects a physical source without guessing which copy is authoritative. Existing
 ID-only discovery remains unchanged. Ambiguous/missing native identity prevents
 cross-file cursor mapping. Invalid records and conflicting UUIDs are reported.
-There is no claimed native marker distinguishing fork from continuation in this
-sample. Shared history remains `undetermined` even when the caller separately knows
+The initial transcript-only investigation did not establish a native cause.
+The client-log follow-up below supersedes that uncertainty for this sample. Shared history remains `undetermined` even when the caller separately knows
 what it intended. This is a read-only observation contract for any supervisor.
 
 ## Validation and release boundary
@@ -66,3 +66,39 @@ feature branch only; deployment, staging promotion, and main promotion are separ
 ## Commit
 
 See the implementing commit referencing this decision document.
+
+
+## Follow-up: client logs establish rewind-driven forks
+
+The user requested a causal investigation after the initial implementation; no
+publication or runtime changes were authorized. Reading the desktop client's own
+main log resolved the sampled ID changes without operating the original session.
+
+The observed sequence was a rewind request, resume at a specific existing assistant
+record with `forkSession`, and a logged CLI-session-ID change. This occurred twice,
+through an intermediate transcript. The desktop internal session ID stayed the same
+across all three CLI IDs. The resume anchor exactly matched the last shared assistant
+record in the three transcript files. Therefore the sample demonstrates **rewind-driven
+forking inside one desktop conversation**, not length-triggered automatic file rollover.
+The log does not identify who invoked the UI action or why; do not invent that detail.
+
+This separates two identities that the original investigation conflated: the desktop
+conversation can remain the same while its selected underlying CLI history becomes a
+new branch. Neither shared UUIDs alone nor the user's uninterrupted desktop experience
+can distinguish that event. The local evidence references and narrowly selected log
+lines are in git-ignored `_private/claude-desktop-rewind-investigation.json` in the
+investigation worktree; real identifiers and log excerpts are not public fixtures.
+
+Official [desktop documentation](https://code.claude.com/docs/en/desktop) describes
+summarizing and continuing when context fills. The CLI
+[session documentation](https://code.claude.com/docs/en/sessions) separately describes
+branching as copying conversation history while preserving the original. These docs
+support the distinction but do not prove the behavior of every desktop version.
+The runtime log identifies the sampled engine as version 2.1.275.
+
+No parser or automatic supervisor-selection rule was changed by this follow-up.
+The existing feature remains unpublished. Before claiming desktop conversation
+continuity as a product capability, its native desktop-to-CLI identity mapping and
+rewind semantics would need explicit support; the current shared-history reader
+alone does not provide that capability. No long-context reproduction or paid model
+call is needed to explain the observed sample now that its causal log is available.
