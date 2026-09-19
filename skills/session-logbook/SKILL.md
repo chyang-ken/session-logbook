@@ -125,3 +125,38 @@ original row, including an abandoned branch.
   project, source, and time to identify the intended Session.
 - Never write to source transcripts or databases. Resume or message a Session only when the user separately
   requests that external action.
+
+## Claude Desktop copied history and explicit target changes
+
+`locate`, `status`, and `observe` report `source_files`, compaction anchors, and
+`history_semantics: selected_file_only` for Claude. A shared UUID proves overlap;
+it does not establish whether another ID is a continuation or a fork. Session IDs
+remain independent. Titles, timestamps, Bridge IDs, and shared prefixes are not
+permission to migrate a supervisor's target. A user's confirmation of a predecessor
+relationship belongs to the caller's task context, not a global inferred rule.
+
+The selected file already contains its inherited records. Context, the web reader,
+and exports render that copy once; they do not concatenate related files. Use each
+related path with `context` or `evidence` to inspect earlier raw history or a branch
+not retained by the selected file. Compaction metadata is evidence of compaction,
+not a claim that the original pre-compaction conversation has been reconstructed.
+Search keeps both session identities and their source-qualified evidence available.
+
+After the caller explicitly selects another target, `follow NEW_TARGET
+--cursor-source-path OLD_PATH --cursor-line N` maps the old physical record by UUID
+and content. Usage-accounting changes do not invalidate identical message content.
+An absent, ambiguous, or changed record fails with a reconciliation error; read the
+new context and decide what changed before advancing a consumer cursor. Never fall
+back to zero silently or treat an old branch's terminal state as the new session's.
+
+`observe` accepts the same explicit target switch. A cross-ID switch reports
+`cursor_reset_reason: explicit_session_change` and resets the Hook, native-event,
+and turn-identity namespaces. Its conversation cursor is mapped independently.
+Drain Hook pages via `has_more`, then retain the returned target ID, path and all
+three cursors. Claude currently has no native lifecycle stream; Hooks remain
+observations, not completion proof. No watchlist or supervisor state is changed.
+
+The optional rebuildable history index stores source coordinates and content hashes,
+not transcript bodies or delivery acknowledgements. Unchanged files reuse the index;
+append updates verify the existing prefix and parse the suffix. Follow reads only
+its selected suffix. The first lookup may index sibling files in the same project.

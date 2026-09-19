@@ -1934,6 +1934,14 @@
   }
   .conv-detail span { margin-right: 16px; }
   .conv-sources { overflow-wrap: anywhere; }
+  .conv-rewind { margin-top: 8px; font-size: 12px; color: var(--text-2); line-height: 1.7; }
+  #rewind-filter[hidden] { display: none; }
+  .conv-rewind:empty { display: none; }
+  .conv-rewind summary { cursor: pointer; }
+  .conv-rewind summary:hover, .conv-rewind a:hover { color: var(--accent); }
+  .conv-rewind a { color: var(--text-2); text-decoration: underline; }
+  .conv-rewind-record { padding: 2px 0; }
+  .rewind-record-label { font-size: 11px; color: var(--text-3); margin: 4px 0; }
   /* session id row: same style as the card's .card-sid-wrap —— the id text itself is click-to-copy (no separate button),
      icon button is borderless ghost. No more bordered "copy" pill / bordered icon (violates the no-border rule in design-system §7,
      and would diverge from the card version). Same component stays consistent across surfaces. */
@@ -2303,6 +2311,10 @@
     <input type="checkbox" id="hide-oneshot">
     <span id="suspected-filter-label">Suspected runs hidden</span>
   </label>
+  <label class="oneshot-toggle" id="rewind-filter" hidden>
+    <input type="checkbox" id="show-rewound">
+    <span id="rewind-filter-label">Show records before rewind</span>
+  </label>
     <div class="head-status">
       <span class="live-dot" id="live-dot" data-tooltip="Live — auto-refreshing"></span>
       <span class="count" id="count">—</span>
@@ -2382,6 +2394,7 @@ const state = {
   items: [],
   searchHits: {},    // session_id -> [{text, role, term}, ...]
   searchPending: false,
+  showRewound: false,
   sectionOpen: _saved
     ? new Set(_saved.sectionOpen)
     : new Set(Object.entries(SECTION_DEFAULT_OPEN).filter(([, v]) => v).map(([k]) => k)),
@@ -2652,11 +2665,13 @@ function displayedItems() {
     : state.items.filter(m => (m.source || 'claude') === state.sourceFilter);
   const q = state.q.toLowerCase();
   const matched = q ? scopedItems.filter(m => m.id in state.searchHits) : scopedItems;
-  const hiddenSuspected = state.hideOneshot ? matched.filter(isSuspected) : [];
-  let filtered = state.hideOneshot ? matched.filter(m => !isSuspected(m)) : matched;
+  const hiddenRewound = matched.filter(m => m.rewind_current_session_id && m.rewind_current_session_id !== m.id);
+  const visible = state.showRewound ? matched : matched.filter(m => !m.rewind_current_session_id || m.rewind_current_session_id === m.id);
+  const hiddenSuspected = state.hideOneshot ? visible.filter(isSuspected) : [];
+  let filtered = state.hideOneshot ? visible.filter(m => !isSuspected(m)) : visible;
   // Archive remains a deliberate hide action in the primary timeline, but search can still retrieve it.
   if (state.viewMode === 'timeline' && !q) filtered = filtered.filter(m => !m.archived);
-  return { scopedItems, filtered, hiddenSuspected };
+  return { scopedItems, filtered, hiddenSuspected, hiddenRewound };
 }
 
 let _hasRendered = false;  // The entrance animation runs only once: true on the first frame, after which all renders (including live polling) no longer replay it
@@ -2668,7 +2683,11 @@ function render() {
 
   // The unified filtering pipeline for source filter / search / suspected runs (see displayedItems).
   // state.items stays unchanged (still everything the backend returned), avoiding data loss when switching.
-  const { scopedItems, filtered, hiddenSuspected } = displayedItems();
+  const { scopedItems, filtered, hiddenSuspected, hiddenRewound } = displayedItems();
+  const rewindFilter = document.getElementById('rewind-filter');
+  rewindFilter.hidden = !hiddenRewound.length && !state.showRewound;
+  document.getElementById('show-rewound').checked = state.showRewound;
+  document.getElementById('rewind-filter-label').textContent = `Show records before rewind${hiddenRewound.length ? ' (' + hiddenRewound.length + ')' : ''}`;
 
   if (scopedItems.length === 0) {
     $count.textContent = '0 sessions';
@@ -2698,6 +2717,8 @@ function render() {
       document.getElementById('empty-show-suspected')?.addEventListener('click', () => {
         state.hideOneshot = false; syncSuspectedFilterUI(); saveUIState(); render();
       });
+    } else if (hiddenRewound.length && !state.showRewound) {
+      $list.innerHTML = `<div class="empty"><div class="empty-title">Matches found in records before rewind</div><div class="empty-hint">Use “Show records before rewind” above to view ${hiddenRewound.length} matching records.</div></div>`;
     } else {
       $list.innerHTML = `<div class="empty"><div class="empty-title">No matches for “${escapeHtml(state.q)}”</div><button class="empty-action" id="empty-clear-search">Clear search</button></div>`;
       document.getElementById('empty-clear-search')?.addEventListener('click', () => {
@@ -3104,6 +3125,7 @@ function bindGroupEvents() {
 // ---------- Inline SVG icons (feathericons style, 24x24 viewBox) ----------
 // stroke uses currentColor, driven by the button's text color; the filled state (e.g. starred) is controlled by CSS
 const ICONS = {
+  externalLink: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg>',
   // Five-pointed star: when starred, CSS sets fill: currentColor; when not lit, only the outline is drawn
   star: '<svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
   // archive: box + down arrow (feather archive)
@@ -3227,6 +3249,7 @@ function renderCard(m) {
       ${filesAbsBtn}
       ${titleBlock}
       ${suspectedBadge}
+      ${m.rewind_current_session_id && m.rewind_current_session_id !== m.id ? '<div class="rewind-record-label">Record before rewind</div>' : ''}
       ${pathrow}
       <div class="card-foot">
         <span class="card-sid-wrap">
@@ -3463,6 +3486,7 @@ function openConversation(sessionId, opts = {}) {
   stopConvLive();
   const generation = _convLiveGeneration;
   _convStandalone = !!opts.standalone;
+  _convIncludeRewound = !!opts.includeRewound;
   const meta = opts.standalone
     ? null  // in standalone mode the dashboard isn't loaded, so meta is inferred from the conv data after fetch
     : state.items.find(x => x.id === sessionId);
@@ -3489,7 +3513,7 @@ function openConversation(sessionId, opts = {}) {
   $conv.querySelector('#conv-close').addEventListener('click', closeConversation);
   $convNav = null;
 
-  fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`)
+  fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation${_convIncludeRewound ? '?include_rewound=1' : ''}`)
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(data => {
       if (generation !== _convLiveGeneration) return;
@@ -3916,7 +3940,7 @@ function renderConv(data, meta) {
   //   · Download for an agent = download a reduced transcript with [L#] original line-number anchors, so another agent can expand back to the source on demand
   //     (this is a different reduction for a different consumer than the "copy for people to read"; see docs/philosophy.md "context reduction (for whom)";
   //      uses browser download, and the dual-source backend /anchored auto-routes by source between Claude / Codex)
-  const exportMenuHtml = `<div class="conv-export-wrap">
+  const exportMenuHtml = data.include_rewound ? '' : `<div class="conv-export-wrap">
       <button class="btn conv-export-trigger" id="conv-export-trigger" aria-haspopup="true" aria-expanded="false" data-tooltip="Export this conversation">${ICONS.download}export<span class="conv-export-caret">${ICONS.chevronDown}</span></button>
       <div class="conv-export-menu" id="conv-export-menu" role="menu" hidden>
         <button class="conv-export-item" id="conv-export-copy" role="menuitem">
@@ -3941,7 +3965,7 @@ function renderConv(data, meta) {
       ${rawBtnHtml}${exportMenuHtml}${metaBtnsHtml}
     </div>`;
   const popoutHtml = _convStandalone ? '' :
-    `<button class="conv-popout" id="conv-popout" data-tooltip="Open in new tab" aria-label="Open in new tab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg></button>`;
+    `<button class="conv-popout" id="conv-popout" data-tooltip="Open in new tab" aria-label="Open in new tab">${ICONS.externalLink}</button>`;
   // Share button: shown in both modes (in standalone the popout is hidden, but copying the URL from the address bar is annoying, so we keep this)
   const shareHtml =
     `<button class="conv-share" id="conv-share" data-tooltip="Copy link to this session" aria-label="Copy link to this session">${ICONS.share}</button>`;
@@ -3978,7 +4002,23 @@ function renderConv(data, meta) {
   const sizeKB = sourceVal === 'codex' ? (Number.isFinite(data.segment_size) ? (data.segment_size / 1024).toFixed(1) + ' KB latest segment' : '') : meta ? (meta.size / 1024).toFixed(1) + ' KB' : '';
   const sourcePath = data.jsonl_path || meta?.jsonl_path;
   const pathLabel = sourceVal === 'codex' ? 'Copy latest segment path' : 'Copy source reference';
-  const sourceFilesHtml = data.source_files?.length ? `<details class="conv-sources"><summary>History sources (${data.source_files.length} files)</summary>${data.source_files.map(f => `<div>${escapeHtml(f.relation)} · Session ${escapeHtml(f.session_id)} · L${f.first_line}–L${f.last_line}<br><span>${escapeHtml(f.path)}</span><button class="conv-link-btn" data-copy-path="${escapeHtml(f.path)}" data-tooltip="Copy this source path" aria-label="Copy this source path">${ICONS.link}</button></div>`).join('')}</details>` : '';
+  const sourceFilesHtml = data.source_files?.length ? `<details class="conv-sources"><summary>Source file details (${data.source_files.length})</summary>${data.history_semantics === 'selected_file_only' ? '<div>Selected file only. Other source branches are not merged.</div>' : ''}${data.source_files.map(f => {
+    const relation = f.relation === 'shared_history' ? (f.relationship_kind === 'same_id_copy' ? 'Same-ID history copy; select source explicitly' : 'Shared history; continuation or fork undetermined') : f.relation;
+    const openSource = f.relation === 'shared_history' && f.session_id ? `<a class="conv-link-btn" href="/?session=${encodeURIComponent(f.session_id)}" target="_blank" rel="noopener" data-tooltip="Open this source session" aria-label="Open this source session">${ICONS.externalLink}</a>` : '';
+    return `<div>${escapeHtml(relation)} · Session <span class="conv-copy-id" data-copy-id="${escapeHtml(f.session_id)}" data-tooltip="Click to copy session ID">${escapeHtml(f.session_id)}</span>${openSource} · L${f.first_line}–L${f.last_line}<br><span>${escapeHtml(f.path)}</span><button class="conv-link-btn" data-copy-path="${escapeHtml(f.path)}" data-tooltip="Copy this source path" aria-label="Copy this source path">${ICONS.link}</button></div>`;
+  }).join('')}</details>` : '';
+  const rewindCurrentId = data.rewind_current_session_id || meta?.rewind_current_session_id;
+  const rewindHistory = data.rewind_history || meta?.rewind_history || [];
+  const historicalView = !!data.include_rewound;
+  const currentUrl = `/?session=${encodeURIComponent(rewindCurrentId || data.id)}`;
+  const rewindLinks = rewindHistory.map(item => `<div class="conv-rewind-record"><a href="/?session=${encodeURIComponent(item.session_id)}" target="_blank" rel="noopener">${escapeHtml((item.rewound_at ? fmtAbsTime(item.rewound_at) + ' · ' : '') + (item.title || item.session_id))}</a></div>`).join('');
+  const sameFileHistory = data.rewind?.status === 'selected' && data.rewind.hidden_message_count > 0
+    ? `<div class="conv-rewind-record"><a href="/?session=${encodeURIComponent(data.id)}&include_rewound=1" target="_blank" rel="noopener">View saved records in this session</a></div>` : '';
+  const rewindHtml = `<div class="conv-rewind">${historicalView
+    ? `All saved records, including earlier history. This is not the current conversation. <a href="${currentUrl}">Back to current conversation</a>`
+    : rewindCurrentId && rewindCurrentId !== data.id
+      ? `Record before rewind. <a href="${currentUrl}">Open current conversation</a>` : ''}${!historicalView && (rewindLinks || sameFileHistory)
+    ? `<details><summary>${rewindLinks ? 'View records before rewind' : 'View earlier saved records'}</summary>${rewindLinks}${sameFileHistory}</details>` : ''}</div>`;
   const pathBtnHtml = sourcePath
     ? `<button class="conv-link-btn" data-copy-path="${escapeHtml(sourcePath)}" data-tooltip="${pathLabel}" aria-label="${pathLabel}">${ICONS.link}</button>`
     : '';
@@ -4001,6 +4041,7 @@ function renderConv(data, meta) {
         ${subtitleHtml}
         <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} ${data.source === 'devin' ? 'database nodes' : 'raw lines'}</div>
         ${localMetadataHtml}
+        ${rewindHtml}
         ${data.context_complete === false ? `<details class="conv-meta"><summary role="alert">Conversation history is incomplete — some earlier context is unavailable.</summary><pre>${escapeHtml(JSON.stringify(data.history_issues || [], null, 2))}</pre></details>` : ''}
       </div>
       ${actionsHtml}
@@ -4035,12 +4076,12 @@ function renderConv(data, meta) {
   if (!_convStandalone) {
     head.querySelector('#conv-close').addEventListener('click', closeConversation);
     head.querySelector('#conv-popout').addEventListener('click', () => {
-      window.open(`/?session=${encodeURIComponent(data.id)}`, '_blank', 'noopener');
+      window.open(`/?session=${encodeURIComponent(data.id)}${data.include_rewound ? '&include_rewound=1' : ''}`, '_blank', 'noopener');
     });
   }
   // The share button exists in both modes, so its binding sits outside the standalone gate
   head.querySelector('#conv-share')?.addEventListener('click', () => {
-    const url = `${location.origin}/?session=${encodeURIComponent(data.id)}`;
+    const url = `${location.origin}/?session=${encodeURIComponent(data.id)}${data.include_rewound ? '&include_rewound=1' : ''}`;
     navigator.clipboard.writeText(url).then(() => toast('Copied session link'), () => toast('Copy failed'));
   });
   // Raw toggle: flip mode for the current view + re-render the same session/meta. Preserve scroll position (raw/rendered heights
@@ -4210,10 +4251,10 @@ function renderConv(data, meta) {
   });
 
   // Bind the session ID copy button (detail has moved to the head sticky area)
-  head.querySelector('[data-copy-id]')?.addEventListener('click', (e) => {
+  head.querySelectorAll('[data-copy-id]').forEach(button => button.addEventListener('click', (e) => {
     e.stopPropagation();
     navigator.clipboard.writeText(e.currentTarget.dataset.copyId).then(() => toast('Copied session ID'), () => toast('Copy failed'));
-  });
+  }));
   // Bind the JSONL path copy button
   head.querySelectorAll('[data-copy-path]').forEach(button => button.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -4888,6 +4929,11 @@ if (state.q) {
   // Defer the search until load completes (triggered inside load())
 }
 
+document.getElementById('show-rewound').addEventListener('change', (event) => {
+  state.showRewound = event.target.checked;
+  render();
+});
+
 // ---------- Source filter dropdown ----------
 // Replaces the original "Claude Sessions" title position. Clicking the trigger expands the dropdown; options toggle the global filter state.
 // Affects: card list / per-section counts / top-bar total / top-bar full-text search results (frontend filter).
@@ -5026,7 +5072,8 @@ function sessionsSignature(items) {
   let s = items.length + '|';
   for (const m of items) {
     s += m.id + ':' + m.mtime + ':' + activityTime(m) + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0)
-      + ':' + (m.human_confirmed ? 1 : 0) + ':' + (m.title_override || '') + ',';
+      + ':' + (m.human_confirmed ? 1 : 0) + ':' + (m.title_override || '')
+      + ':' + (m.rewind_current_session_id || '') + ':' + JSON.stringify(m.rewind_history || []) + ',';
   }
   return s;
 }
@@ -5116,6 +5163,7 @@ async function livePoll() {
 // same visibility gating and adaptive cadence, but the change signal is the file fingerprint
 // (mtime + size) the /conversation endpoint returns — the backend skips re-parsing when it matches.
 // A finished session never changes its fingerprint, so a historical transcript is never redrawn.
+let _convIncludeRewound = false;
 let _convLiveId = null;          // session being followed (null = no loaded conversation)
 let _convLiveFingerprint = null; // last fingerprint rendered
 let _convLiveTimer = null;
@@ -5191,7 +5239,10 @@ async function convLivePoll() {
   const sessionId = _convLiveId;
   _convLivePolling = true;
   try {
-    const fp = _convLiveFingerprint ? `?fingerprint=${encodeURIComponent(_convLiveFingerprint)}` : '';
+    const params = new URLSearchParams();
+    if (_convLiveFingerprint) params.set('fingerprint', _convLiveFingerprint);
+    if (_convIncludeRewound) params.set('include_rewound', '1');
+    const fp = params.toString() ? '?' + params.toString() : '';
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation${fp}`);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
@@ -5230,7 +5281,7 @@ applyColLeftPct();
   const sid = new URLSearchParams(location.search).get('session');
   if (sid) {
     document.body.classList.add('standalone');
-    openConversation(sid, {standalone: true});  // starts the single-session live loop once loaded
+    openConversation(sid, {standalone: true, includeRewound: new URLSearchParams(location.search).get('include_rewound') === '1'});  // starts the single-session live loop once loaded
   } else {
     load();
     scheduleLive();  // start the dashboard live heartbeat (standalone has its own loop, see startConvLive)

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const html = fs.readFileSync(require('node:path').join(__dirname, '../index.html'), 'utf8');
 const section = (start, end) => html.slice(html.indexOf(start), html.indexOf(end, html.indexOf(start)));
-const context = vm.createContext({assert, console});
+const context = vm.createContext({assert, console, URLSearchParams});
 vm.runInContext(`
 let selected = '', calls = [], renders = [], timers = new Map(), timerId = 0;
 let state = {items: [{id:'a', starred:true}, {id:'b'}]}, _inflightMutations = 0;
@@ -62,5 +62,8 @@ const flush = async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
   run("assert.equal(_convLivePolling,false); assert.equal(timers.size,1);");
   run("closeConversation(); openConversation('a',{standalone:true}); reply(10,{id:'a',fingerprint:'s1'});"); await flush();
   run("assert.equal(_convLiveId,'a'); assert.equal(timers.size,1); closeConversation(); assert.equal(_convLiveId,'a'); stopConvLive();");
+  run("openConversation('a',{standalone:true,includeRewound:true}); assert.match(calls[11].url,/include_rewound=1/); reply(11,{id:'a',fingerprint:'h1'});"); await flush();
+  poll=run('convLivePoll()'); run("assert.match(calls[12].url,/include_rewound=1/); reply(12,{id:'a',unchanged:true,fingerprint:'h1'});"); await poll;
+  run("stopConvLive();");
   console.log('PASS: overlay updates, scroll/metadata, selection, stale requests, close, search, hidden, retry, standalone');
 })().catch(error=>{console.error(error);process.exitCode=1;});

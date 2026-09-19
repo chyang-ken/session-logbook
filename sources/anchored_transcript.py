@@ -24,10 +24,11 @@ byte-level diffs before and after a change.
 """
 from __future__ import annotations
 
+from pathlib import Path
 import json
 import re
 from datetime import datetime, timezone
-from sources.claude_text import strip_leading_reminders
+from sources.claude_text import strip_leading_reminders, anchored_user_text
 
 
 def trunc(s, n):
@@ -79,6 +80,17 @@ def digest_header(jsonl_path, source="claude", source_files=None) -> str:
         lines += ['# EFFECTIVE HISTORY SOURCES:']
         lines += [f"# {f['relation']}: {f['path']} L{f['first_line']}-L{f['last_line']} (session {f['session_id']})" for f in files]
         lines += ['# A source file path is not the stable Session ID; inherited sources belong to their own session.']
+    if source == 'claude' and Path(jsonl_path).is_file():
+        from sources import claude_history
+        info = claude_history.describe(jsonl_path)
+        lines += ['# HISTORY: selected file only; copied records appear once.']
+        lines += ['# ' + info['history_note']]
+        lines += ['# HISTORY_ISSUE: ' + json.dumps(issue, sort_keys=True) for issue in info['history_issues']]
+        lines += [f"# RELATED SOURCE: {f['path']} L{f['first_line']}-L{f['last_line']} "
+                  f"(session {f['session_id']}; {f.get('shared_records', 0)} shared records)"
+                  for f in info['source_files'] if f['relation'] != 'selected']
+        lines += [f"# COMPACTION: L{c['line']} trigger={c['trigger']}; earlier raw history is not reconstructed."
+                  for c in info['compactions']]
     return "\n".join(lines)
 
 
@@ -189,68 +201,56 @@ def render_pi(path) -> str:
     return "\n".join(output)
 
 
-def render_claude(path) -> str:
+def render_claude(path, records=None) -> str:
     """Claude Code session jsonl → anchored-transcript string."""
     uturn = 0
     o_lines = []
-    ln = 0
-    with open(path, 'r', errors='replace') as f:
-        for raw in f:
-            ln += 1
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                o = json.loads(raw)
-            except Exception:
-                continue
-            t = o.get('type')
-            ts = (o.get('timestamp') or '')[:19]
-            side = ' (subagent)' if o.get('isSidechain') else ''
-            if o.get('isMeta'):
-                continue
-            if t == 'user':
-                msg = o.get('message') or {}
-                content = msg.get('content')
-                if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content):
-                    for b in content:
-                        if isinstance(b, dict) and b.get('type') == 'tool_result':
-                            is_error = bool(b.get('is_error'))
-                            status = 'ERROR' if is_error else 'OK'
-                            txt = _result_index(_result_text(b.get('content')), is_error)
-                            o_lines.append(f"[L{ln}]   ⮑ TOOL_RESULT {status}{side}: {txt}")
-                else:
-                    if isinstance(content, list):
-                        txt = " ".join(strip_leading_reminders(b.get('text', '')) if isinstance(b, dict) and b.get('type') == 'text' else ('[image]' if isinstance(b, dict) and b.get('type') == 'image' else '') for b in content).strip()
-                    else:
-                        txt = strip_leading_reminders(content or '')
-                    if not txt.strip():
-                        continue
-                    uturn += 1
-                    o_lines.append("")
-                    o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts}{side} ━━━━━━━━━━")
-                    o_lines.append(str(txt))
-            elif t == 'assistant':
-                msg = o.get('message') or {}
-                for b in (msg.get('content') or []):
-                    if not isinstance(b, dict):
-                        continue
-                    bt = b.get('type')
-                    if bt == 'text':
-                        tx = (b.get('text') or '').strip()
-                        if tx:
-                            o_lines.append(f"[L{ln}] ASSISTANT{side}: {tx}")
-                    elif bt == 'thinking':
-                        th = (b.get('thinking') or '').strip()
-                        if th:
-                            o_lines.append(f"[L{ln}]   💭 THINK{side}: {trunc(th, 1400)}")
-                    elif bt == 'tool_use':
-                        nm = b.get('name', '?')
-                        o_lines.append(f"[L{ln}]   🔧 {nm}{side}: {_tool_input_summary(nm, b.get('input'))}")
-            elif t == 'system':
-                tx = (o.get('content') or o.get('text') or '')
-                if isinstance(tx, str) and tx.strip():
-                    o_lines.append(f"[L{ln}] [SYSTEM]: {trunc(tx.strip(), 300)}")
+    from sources import claude_history
+    for ln, o in (claude_history.records(path) if records is None else records):
+        t = o.get('type')
+        ts = (o.get('timestamp') or '')[:19]
+        side = ' (subagent)' if o.get('isSidechain') else ''
+        if o.get('isMeta'):
+            continue
+        if t == 'user':
+            msg = o.get('message') or {}
+            content = msg.get('content')
+            if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content):
+                for b in content:
+                    if isinstance(b, dict) and b.get('type') == 'tool_result':
+                        is_error = bool(b.get('is_error'))
+                        status = 'ERROR' if is_error else 'OK'
+                        txt = _result_index(_result_text(b.get('content')), is_error)
+                        o_lines.append(f"[L{ln}]   ⮑ TOOL_RESULT {status}{side}: {txt}")
+            else:
+                txt = anchored_user_text(o)
+                if not txt.strip():
+                    continue
+                uturn = o.get('_logbook_user_turn', uturn + 1)
+                o_lines.append("")
+                o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts}{side} ━━━━━━━━━━")
+                o_lines.append(str(txt))
+        elif t == 'assistant':
+            msg = o.get('message') or {}
+            for b in (msg.get('content') or []):
+                if not isinstance(b, dict):
+                    continue
+                bt = b.get('type')
+                if bt == 'text':
+                    tx = (b.get('text') or '').strip()
+                    if tx:
+                        o_lines.append(f"[L{ln}] ASSISTANT{side}: {tx}")
+                elif bt == 'thinking':
+                    th = (b.get('thinking') or '').strip()
+                    if th:
+                        o_lines.append(f"[L{ln}]   💭 THINK{side}: {trunc(th, 1400)}")
+                elif bt == 'tool_use':
+                    nm = b.get('name', '?')
+                    o_lines.append(f"[L{ln}]   🔧 {nm}{side}: {_tool_input_summary(nm, b.get('input'))}")
+        elif t == 'system':
+            tx = (o.get('content') or o.get('text') or '')
+            if isinstance(tx, str) and tx.strip():
+                o_lines.append(f"[L{ln}] [SYSTEM]: {trunc(tx.strip(), 300)}")
     return "\n".join(o_lines)
 
 

@@ -19,7 +19,7 @@ from typing import Iterable, Optional
 
 import server
 from sources.activity import activity_time
-from sources import anchored_transcript, session_identity, codex_history
+from sources import anchored_transcript, session_identity, codex_history, claude_history
 from sources import codex as codex_source
 from sources import devin as devin_source
 from sources import kimi as kimi_source
@@ -140,6 +140,7 @@ def session_metadata(path: Path) -> dict:
     item["parent_session_id"] = parent_id
     item.update(session_identity.selection_metadata(item))
     if source == "claude":
+        item["id"] = claude_history.session_id(path) or item["id"]
         item["slug"] = _claude_slug(path)
     return item
 
@@ -650,7 +651,18 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     input_cursor = after_line
     changed = False
     after_line = int(after_line)
-    total_lines = _line_count(path)
+    if item["source"] == "claude" and cursor_source_path:
+        changed = Path(cursor_source_path).resolve() != path.resolve()
+        after_line = claude_history.remap_cursor(path, cursor_source_path, after_line)
+    elif cursor_source_path and Path(cursor_source_path).resolve() != path.resolve():
+        raise ValueError("cursor source changed without supported continuation evidence")
+    claude_selection = claude_history.rewind_status(path) if item['source'] == 'claude' else {}
+    full_claude_branch = (item['source'] == 'claude' and
+                          claude_selection.get('reason') != 'missing_leaf_pointer')
+    if full_claude_branch:
+        after_line = 0
+    total_lines = (claude_history.summary(path)['physical_lines'] if item["source"] == "claude"
+                   else _line_count(path))
     if after_line > total_lines:
         raise SessionLookupError(
             f"cursor L{after_line} is beyond current end L{total_lines}; restart from line 0"
@@ -660,10 +672,10 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     elif item["source"] == "pi":
         body = anchored_transcript.render_pi(path)
     else:
-        body = anchored_transcript.render_claude(path)
+        body = anchored_transcript.render_claude(path, claude_history.records(path, after_line))
     # Pi can switch branches inside one file. Return the complete selected branch
     # on follow rather than pretending an append-only cursor preserves its context.
-    if item["source"] != "pi":
+    if item["source"] not in {"pi", "claude"}:
         body = _filter_from_cursor_line(body, after_line)
     header = anchored_transcript.digest_header(path.resolve(), item["source"])
     observation = "\n".join([
@@ -671,6 +683,13 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         f"# PROJECT: {item.get('project_path') or ''}",
         f"# INPUT_CURSOR: {input_cursor if str(input_cursor).startswith('cx1:') else 'L' + str(input_cursor)}",
         f"# SOURCE_CHANGED: {str(changed).lower()}",
+        *(['# HISTORY_SWITCH: caller selected this target; shared UUID maps the cursor, not supervision authority.',
+           '# Reconcile any prior branch-only context; related files remain available separately.']
+          if changed and item['source'] == 'claude' else []),
+        *(['# FOLLOW_MODE: full selected branch; reconcile removed entries after rewind'
+           if claude_selection.get('evidence') else
+           '# FOLLOW_MODE: full saved history; selected branch unverified, reconcile previous context']
+          if full_claude_branch else []),
         *(['# FOLLOW_MODE: full selected branch (Pi can change branches)'] if item["source"] == "pi" else []),
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
@@ -680,7 +699,7 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         (f"# HISTORICAL_TERMINAL_NOT_CURRENT_STATE: {_observed_terminal(item)}"
          if historical_terminal else f"# EXPLICIT_TERMINAL: {_observed_terminal(item)}"),
         ("# Compare the full selected branch with the previous snapshot, including removed entries."
-         if item["source"] == "pi" else
+         if item["source"] == "pi" or full_claude_branch else
          "# The cursor line is returned again on follow; ignore it when its [L#] was already seen."),
         "# A quiet file is not proof that its Agent is still running or has finished.",
     ])
@@ -729,7 +748,8 @@ def status_for(path: Path) -> dict:
         "source": item["source"],
         "project_path": item.get("project_path"),
         "jsonl_path": item["jsonl_path"],
-        **({'source_files': codex_history.references(path)} if item['source'] == 'codex' else {}),
+        **({'source_files': codex_history.references(path)} if item['source'] == 'codex' else
+           claude_history.describe(path) if item['source'] == 'claude' else {}),
         "mtime_iso": item.get("mtime_iso"),
         "size": item.get("size"),
         "total_lines": total_lines,
@@ -836,6 +856,8 @@ def main(argv=None) -> int:
                 history = codex_history.load(path)
                 metadata.update(source_files=codex_history.references(path, history),
                                 context_complete=history['complete'], history_issues=history['issues'])
+            if metadata['source'] == 'claude':
+                metadata.update(claude_history.describe(path))
             _print_json(metadata)
         elif args.command in {"context", "follow"}:
             print(render_context(path, after_line=args.after_line,
@@ -851,14 +873,25 @@ def main(argv=None) -> int:
                 _print_json(_observe_codex(path, args))
                 return 0
             native_cursor, conversation_cursor = int(args.native_line_cursor), int(args.cursor_line)
-            if args.cursor_source_path and Path(args.cursor_source_path).resolve() != path.resolve():
-                raise ValueError("cursor source changed without supported continuation evidence")
+            source_changed = bool(args.cursor_source_path and
+                                  Path(args.cursor_source_path).resolve() != path.resolve())
+            session_changed = False
+            if source_changed:
+                if item['source'] != 'claude':
+                    raise ValueError("cursor source changed without supported continuation evidence")
+                conversation_cursor = claude_history.remap_cursor(path, args.cursor_source_path, conversation_cursor)
+                session_changed = (claude_history.session_id(path) !=
+                                   claude_history.session_id(args.cursor_source_path))
+                # Native and Hook consumers have independent cursor namespaces.
+                # Claude has no native event stream; do not transplant its old line.
+                native_cursor = 0
+
             native = runtime_events.native_events(path, item["source"], native_cursor, args.limit)
             result = {
                 "source": item["source"], "session_id": item.get("id"),
                 "transcript_path": str(path.resolve()),
                 "hooks": runtime_events.read(item["source"], item.get("id"),
-                                             args.event_cursor, args.limit),
+                                             0 if session_changed else args.event_cursor, args.limit),
                 "native": native,
                 "conversation": render_context(path, after_line=conversation_cursor,
                                                historical_terminal=True),
@@ -866,6 +899,20 @@ def main(argv=None) -> int:
                                   "Use turn identities and conversation evidence. Missing events "
                                   "do not establish liveness or completion.",
             }
+            if item['source'] == 'claude':
+                result.update(claude_history.describe(path))
+                if result.get('rewind', {}).get('reason') != 'missing_leaf_pointer':
+                    result['conversation_follow_mode'] = (
+                        'full_selected_branch' if result['rewind'].get('evidence')
+                        else 'full_saved_history_unverified')
+                    result['conversation_reconciliation_required'] = True
+                result['source_changed'] = source_changed
+                result['session_changed'] = session_changed
+                result['conversation_cursor_mapped'] = conversation_cursor
+                if session_changed:
+                    result['cursor_reset_reason'] = 'explicit_session_change'
+                    result['cursor_reset_scope'] = ['hooks', 'native', 'turn_identity']
+                    result['previous_session_id'] = claude_history.session_id(args.cursor_source_path)
             _print_json(result)
         elif args.command == "evidence":
             print(read_evidence(
