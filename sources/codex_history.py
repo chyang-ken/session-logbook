@@ -89,6 +89,27 @@ def segment_alias(path, meta):
     return None
 
 
+_IDENTITY_CACHE = {}
+
+
+def _identity(candidate):
+    """Return a rollout's (session id, page alias), rereading only a changed file."""
+    from sources import codex
+    try:
+        st = candidate.stat()
+        signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    except OSError:
+        signature = None
+    cached = _IDENTITY_CACHE.get(candidate)
+    if signature is not None and cached and cached[0] == signature:
+        return cached[1]
+    meta = codex._read_session_meta(candidate) or {}
+    value = (meta.get('id'), segment_alias(candidate, meta))
+    if signature is not None:
+        _IDENTITY_CACHE[candidate] = (signature, value)
+    return value
+
+
 def resolve(path):
     """Resolve a linear ancestry iteratively, indexing each candidate snapshot once."""
     from sources import codex
@@ -109,11 +130,10 @@ def resolve(path):
             for root in (codex.CODEX_ROOT, codex.CODEX_ARCHIVED_ROOT):
                 if root.exists():
                     for candidate in root.rglob('rollout-*.jsonl'):
-                        meta = codex._read_session_meta(candidate) or {}
-                        metadata_index.setdefault(meta.get('id'), set()).add(candidate.resolve())
-                        alias = segment_alias(candidate, meta)
+                        owner, alias = _identity(candidate)
+                        metadata_index.setdefault(owner, set()).add(candidate.resolve())
                         if alias:
-                            metadata_index.setdefault((meta.get('id'), alias), set()).add(candidate.resolve())
+                            metadata_index.setdefault((owner, alias), set()).add(candidate.resolve())
         identity = (logical_owner, sid) if logical_owner else sid
         key = (identity, byte)
         if key not in boundary_indexes:
@@ -200,6 +220,33 @@ def resolve(path):
     return {'records': records, 'segments': segments, 'issues': issues, 'complete': not issues}
 
 
+def load(path):
+    """Return a session's effective history; the single entry point for readers.
+
+    Same shape as resolve(). When the history index is available, verified coordinates
+    replace re-deriving the ancestry and only the needed byte ranges are read. Any index
+    miss, source change during the read, or index failure falls back to resolve().
+    Readers must call this rather than resolve() (enforced by tests), so the physical
+    layout of a session never leaks into features.
+    """
+    from sources import history_index
+    if history_index.index_path() is None:
+        return resolve(path)
+    plan = history_index.plan(path, resolve)
+    records, segments = [], []
+    try:
+        for segment in plan['segments']:
+            rows = history_index.window(segment)
+            records.extend(rows)
+            if rows:
+                segments.append({'path': segment['path'], 'session_id': segment['session_id'], 'records': rows})
+    except (OSError, ValueError):
+        return resolve(path)
+    if not segments and not plan['complete']:
+        return resolve(path)
+    return {'records': records, 'segments': segments, 'issues': plan['issues'], 'complete': plan['complete']}
+
+
 def fingerprint(path):
     from sources import history_index
     if history_index.index_path() is not None:
@@ -233,7 +280,7 @@ def cursor_position(history, source, line):
 
 def references(path, history=None):
     """Describe physical sources separately from the selected task's stable ID."""
-    history = resolve(path) if history is None else history
+    history = load(path) if history is None else history
     current = str(Path(path).resolve())
     from sources import codex
     sid = (codex._read_session_meta(path) or {}).get('id')
@@ -249,7 +296,7 @@ def references(path, history=None):
 def iter_messages(path):
     """Yield effective message text and its original physical evidence reference."""
     from sources import codex
-    history = resolve(path)
+    history = load(path)
     for entry in history['records']:
         record = entry['record']
         payload = record.get('payload') or {}
