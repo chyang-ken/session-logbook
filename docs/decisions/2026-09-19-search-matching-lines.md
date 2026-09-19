@@ -63,3 +63,11 @@ queries on the fast path (4 s). A query equal to a JSON key in quotes, such as
 `"type"`, still matches every line and stays slow (about 80 s before and after).
 
 `scripts/search_compare.py` is the reusable real-data comparison used above.
+
+## Open items
+
+- Common words with hundreds of hits still take 10-40 s: every hit session is parsed.
+- About 1-1.5 s is spent scanning roughly 10 GB even for a unique string; removing it
+  needs a persistent full-text index (not started, see Alternatives).
+- The first search after a service restart takes about 4 s while caches warm.
+- A term equal to a quoted JSON key (for example `"type"`) matches every line.
