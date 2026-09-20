@@ -126,6 +126,29 @@ original row, including an abandoned branch.
 - Never write to source transcripts or databases. Resume or message a Session only when the user separately
   requests that external action.
 
+## Claude follow: full branch by default, delta on request
+
+A Claude Desktop rewind hides earlier records, so plain `follow` on a Claude Session
+returns the whole selected branch and asks the reader to reconcile. A reader that keeps
+its own cursor can pass `--delta` instead:
+
+```bash
+python3 scripts/session_logbook.py follow '<target>' --cursor-line 427 --delta
+```
+
+It returns only line 427 onward, and names what the reader must retire:
+
+- `# REMOVED_BEFORE_CURSOR: L12-L18, L40` - anchors at or before the cursor that the
+  selected branch no longer contains. Drop anything derived from them. Logbook keeps no
+  record of what a reader consumed, so the list covers every hidden line up to the cursor;
+  retiring an anchor twice is harmless.
+- `# REMOVED_BEFORE_CURSOR: none` - nothing before the cursor was rewound.
+- `# REMOVED_BEFORE_CURSOR: unknown` - the branch could not be verified, so every saved
+  record is kept and returned in physical order; removal cannot be determined. The
+  `FOLLOW_MODE` line gives the reason.
+
+`--delta` with cursor 0, and every non-Claude source, behaves exactly like plain `follow`.
+
 ## Claude Desktop copied history and explicit target changes
 
 `locate`, `status`, and `observe` report `source_files`, compaction anchors, and

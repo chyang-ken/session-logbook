@@ -142,7 +142,7 @@ transcripts remain read-only. Semantic judgments belong to the consuming Agent.
 |---|---|
 | `locate <target>` | Resolve a Session ID, exact JSONL path, or bounded search query |
 | `context <target>` | Emit the standard anchored transcript plus the next line cursor |
-| `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record |
+| `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record. Claude returns the full selected branch; `--delta` returns only the cursor onward plus the earlier anchors a rewind removed |
 | `status <target>` | Report observed file/session metadata without guessing process liveness |
 | `observe <target>` | Return runtime facts and conversation with independent cursors (Devin excluded) |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
