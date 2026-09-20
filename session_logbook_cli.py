@@ -525,7 +525,7 @@ def _observed_terminal(item: dict) -> str:
 
 
 def _codex_context(path, after_line=0, cursor_source_path=None, historical_terminal=False,
-                   records=None, issues=None):
+                   records=None, issues=None, relations=None):
     from sources import codex_history
     if records is None and (cursor_source_path or str(after_line).startswith('cx1:')):
         source, line = cursor_source_path, after_line
@@ -548,7 +548,9 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
             selected = history_index.window(segment, line)
             for later in plan['segments'][matches[0] + 1:]:
                 selected.extend(history_index.window(later))
-            return _codex_context(path, line, source, historical_terminal, records=selected, issues=plan['issues'])
+            return _codex_context(path, line, source, historical_terminal, records=selected,
+                                  issues=plan['issues'],
+                                  relations={s['path']: s.get('relation') for s in plan['segments']})
     history = codex_history.load(path) if records is None else None
     rows = history['records'] if history is not None else records
     issues = history['issues'] if history is not None else (issues or [])
@@ -578,12 +580,18 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
     source_segments = {}
     for row in cursor_rows:
         source_segments.setdefault(row['path'], []).append(row)
+    # Carry the relation resolve() assigned; rebuilding it from the manifest alone cannot tell
+    # a page linked by history_base from an unlinked same-id page.
+    if relations is None:
+        relations = {s['path']: s.get('relation') for s in (history or {}).get('segments', [])}
     manifest = {'segments': [
         {'path': source, 'session_id': (codex_source._read_session_meta(Path(source)) or {}).get('id'),
-         'records': entries} for source, entries in source_segments.items()]}
+         'relation': relations.get(source), 'records': entries}
+        for source, entries in source_segments.items()]}
     header = [anchored_transcript.digest_header(Path(path).resolve(), 'codex',
               source_files=codex_history.references(path, manifest)),
               '# SESSION_ID: ' + str(meta.get('id')), '# PROJECT: ' + str(meta.get('project_path') or ''),
+              '# FORKED_FROM: ' + json.dumps(codex_history.fork_lineage(codex_source._read_session_meta(path))),
               '# CONTEXT_COMPLETE: ' + str(not issues).lower(),
               '# CONTEXT_ISSUES: ' + json.dumps(issues),
               '# RETURNED_CONTENT: ' + ('yes' if body.strip() else 'no'),
@@ -794,7 +802,9 @@ def status_for(path: Path) -> dict:
         "source": item["source"],
         "project_path": item.get("project_path"),
         "jsonl_path": item["jsonl_path"],
-        **({'source_files': codex_history.references(path)} if item['source'] == 'codex' else
+        **({'source_files': codex_history.references(path),
+            'forked_from': codex_history.fork_lineage(codex_source._read_session_meta(path))}
+           if item['source'] == 'codex' else
            claude_history.describe(path) if item['source'] == 'claude' else {}),
         "mtime_iso": item.get("mtime_iso"),
         "size": item.get("size"),
@@ -911,6 +921,7 @@ def main(argv=None) -> int:
             if metadata['source'] == 'codex':
                 history = codex_history.load(path)
                 metadata.update(source_files=codex_history.references(path, history),
+                                forked_from=history.get('forked_from'),
                                 context_complete=history['complete'], history_issues=history['issues'])
             if metadata['source'] == 'claude':
                 metadata.update(claude_history.describe(path))
