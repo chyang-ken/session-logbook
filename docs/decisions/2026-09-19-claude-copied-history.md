@@ -137,3 +137,21 @@ Synthetic tests cover native mapping conflicts, independent forks, unavailable f
 CLI graph uncertainty, current versus historical rendering, previews, exports, and
 follow reconciliation. The local acceptance preview isolates its state and caches
 from the resident dashboard and uses existing source records read-only.
+
+## Follow-up: working-directory drift and reader parity
+
+A subsequent user report showed a missing rewind entry in the overlay reader.
+Fresh overlay and standalone reads both displayed it, so the original screenshot's
+precise cause was not recovered. A separate, reproducible defect was confirmed:
+changing a card's display project from the Desktop root to a working subdirectory
+removed its explicit rewind relationship. Native parent/child evidence had not changed.
+The project guard now accepts directories within the Desktop root, using path-component
+boundaries; unrelated roots, conflicting ownership, and invalid native edges still
+fail open. This does not infer a relationship from directory containment alone.
+
+The existing refresh test replaced the renderer, so it could not catch features
+accidentally restricted to one view. It now also invokes the actual shipped renderer
+for both overlay and standalone entry modes, checking previous-record navigation,
+return-to-current links, and same-file historical views. This verifies generated
+content, not browser layout; browser checks remain necessary for visual behavior.
+No automatic page reload or new update prompt is introduced by this repair.

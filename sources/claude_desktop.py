@@ -35,6 +35,18 @@ def _identity(value):
     return isinstance(value, str) and bool(value)
 
 
+def _in_project(value, project):
+    """A display directory can move below the Desktop's stable working root."""
+    value = _project(value)
+    if value is None:
+        return False
+    try:
+        Path(value).relative_to(project)
+        return True
+    except ValueError:
+        return False
+
+
 def annotate_sessions(items, descriptor_root=None):
     """Return copied cards with verified rewind metadata; never remove cards.
 
@@ -107,7 +119,7 @@ def annotate_sessions(items, descriptor_root=None):
                 break
             item = candidates[0]
             path = item.get('jsonl_path')
-            if (_project(item.get('project_path')) != project or not isinstance(path, str)
+            if (not _in_project(item.get('project_path'), project) or not isinstance(path, str)
                     or not Path(path).is_file() or Path(path).stem != sid):
                 valid = False
                 break
