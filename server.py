@@ -18,7 +18,7 @@ from pathlib import Path
 
 from sources import antigravity as ag_source
 from sources import anchored_transcript
-from sources.claude_text import strip_leading_reminders
+from sources.claude_text import strip_leading_reminders, normalize_record
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
 from sources import codex as codex_source
@@ -43,7 +43,7 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 10
+CACHE_SCHEMA_VERSION = 11
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -431,7 +431,7 @@ def _extract_first_user_msg(f):
         if not line:
             break
         try:
-            d = json.loads(line)
+            d = normalize_record(json.loads(line))
         except Exception:
             continue
         if d.get("type") == "user":
@@ -713,7 +713,7 @@ def _extract_custom_title(jsonl_path: Path):
                 if needle not in line:
                     continue
                 try:
-                    d = json.loads(line)
+                    d = normalize_record(json.loads(line))
                 except Exception:
                     continue
                 if d.get("type") == "custom-title":
@@ -727,6 +727,7 @@ def _extract_custom_title(jsonl_path: Path):
 
 def _selection_user_turn(record):
     """Match the preview's user-turn rules without counting tool/system traffic."""
+    record = normalize_record(record)
     if record.get("type") != "user" or record.get("isMeta"):
         return False
     content = record.get("message", {}).get("content")
@@ -807,7 +808,7 @@ def extract_metadata(jsonl_path: Path):
     user_turn_count = 0
     for line in lines:
         try:
-            d = json.loads(line)
+            d = normalize_record(json.loads(line))
         except ValueError:
             continue
         if _selection_user_turn(d):
@@ -838,7 +839,7 @@ def extract_metadata(jsonl_path: Path):
 
     for line in reversed(lines):
         try:
-            d = json.loads(line)
+            d = normalize_record(json.loads(line))
         except Exception:
             continue
         t = d.get("type")
@@ -879,7 +880,7 @@ def extract_metadata(jsonl_path: Path):
     tail_qas = []
     for line in lines:
         try:
-            d = json.loads(line)
+            d = normalize_record(json.loads(line))
         except Exception:
             continue
         tt = d.get("type")
@@ -2119,7 +2120,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                     if not any(term in line_lower for term in terms):
                         continue
                 try:
-                    d = json.loads(line)
+                    d = normalize_record(json.loads(line))
                 except Exception:
                     continue
 

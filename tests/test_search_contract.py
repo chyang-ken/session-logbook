@@ -108,6 +108,10 @@ class SearchContractTests(unittest.TestCase):
             claude_assistant([{"type": "text", "text": "Widget deployed. The log shows {\"sessionId\": 1}."}],
                              "2026-01-01T00:00:04Z"),
             claude_user('Say "quoted" words and a C:\\path please', "2026-01-01T00:00:05Z"),
+            {"type": "queue-operation", "operation": "enqueue", "content": "unsentqueueonly"},
+            {"type": "attachment", "timestamp": "2026-01-01T00:00:06Z",
+             "attachment": {"type": "queued_command", "commandMode": "prompt",
+                            "origin": {"kind": "human"}, "prompt": "interruptneedle clarify criteria"}},
         ] + [claude_user(f"repeat marker {i}", f"2026-01-01T00:01:0{i}Z") for i in range(5)]
         (project / f"{CLAUDE_A}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows_a))
         rows_b = [
@@ -198,6 +202,8 @@ class SearchContractTests(unittest.TestCase):
             ("WIDGET", [CODEX_PLAIN, CLAUDE_A, CLAUDE_B, DEVIN], "every source with the word, newest first"),
             ("launch.json", [], "tool input is not message text"),
             ("toolonlyneedle", [], "tool output is not message text"),
+            ("interruptneedle criteria", [CLAUDE_A], "delivered human interruption is searchable"),
+            ("unsentqueueonly", [], "queue entry alone is not a delivered message"),
             ("codextoolonly", [], "Codex tool output is not message text"),
             ("sessionid", [CLAUDE_A], "key-like text inside a message still matches"),
             ("parentuuid", [], "JSON keys never match"),

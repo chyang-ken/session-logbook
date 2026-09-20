@@ -196,6 +196,7 @@ def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
         return kimi_source.message_role_from_line(row)
 
     if source == "claude":
+        row = server.normalize_record(row)
         if row.get("isMeta"):
             return None, ""
         kind = row.get("type")

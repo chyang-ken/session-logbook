@@ -12,9 +12,9 @@ from pathlib import Path
 import sqlite3
 
 from sources import history_index
-from sources.claude_text import anchored_user_text
+from sources.claude_text import anchored_user_text, normalize_record
 
-SCHEMA = 4
+SCHEMA = 5
 _MEMORY = {}
 
 
@@ -108,7 +108,7 @@ def summary(path):
             uuid = row.get('uuid')
             value['rows'].append({'line': line, 'offset': offset, 'end': stream.tell(),
                                   'uuid': uuid, 'hash': _payload(row),
-                                  'parent': row.get('parentUuid'), 'type': row.get('type'),
+                                  'parent': row.get('parentUuid'), 'type': normalize_record(row).get('type'),
                                   'leaf': row.get('leafUuid'),
                                   'sidechain': row.get('isSidechain', False),
                                   'user_turn': bool(anchored_user_text(row))})
@@ -336,7 +336,7 @@ def records(path, first=0, include_rewound=False):
                 continue
             stream.seek(row['offset'])
             raw = stream.read(row['end'] - row['offset'])
-            record = json.loads(raw)
+            record = normalize_record(json.loads(raw))
             record['_logbook_user_turn'] = user_turn
             yield row['line'], record
     if history_index.signature(path) != value['signature']:
