@@ -370,6 +370,10 @@ def search_sessions(
             continue
         results.append({
             "id": item.get("id"),
+            # Each hit keeps its own record id and line anchors; the conversation id only
+            # says which conversation that evidence belongs to.
+            "conversation_id": (server.conversation_for_record(item.get("id")) or {}
+                                ).get("conversation_id", item.get("id")),
             "slug": item.get("slug"),
             "source": item["source"],
             "project_path": item.get("project_path"),
@@ -399,6 +403,37 @@ def search_sessions(
     deduped = list(winners.values())
     deduped.sort(key=activity_time, reverse=True)
     return deduped[:limit]
+
+
+def conversation_facts(item: dict, target: Optional[str] = None) -> dict:
+    """Report the conversation a resolved record belongs to, and how we got here.
+
+    Identity is additive. The record id in every other field stays exactly what it was, so
+    an Agent that stored a Session ID keeps reading the same transcript. When the caller
+    passed a conversation id instead, ``resolved_from_conversation_id`` says so explicitly:
+    nothing here retargets a supervision cursor behind the caller's back.
+    """
+    record_id = item.get("id")
+    facts = server.conversation_for_record(record_id)
+    if facts:
+        facts = dict(facts)
+        facts["conversation_evidence"] = "scan_cache"
+    else:
+        # The CLI reads the dashboard's warm scan cache rather than scanning the library
+        # itself. When that cache is missing or was written by an older build, the library
+        # is unknown, and the only honest answer is that this record is its own
+        # conversation as far as we can see -- never a guess at a wider one.
+        facts = {"conversation_id": record_id, "conversation_current_id": record_id,
+                 "conversation_records": [{"id": record_id, "relation": None,
+                                           "is_current": True}],
+                 "conversation_evidence": "record_only",
+                 "conversation_evidence_reason":
+                     "scan cache absent or written by an older schema; start the dashboard "
+                     "once to refresh it, then this record's conversation is reported in full"}
+    if target and target != record_id and server.conversation_index().get(target) == record_id:
+        facts["resolved_from_conversation_id"] = target
+        facts["resolution_note"] = (f"conversation {target} -> current record {record_id}")
+    return facts
 
 
 def resolve_target(
@@ -651,7 +686,7 @@ def _observe_codex(path, args):
 
 
 def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False,
-                   cursor_source_path=None) -> str:
+                   cursor_source_path=None, target=None) -> str:
     item = session_metadata(path)
     if item["source"] == "codex":
         return _codex_context(path, after_line, cursor_source_path, historical_terminal)
@@ -687,8 +722,17 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     if item["source"] not in {"pi", "claude"}:
         body = _filter_from_cursor_line(body, after_line)
     header = anchored_transcript.digest_header(path.resolve(), item["source"])
+    facts = conversation_facts(item, target)
+    records = " ".join(
+        f"{record['id']}{'*' if record.get('is_current') else ''}"
+        f"{'(' + record['relation'] + ')' if record.get('relation') else ''}"
+        for record in facts.get("conversation_records") or [])
     observation = "\n".join([
         f"# SESSION_ID: {item.get('id')}",
+        f"# CONVERSATION_ID: {facts.get('conversation_id')}",
+        f"# CONVERSATION_RECORDS: {records}  (* = current; this transcript is SESSION_ID only)",
+        *([f"# RESOLVED_FROM_CONVERSATION: {facts['resolution_note']}"]
+          if facts.get("resolution_note") else []),
         f"# PROJECT: {item.get('project_path') or ''}",
         f"# INPUT_CURSOR: {input_cursor if str(input_cursor).startswith('cx1:') else 'L' + str(input_cursor)}",
         f"# SOURCE_CHANGED: {str(changed).lower()}",
@@ -744,9 +788,10 @@ def read_evidence(path: Path, line: int, context: int = 1, max_chars: int = 12_0
 def status_for(path: Path) -> dict:
     from sources import runtime_events
     item = session_metadata(path)
+    facts = conversation_facts(item)
     if item["source"] == "devin":
         _, chain = devin_source.read_session(path)
-        return {**item, "total_nodes": len(chain), "anchor_kind": "N",
+        return {**item, **facts, "total_nodes": len(chain), "anchor_kind": "N",
                 "next_cursor": f"N{chain[-1]['row_id'] if chain else 0}",
                 "follow_mode": "full-snapshot", "liveness": "unknown",
                 "explicit_terminal": "unknown"}
@@ -770,7 +815,15 @@ def status_for(path: Path) -> dict:
         "is_subagent": item["is_subagent"],
         "parent_session_id": item["parent_session_id"],
         "liveness": "unknown",
+        **facts,
         "runtime_observations": runtime_events.read(item["source"], item.get("id")),
+        # Runtime events are written by the clients themselves, under ids Logbook does not
+        # mint. They are unioned at read time and never re-keyed, so each superseded record
+        # still reports its own observations under its own id.
+        **({"conversation_runtime_observations":
+            {record["id"]: runtime_events.read(item["source"], record["id"])
+             for record in facts["conversation_records"] if record["id"] != item.get("id")}}
+           if len(facts.get("conversation_records") or []) > 1 else {}),
     }
 
 
@@ -861,8 +914,10 @@ def main(argv=None) -> int:
             return 0
 
         path = _resolve_from_args(args)
+        target = getattr(args, "target", None)
         if args.command == "locate":
             metadata = session_metadata(path)
+            metadata.update(conversation_facts(metadata, target))
             if metadata['source'] == 'codex':
                 history = codex_history.load(path)
                 metadata.update(source_files=codex_history.references(path, history),
@@ -873,7 +928,8 @@ def main(argv=None) -> int:
             _print_json(metadata)
         elif args.command in {"context", "follow"}:
             print(render_context(path, after_line=args.after_line,
-                                 cursor_source_path=args.cursor_source_path))
+                                 cursor_source_path=args.cursor_source_path,
+                                 target=target))
         elif args.command == "status":
             _print_json(status_for(path))
         elif args.command == "observe":
@@ -927,6 +983,9 @@ def main(argv=None) -> int:
                     result['previous_session_id'] = claude_history.session_id(args.cursor_source_path)
             _print_json(result)
         elif args.command == "evidence":
+            facts = conversation_facts(session_metadata(path), target)
+            if facts.get("resolution_note"):
+                print(f"# RESOLVED_FROM_CONVERSATION: {facts['resolution_note']}")
             print(read_evidence(
                 path,
                 line=args.line,

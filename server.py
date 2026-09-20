@@ -26,6 +26,7 @@ from sources import devin as devin_source
 
 from sources import kimi as kimi_source
 from sources import pi as pi_source
+from sources import session_identity
 
 # ---------- Config ----------
 HOST = "127.0.0.1"
@@ -43,7 +44,11 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 12
+# 13 covers two independent shape changes that were developed in parallel and each claimed
+# 12: conversation identity added head_session_id / compaction_parent_uuids to the metadata,
+# and the Antigravity in-file rewind changed the turn counts it produces. A cache written by
+# either one alone is wrong for the other, so the combined build takes a number of its own.
+CACHE_SCHEMA_VERSION = 13
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -112,6 +117,9 @@ _CWD_SEQ = {}  # jsonl_path_str -> list[str] order-preserving deduped cwd sequen
 _codex_session_index_mtime_ns = None
 # Mark dirty only when scanning actually changes the cache; frequent /api/sessions polling must not write repeatedly.
 _scan_cache_dirty = False
+# Bumped on every scan-cache mutation so derived views (conversation identity) know when
+# the underlying record set changed without diffing thousands of entries.
+_cache_generation = 0
 
 
 def _is_trusted_http_request(host: str, origin: str = "", fetch_site: str = "") -> bool:
@@ -146,6 +154,19 @@ def _is_trusted_http_request(host: str, origin: str = "", fetch_site: str = "") 
 
 
 # ---------- State persistence ----------
+def _state_backup_dir():
+    """Where backups of the state file in use belong.
+
+    BACKUP_DIR is the production directory. When a test or a pre-merge smoke launcher
+    rebinds STATE_FILE to a temp directory, the backups follow it instead of being skipped:
+    an unbacked write is exactly the situation the backup exists for, and writing into the
+    temp directory keeps the production directory untouched.
+    """
+    if STATE_FILE == DEFAULT_STATE_FILE:
+        return BACKUP_DIR
+    return STATE_FILE.parent / "backups"
+
+
 def _backup_state_file(state_file, backup_dir, retention_days):
     """Copy state_file into backup_dir with a timestamp suffix and clean old backups.
 
@@ -226,17 +247,34 @@ def save_state():
     tmp = STATE_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(_state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(STATE_FILE)
-    # production-only: after a successful write, do a rotating backup. Failure never raises
-    # and does not affect the main save path. Tests monkey-patch STATE_FILE to a temp path,
-    # so this auto-skips and leaves the real backup directory untouched.
-    if STATE_FILE == DEFAULT_STATE_FILE:
-        _backup_state_file(STATE_FILE, BACKUP_DIR, BACKUP_RETENTION_DAYS)
+    # Read the file back before calling the save a success. An atomic rename only proves the
+    # rename happened; a full disk, a truncated write or a filesystem that reordered the data
+    # all survive it silently, and this is the one file the user cannot reconstruct.
+    verified = False
+    try:
+        verified = json.loads(STATE_FILE.read_text(encoding="utf-8")) == _state
+    except Exception as e:
+        print(f"[critical] save_state wrote {STATE_FILE} but could not read it back: {e}. "
+              f"Treat the on-disk file as suspect and check "
+              f"{_state_backup_dir()} before further writes.", file=sys.stderr)
+    else:
+        if not verified:
+            print(f"[critical] save_state read-back mismatch at {STATE_FILE}: the file on disk "
+                  f"does not match the state just written. Check "
+                  f"{_state_backup_dir()} before further writes.", file=sys.stderr)
+    # After a successful write, do a rotating backup. Failure never raises and does not
+    # affect the main save path. The backup follows STATE_FILE rather than only guarding the
+    # production path, so a rebound STATE_FILE (the prescribed pre-merge smoke test) still
+    # gets one, next to the file it is actually protecting.
+    _backup_state_file(STATE_FILE, _state_backup_dir(), BACKUP_RETENTION_DAYS)
+    return verified
 
 
 # ---------- Scan cache persistence ----------
 def _mark_scan_cache_dirty():
-    global _scan_cache_dirty
+    global _scan_cache_dirty, _cache_generation
     _scan_cache_dirty = True
+    _cache_generation += 1
 
 
 def _prune_legacy_scan_cache_backups():
@@ -304,7 +342,7 @@ def _validate_scan_cache_payload(payload):
 def load_scan_cache():
     """Restore the warm scan cache from disk. Any failure returns False so the caller falls back to a full scan."""
     global _cache, _CWD_TRUTH_MAP, _CWD_INDEX_SEEN, _CWD_SEQ
-    global _codex_session_index_mtime_ns, _scan_cache_dirty
+    global _codex_session_index_mtime_ns, _scan_cache_dirty, _cache_generation
     if not SCAN_CACHE_FILE.exists():
         return False
     try:
@@ -333,6 +371,7 @@ def load_scan_cache():
     _codex_session_index_mtime_ns = payload["codex_session_index_mtime_ns"]
     _DECODE_DIR_CACHE.clear()
     _scan_cache_dirty = False
+    _cache_generation += 1  # a wholesale cache replacement invalidates every derived view
     return True
 
 
@@ -698,31 +737,85 @@ def _clean_custom_title(raw):
     return s
 
 
-def _extract_custom_title(jsonl_path: Path):
-    """Scan the full JSONL and return the customTitle from the last custom-title row.
+def _scan_title_and_compactions(jsonl_path: Path):
+    """One full pass for the effective custom title and for compaction lineage.
 
-    Each /title call appends a {"type":"custom-title","customTitle":"..."} row; the last
-    one is the currently effective title. A bytes substring prefilter avoids parsing JSON
-    for every line.
+    Each /title call appends a {"type":"custom-title","customTitle":"..."} row; the last one
+    is the currently effective title. A compaction appends a compact_boundary row whose
+    logicalParentUuid names the last record before the compaction. Almost always that record
+    is in this same file, but Claude Code sometimes starts a new file at a compaction, and
+    then the boundary is the only native pointer back to the earlier half of the
+    conversation. Both answers come from one pass because both need every line, and the
+    result is cached in the scan cache by mtime.
+
+    Returns (title, external_parent_uuids). A uuid is "external" only after a second pass has
+    confirmed it is nowhere in this file; that second pass runs for the roughly two percent of
+    files that carry a boundary at all.
     """
-    needle = b'"type":"custom-title"'
-    last = None
+    title_needle = b'"type":"custom-title"'
+    boundary_needle = b'"compact_boundary"'
+    last, boundaries = None, []
     try:
         with open(jsonl_path, "rb") as f:
+            offset = 0
             for line in f:
-                if needle not in line:
+                start, offset = offset, offset + len(line)
+                if title_needle in line:
+                    try:
+                        d = normalize_record(json.loads(line))
+                    except Exception:
+                        d = {}
+                    if d.get("type") == "custom-title":
+                        cleaned = _clean_custom_title(d.get("customTitle"))
+                        if cleaned:
+                            last = cleaned
+                    continue
+                if boundary_needle not in line:
                     continue
                 try:
-                    d = normalize_record(json.loads(line))
+                    d = json.loads(line)
                 except Exception:
                     continue
-                if d.get("type") == "custom-title":
-                    cleaned = _clean_custom_title(d.get("customTitle"))
-                    if cleaned:
-                        last = cleaned
+                if not isinstance(d, dict) or d.get("subtype") != "compact_boundary":
+                    continue
+                parent = d.get("logicalParentUuid")
+                if isinstance(parent, str) and parent:
+                    boundaries.append((parent, start))
     except Exception:
-        return None
-    return last
+        return None, []
+    if not boundaries:
+        return last, []
+    # "In this file" means "written into this file before the boundary". A uuid that only
+    # turns up further down was not there when the compaction happened, so it is not what
+    # the boundary points at -- and reading the whole file would wrongly call the
+    # conversation self-contained and lose the link.
+    external = []
+    try:
+        with open(jsonl_path, "rb") as f:
+            for parent, start in boundaries:
+                if parent in external:
+                    continue
+                f.seek(0)
+                if not _uuid_pattern(parent).search(f.read(start)):
+                    external.append(parent)
+    except Exception:
+        return last, []
+    return last, external
+
+
+def _uuid_pattern(uuid):
+    """Match a record that *is* this uuid, tolerating whitespace around the colon.
+
+    Deliberately not a plain substring of the uuid: the same value also appears as
+    parentUuid on the record's children, and treating that as ownership would point a
+    compaction link at the wrong file.
+    """
+    return re.compile(rb'"uuid"\s*:\s*"' + re.escape(uuid.encode("utf-8", "ignore")) + rb'"')
+
+
+def _extract_custom_title(jsonl_path: Path):
+    """Return only the effective custom title; kept for callers that want nothing else."""
+    return _scan_title_and_compactions(jsonl_path)[0]
 
 
 def _selection_user_turn(record):
@@ -759,8 +852,19 @@ def extract_metadata(jsonl_path: Path):
     last_stop_reason = None
     first_user_msg = None
 
+    head_session_id = None
     try:
         with open(jsonl_path, "rb") as f:
+            # 0) The very first record's sessionId. A rewind or resume re-stamps every copied
+            # record with the new id, so head == filename; a fork does not, so a head that
+            # disagrees with the filename is the one fork signature visible in the file alone.
+            try:
+                head = json.loads(f.readline() or b"{}")
+                if isinstance(head, dict) and isinstance(head.get("sessionId"), str):
+                    head_session_id = head["sessionId"] or None
+            except Exception:
+                head_session_id = None
+            f.seek(0)
             # 1) Read the file head first to capture the first user message as the opener
             first_user_msg = _extract_first_user_msg(f)
 
@@ -931,6 +1035,8 @@ def extract_metadata(jsonl_path: Path):
     all_tail = tail_users + tail_asts + tail_qas
     all_tail.sort(key=lambda m: m.get("ts") or "")
 
+    custom_title, compaction_parents = _scan_title_and_compactions(jsonl_path)
+
     # Prepend first_user_msg unless it is already in tail_users for a short session
     recent_msgs = []
     if first_user_msg:
@@ -952,7 +1058,9 @@ def extract_metadata(jsonl_path: Path):
         "last_stop_reason": last_stop_reason,
         "user_turn_count": user_turn_count,
         "single_turn": single_turn,
-        "custom_title": _extract_custom_title(jsonl_path),
+        "custom_title": custom_title,
+        "head_session_id": head_session_id,
+        "compaction_parent_uuids": compaction_parents,
     }
 
 
@@ -1628,8 +1736,13 @@ def generate_briefing(transcript_text: str) -> str:
         return f"[briefing exception: {e}]"
 
 
-def _find_jsonl(session_id):
+def _find_jsonl(session_id, resolve_conversation=True):
     """Locate a JSONL file by session ID, checking cache first and filesystem fallback next.
+
+    A record id always resolves to exactly its own file; that is checked first and never
+    overridden. Only when nothing owns the id as a record is it tried as a conversation id,
+    which resolves to that conversation's current record. Callers that report the result to
+    a person or an Agent say which happened rather than swapping the target silently.
 
     When multiple files share a session_id, choose the largest one. Worktree ghost files are
     around 100B while real project copies are usually hundreds of KB; arbitrary traversal
@@ -1681,7 +1794,14 @@ def _find_jsonl(session_id):
     kimi_wire = kimi_source.find_wire_by_session_id(session_id)
     if kimi_wire is not None:
         return kimi_wire
-    return pi_source.find_session(session_id)
+    found = pi_source.find_session(session_id)
+    if found is not None:
+        return found
+    if resolve_conversation:
+        current = conversation_index().get(session_id)
+        if current and current != session_id:
+            return _find_jsonl(current, resolve_conversation=False)
+    return None
 
 
 # ---------- Scope model (v2) ----------
@@ -1937,11 +2057,173 @@ def _dedup_by_id(metas):
     return result
 
 
+# ---------- Conversation identity ----------
+# A record is one transcript file and keeps its id, path and line anchors forever. A
+# conversation is the ordered set of records a person would call one conversation: a Claude
+# Desktop rewind, resume or cross-file compaction mints a new record id without starting a
+# new conversation. See docs/decisions/2026-09-20-conversation-identity.md.
+_COMPACTION_UUID_OWNERS = {}
+# A project directory with more transcripts than this is not worth a linear scan for one
+# uuid; the conversation stays split, which is the safe answer.
+COMPACTION_SIBLING_CAP = 200
+COMPACTION_READ_CAP = 64 * 1024 * 1024  # per sibling, for the ripgrep-less fallback
+_conversation_memo = {"generation": None, "at": 0.0, "index": {}, "by_record": {}}
+CONVERSATION_MEMO_TTL = 5.0  # seconds; Desktop descriptors change without touching _cache
+
+
+def _uuid_owner_stems(directory, uuid):
+    """Which transcripts in one project directory contain this record uuid.
+
+    Bounded on purpose: siblings of the file that asked, never the whole library. The answer
+    is memoized for the process because a record's uuid never moves between files.
+    """
+    key = (str(directory), uuid)
+    if key in _COMPACTION_UUID_OWNERS:
+        return _COMPACTION_UUID_OWNERS[key]
+    pattern = r'"uuid"\s*:\s*"%s"' % re.escape(uuid)
+    try:
+        siblings = sorted(Path(directory).glob("*.jsonl"))
+    except OSError:
+        siblings = []
+    stems = ()
+    if siblings and len(siblings) <= COMPACTION_SIBLING_CAP:
+        hits = None
+        rg_executable = _find_ripgrep()
+        if rg_executable:
+            try:
+                proc = subprocess.run(
+                    [rg_executable, "-l", "--no-messages", "-e", pattern, "--"]
+                    + [str(p) for p in siblings],
+                    capture_output=True, timeout=30,
+                )
+                if proc.returncode in (0, 1):
+                    hits = [Path(line) for line in
+                            proc.stdout.decode("utf-8", "replace").splitlines() if line]
+            except Exception:
+                hits = None
+        if hits is None:
+            compiled = _uuid_pattern(uuid)
+            hits = []
+            for sibling in siblings:
+                try:
+                    if sibling.stat().st_size > COMPACTION_READ_CAP:
+                        continue
+                    if compiled.search(sibling.read_bytes()):
+                        hits.append(sibling)
+                except OSError:
+                    continue
+        stems = tuple(sorted({p.stem for p in hits}))
+    _COMPACTION_UUID_OWNERS[key] = stems
+    return stems
+
+
+def compaction_links(metas):
+    """Resolve (child, parent) record pairs for compactions that started a new file.
+
+    A compact_boundary carries logicalParentUuid, the last record before the compaction.
+    When that uuid is not in the boundary's own file, the conversation continued across a
+    file boundary and the owning file is its predecessor. Ambiguous or unresolvable
+    boundaries produce no link, so the records stay separate.
+    """
+    links = []
+    for meta in metas:
+        if meta.get("source", "claude") != "claude":
+            continue
+        parents = meta.get("compaction_parent_uuids") or []
+        child = meta.get("id")
+        path = meta.get("jsonl_path")
+        if not parents or not child or not isinstance(path, str):
+            continue
+        for uuid in parents:
+            owners = [stem for stem in _uuid_owner_stems(Path(path).parent, uuid)
+                      if stem != child]
+            if len(owners) == 1:
+                links.append((child, owners[0]))
+                break  # The first resolvable boundary names this file's predecessor.
+    return links
+
+
+def annotate_conversations(items, descriptor_root=None):
+    """Stamp conversation identity onto cards. Pure with respect to the cards given."""
+    memberships = claude_desktop.descriptor_memberships(descriptor_root)
+    return session_identity.conversation_identity(items, memberships, compaction_links(items))
+
+
+CONVERSATION_FIELDS = ("conversation_id", "conversation_current_id", "conversation_records",
+                       "forked_from_record_id", "forked_from_conversation_id",
+                       "spawned_from_conversation_id")
+
+
+def _conversation_views():
+    """(facts by record id, current record by conversation id) from the warm cache.
+
+    Never rescans and never reads state: conversation identity is derived from the
+    transcripts and the Desktop descriptors alone. Memoized against the scan-cache
+    generation, plus a short clock so a descriptor written while the cache is idle is
+    still picked up.
+    """
+    now = time.time()
+    if (_conversation_memo["generation"] == _cache_generation
+            and now - _conversation_memo["at"] < CONVERSATION_MEMO_TTL):
+        return _conversation_memo["by_record"], _conversation_memo["index"]
+    if not _cache:
+        load_scan_cache()
+    metas = _dedup_by_id(sorted(_cache.values(), key=activity_time, reverse=True))
+    by_record, index = {}, {}
+    for item in annotate_conversations(metas):
+        facts = {key: item[key] for key in CONVERSATION_FIELDS if key in item}
+        by_record[item["id"]] = facts
+        conversation_id = facts.get("conversation_id")
+        current = facts.get("conversation_current_id")
+        if conversation_id and current and conversation_id != current:
+            index[conversation_id] = current
+    _conversation_memo.update(generation=_cache_generation, at=now,
+                              by_record=by_record, index=index)
+    return by_record, index
+
+
+def conversation_index():
+    """{conversation_id: current record id}, for resolving a conversation id to a file.
+
+    A record id is never looked up here: it already resolves to exactly its own file, and
+    keeping that true is the whole contract.
+    """
+    return _conversation_views()[1]
+
+
+def conversation_for_record(record_id):
+    """Conversation facts for one record, using the warm cache and never rescanning."""
+    return _conversation_views()[0].get(record_id)
+
+
+def conversation_state_targets(record_id):
+    """(current record to write, every record whose state counts) for one target.
+
+    Accepts a conversation id or any member record id. A write lands on the current record;
+    only un-star has to reach further, because a star set on a superseded record would
+    otherwise resurrect the moment the conversation folds again.
+    """
+    resolved = conversation_index().get(record_id)
+    target = resolved or record_id
+    facts = conversation_for_record(target)
+    if not facts:
+        return target, [target]
+    current = facts.get("conversation_current_id") or target
+    members = [r["id"] for r in facts.get("conversation_records") or []] or [current]
+    return current, members
+
+
 def enriched_sessions():
     """Return all sessions without filtering, adding local user metadata.
 
     Also backfill source / cli_version / model for Claude-path metadata; Codex already
     includes them. The frontend labels cards by source.
+
+    Order matters. Per-record state is resolved first so the Desktop rewind annotation can
+    still title an ancestor from that record's own override. Conversation identity is
+    computed next, and only then does the conversation-level state view replace the current
+    record's fields. Superseded records keep their own values: they are evidence of what the
+    user did to that file, not a second opinion about the conversation.
     """
     items = scan_sessions()
     import time as _time
@@ -1965,7 +2247,26 @@ def enriched_sessions():
         item["display_title"] = item["title_override"] or item.get("custom_title", "")
         item["human_confirmed"] = bool(st.get("human_confirmed"))
         result.append(item)
-    return claude_desktop.annotate_sessions(result)
+    result = annotate_conversations(claude_desktop.annotate_sessions(result))
+    for item in result:
+        sid = item["id"]
+        if (item.get("conversation_current_id") or sid) != sid:
+            continue  # Superseded record: its card keeps reporting its own state.
+        records = [r["id"] for r in item.get("conversation_records") or []] or [sid]
+        merged = session_identity.merge_conversation_state(records, sid, _state)
+        item["archived"] = _effective_archived(item, merged["archived_entry"])
+        item["archived_at"] = merged["archived_at"]
+        item["starred"] = merged["starred"]
+        item["starred_at"] = merged["starred_at"]
+        item["note"] = merged["note"]
+        item["older_notes"] = merged["older_notes"]
+        item["title_override"] = merged["title_override"]
+        item["title_override_source_id"] = merged["title_override_source_id"]
+        item["display_title"] = item["title_override"] or item.get("custom_title", "")
+        item["human_confirmed"] = merged["human_confirmed"]
+        item["scope"] = compute_scope(
+            item, dict(merged["archived_entry"], starred=merged["starred"]), now=now)
+    return result
 
 
 # ---------- Full-text search ----------
@@ -2562,6 +2863,15 @@ def search_sessions(query: str):
             _warn_search_fallback(f"line search unavailable ({e})")
             found = None
 
+    # A hit keeps its own record id, path and line anchors so the evidence stays traceable,
+    # and carries the conversation it belongs to so a caller can fold hits without losing
+    # which physical file each snippet came from.
+    conversations = {}
+    try:
+        conversations = _conversation_views()[0]
+    except Exception as e:  # identity is additive; search must never fail because of it
+        print(f"[warn] conversation identity unavailable for search: {e}", file=sys.stderr)
+
     results = []
     for meta, jsonl_path in candidates:
         if found is not None:
@@ -2569,7 +2879,11 @@ def search_sessions(query: str):
         else:
             snippets = _search_session(jsonl_path, terms, meta)
         if snippets:
-            results.append({"id": meta["id"], "snippets": snippets})
+            facts = conversations.get(meta["id"]) or {}
+            results.append({"id": meta["id"], "snippets": snippets,
+                            "conversation_id": facts.get("conversation_id", meta["id"]),
+                            "conversation_current_id":
+                                facts.get("conversation_current_id", meta["id"])})
 
     return results
 
@@ -3108,14 +3422,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, search_sessions(q))
 
         if path == "/api/stats":
-            import time as _time
-            items = scan_sessions()
-            now = _time.time()
+            # Count conversations, not records. Before this the bar counted every file a
+            # rewind chain left behind while the list showed one card, so the two disagreed.
             counts = {"starred": 0, "recent": 0, "dusty": 0, "archived": 0}
-            for m in items:
-                sc = compute_scope(m, _state.get(m["id"], {}), now=now)
-                counts[sc] = counts.get(sc, 0) + 1
-            counts["total"] = len(items)
+            total = 0
+            for item in enriched_sessions():
+                if (item.get("conversation_current_id") or item["id"]) != item["id"]:
+                    continue
+                total += 1
+                counts[item["scope"]] = counts.get(item["scope"], 0) + 1
+            counts["total"] = total
             return self._send_json(200, counts)
 
         cm = re.match(r"^/api/sessions/([^/]+)/conversation$", path)
@@ -3139,6 +3455,25 @@ class Handler(BaseHTTPRequestHandler):
                     fingerprint += ':' + hashlib.sha256(json.dumps(
                         desktop_meta, sort_keys=True).encode()).hexdigest()
                     fingerprint += ':all' if include_rewound else ':current'
+                # The reader shows the conversation's own note and title, so a change to
+                # either has to move the fingerprint or the standalone live reader stops
+                # redrawing. The record id in the response never changes.
+                resolved_from = conversation_index().get(sid)
+                record_id = resolved_from or sid
+                conversation = dict(conversation_for_record(record_id) or {})
+                if resolved_from:
+                    conversation['resolved_from_conversation_id'] = sid
+                conversation_state = {}
+                current_id = conversation.get('conversation_current_id') or record_id
+                if current_id == record_id:
+                    conversation_state = session_identity.merge_conversation_state(
+                        [r['id'] for r in conversation.get('conversation_records') or []]
+                        or [record_id], record_id, _state)
+                fingerprint += ':' + hashlib.sha256(json.dumps(
+                    [conversation, conversation_state.get('older_notes'),
+                     conversation_state.get('note'),
+                     conversation_state.get('title_override')],
+                    sort_keys=True, default=str).encode()).hexdigest()
                 seen = (qs.get('fingerprint') or [''])[0]
                 if seen and seen == fingerprint:
                     return self._send_json(200, {'id': sid, 'unchanged': True, 'fingerprint': fingerprint})
@@ -3159,6 +3494,14 @@ class Handler(BaseHTTPRequestHandler):
                 conv['title_override'] = st.get('title_override', '')
                 conv['display_title'] = conv['title_override'] or conv.get('custom_title', '')
                 conv['human_confirmed'] = bool(st.get('human_confirmed'))
+                conv.update(conversation)
+                if conversation_state:
+                    conv['title_override'] = conversation_state['title_override']
+                    conv['title_override_source_id'] = conversation_state['title_override_source_id']
+                    conv['display_title'] = conv['title_override'] or conv.get('custom_title', '')
+                    conv['human_confirmed'] = conversation_state['human_confirmed']
+                    conv['note'] = conversation_state['note']
+                    conv['older_notes'] = conversation_state['older_notes']
                 conv['fingerprint'] = fingerprint
                 return self._send_json(200, conv)
             except Exception as e:
@@ -3311,12 +3654,21 @@ class Handler(BaseHTTPRequestHandler):
 
         m = re.match(r"^/api/sessions/([^/]+)/(archive|note|star|title|human)$", path)
         if m:
-            sid, action = urllib.parse.unquote(m.group(1)), m.group(2)
+            addressed, action = urllib.parse.unquote(m.group(1)), m.group(2)
             try:
                 body = self._read_json()
             except Exception:
                 return self._send_json(400, {"error": "Invalid JSON"})
 
+            # A conversation id or any of its member record ids writes to the current
+            # record, so the next rewind does not strand what was just set. state.json stays
+            # keyed by record: nothing here re-keys or rewrites an existing entry.
+            try:
+                sid, members = conversation_state_targets(addressed)
+            except Exception as e:
+                print(f"[warn] conversation targets unavailable for {action}: {e}",
+                      file=sys.stderr)
+                sid, members = addressed, [addressed]
             entry = dict(_state.get(sid, {}))
             if action == "archive":
                 archived = bool(body.get("archived", True))
@@ -3336,6 +3688,17 @@ class Handler(BaseHTTPRequestHandler):
                     entry["starred_at"] = datetime.now(timezone.utc).isoformat()
                 else:
                     entry.pop("starred_at", None)
+                    # The conversation reads as starred when any member is, so un-starring
+                    # has to clear every member; otherwise the star comes straight back.
+                    for member in members:
+                        if member == sid:
+                            continue
+                        other = _state.get(member)
+                        if other and other.get("starred"):
+                            other = dict(other)
+                            other["starred"] = False
+                            other.pop("starred_at", None)
+                            _state[member] = other
             elif action == "title":
                 title = str(body.get("title_override") or "").strip()
                 if title:
@@ -3351,7 +3714,9 @@ class Handler(BaseHTTPRequestHandler):
 
             _state[sid] = entry
             save_state()
-            return self._send_json(200, {"id": sid, **entry})
+            return self._send_json(200, {"id": sid, **entry,
+                                         "addressed_id": addressed,
+                                         "conversation_members": members})
 
         if path == "/api/open-file":
             try:
