@@ -1935,13 +1935,53 @@
   .conv-detail span { margin-right: 16px; }
   .conv-sources { overflow-wrap: anywhere; }
   .conv-rewind { margin-top: 8px; font-size: 12px; color: var(--text-2); line-height: 1.7; }
-  #rewind-filter[hidden] { display: none; }
   .conv-rewind:empty { display: none; }
   .conv-rewind summary { cursor: pointer; }
   .conv-rewind summary:hover, .conv-rewind a:hover { color: var(--accent); }
   .conv-rewind a { color: var(--text-2); text-decoration: underline; }
   .conv-rewind-record { padding: 2px 0; }
-  .rewind-record-label { font-size: 11px; color: var(--text-3); margin: 4px 0; }
+  .conv-abandoned { margin-top: 6px; font-size: 12px; color: var(--text-3); }
+  .conv-rewind-relation { color: var(--text-3); }
+  .conv-rewind-current { color: var(--text-1); }
+  /* Conversation records on a card: chrome, so mono and quiet (design-system §3). */
+  .card-records { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); margin: 4px 0 0; }
+  .card-records summary { cursor: pointer; list-style: none; }
+  .card-records summary::-webkit-details-marker { display: none; }
+  .card-records summary:hover { color: var(--accent); }
+  .card-records-row { padding: 2px 0 2px 10px; overflow-wrap: anywhere; }
+  .card-records-row a { color: var(--text-2); text-decoration: underline; }
+  .card-records-row a:hover { color: var(--accent); }
+  .card-records-relation { color: var(--text-3); }
+  .card-records-current { color: var(--text-1); }
+  .card-lineage { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); margin: 4px 0 0; }
+  .card-lineage a { color: var(--text-2); text-decoration: underline; }
+  .card-lineage a:hover { color: var(--accent); }
+  /* Notes written on a superseded record: shown under the conversation's own note, never
+     merged into it, so nothing the user typed is concatenated away or hidden. */
+  .card-older-notes {
+    margin: 4px -8px 4px; padding: 8px 10px;
+    background: rgba(var(--sage-rgb), 0.05);
+    border-radius: 4px;
+    font-size: 12px; color: var(--text-2);
+    white-space: pre-wrap;
+  }
+  .card-older-notes::before {
+    content: 'EARLIER NOTES · ';
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; color: var(--sage);
+    margin-right: 4px;
+  }
+  .card-older-note { margin: 2px 0; overflow-wrap: anywhere; }
+  .card-older-note-id { font-family: var(--font-mono); font-size: 9px; color: var(--text-4); margin-right: 4px; }
+  .card.collapsed .card-older-notes, .card.collapsed .card-records { display: none; }
+  .search-match-record {
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--text-4);
+    margin-right: 4px;
+  }
   /* session id row: same style as the card's .card-sid-wrap —— the id text itself is click-to-copy (no separate button),
      icon button is borderless ghost. No more bordered "copy" pill / bordered icon (violates the no-border rule in design-system §7,
      and would diverge from the card version). Same component stays consistent across surfaces. */
@@ -2311,10 +2351,6 @@
     <input type="checkbox" id="hide-oneshot">
     <span id="suspected-filter-label">Suspected runs hidden</span>
   </label>
-  <label class="oneshot-toggle" id="rewind-filter" hidden>
-    <input type="checkbox" id="show-rewound">
-    <span id="rewind-filter-label">Show records before rewind</span>
-  </label>
     <div class="head-status">
       <span class="live-dot" id="live-dot" data-tooltip="Live — auto-refreshing"></span>
       <span class="count" id="count">—</span>
@@ -2368,9 +2404,12 @@ function saveUIState() {
 
 // Prune session ids that no longer exist from the two collapse-override Sets (after a session is deleted/archived its id still lingers,
 // otherwise the Sets only grow and localStorage accumulates dead ids forever). Calling it once after the initial load is enough.
+// Both kinds of key stay alive: the conversation key written now, and the record key written
+// by an older build — dropping the latter would silently discard the user's choice once.
 function pruneCardCollapsed() {
   if (!state.items.length) return;
-  const live = new Set(state.items.map(m => m.id));
+  const live = new Set();
+  for (const m of state.items) { live.add(m.id); live.add(conversationId(m)); }
   let changed = false;
   for (const set of [state.cardCollapsed, state.cardExpanded]) {
     for (const id of [...set]) {
@@ -2394,7 +2433,6 @@ const state = {
   items: [],
   searchHits: {},    // session_id -> [{text, role, term}, ...]
   searchPending: false,
-  showRewound: false,
   sectionOpen: _saved
     ? new Set(_saved.sectionOpen)
     : new Set(Object.entries(SECTION_DEFAULT_OPEN).filter(([, v]) => v).map(([k]) => k)),
@@ -2415,6 +2453,74 @@ const state = {
   // Source filter (all | claude | codex | antigravity | kimi)
   sourceFilter: SOURCE_FILTER_VALUES.includes(_saved?.sourceFilter) ? _saved.sourceFilter : 'all',
 };
+
+// ---------- Conversation identity ----------
+// The API serves two levels of identity. A *record* is one transcript file: its id, its path
+// and its line anchors mean what they always meant. A *conversation* is the ordered set of
+// records a rewind, a resume or a compaction left behind, and every item carries
+// conversation_id / conversation_current_id / conversation_records for it. A backend that
+// does not send those fields (or one whose scan cache is still cold) makes every helper here
+// fall back to the record id, which is exactly the behaviour before conversations existed.
+const _byRecord = new Map();
+const _byConversation = new Map();
+
+function conversationId(m) { return (m && (m.conversation_id || m.id)) || ''; }
+function conversationCurrentId(m) { return (m && (m.conversation_current_id || m.id)) || ''; }
+// The current record is the one new work lands in; every other member is superseded.
+function isCurrentRecord(m) { return !!m && conversationCurrentId(m) === m.id; }
+function conversationRecords(m) {
+  const records = m && m.conversation_records;
+  return Array.isArray(records) ? records : [];
+}
+function isMultiRecord(m) { return conversationRecords(m).length > 1; }
+
+// The one place state.items is replaced, so the two indexes can never drift from the array.
+function setItems(items) {
+  state.items = Array.isArray(items) ? items : [];
+  _byRecord.clear();
+  _byConversation.clear();
+  for (const m of state.items) {
+    if (!m || !m.id) continue;
+    _byRecord.set(m.id, m);
+    if (isCurrentRecord(m)) _byConversation.set(conversationId(m), m);
+  }
+}
+
+// Resolve either kind of id to the item that owns it. A record id is tried first and is never
+// overridden: it addresses exactly one transcript, and keeping that true is the whole contract.
+function findItem(id) {
+  if (!id) return undefined;
+  return _byRecord.get(id) || _byConversation.get(id);
+}
+
+// The entry a conversation is shown as, for any id belonging to it: its current record's item.
+// This is what a star, an archive, a note or a title applies to.
+function currentItemFor(id) {
+  const item = findItem(id);
+  if (!item) return undefined;
+  return _byRecord.get(conversationCurrentId(item)) || item;
+}
+
+// Only current records are entries; superseded ones are reachable from their conversation.
+function conversationItems() { return state.items.filter(isCurrentRecord); }
+
+// The id to put in a link the UI generates for an entry. A single-record conversation keeps
+// the record id it has always had; a multi-record one uses the conversation id, so the link
+// still opens the right transcript after the next rewind.
+function shareId(m) { return isMultiRecord(m) ? conversationId(m) : (m ? m.id : ''); }
+
+const RECORD_RELATION_LABELS = {
+  rewind: 'Rewound from the previous record',
+  continuation: 'Continued from the previous record',
+  'compaction-continuation': 'Continued after a compaction',
+};
+function recordRelationLabel(relation) {
+  return RECORD_RELATION_LABELS[relation] || (relation ? String(relation) : 'First record');
+}
+function shortId(id) {
+  const text = String(id || '');
+  return text.length > 12 ? text.slice(0, 8) + '…' : text;
+}
 
 // Column width bounds and default value
 const COL_LEFT_PCT_MIN = 25;
@@ -2593,16 +2699,23 @@ function shouldAutoExpand(scope, g) {
 function cardDefaultCollapsed(scope) {
   return (scope || 'recent') !== 'recent';
 }
+// Keyed by the conversation, so the choice survives a rewind minting a new record id.
+// Keys an older build wrote are record ids; they are still read, and written keys replace them.
+function cardKey(m) { return conversationId(m) || (m ? m.id : ''); }
 function cardIsCollapsed(m) {
-  if (state.cardCollapsed.has(m.id)) return true;
-  if (state.cardExpanded.has(m.id)) return false;
+  const key = cardKey(m);
+  if (state.cardCollapsed.has(key) || state.cardCollapsed.has(m.id)) return true;
+  if (state.cardExpanded.has(key) || state.cardExpanded.has(m.id)) return false;
   return cardDefaultCollapsed(m.scope);
 }
-function setCardCollapsed(id, scope, collapsed) {
-  state.cardCollapsed.delete(id);
-  state.cardExpanded.delete(id);
-  if (collapsed !== cardDefaultCollapsed(scope)) {
-    (collapsed ? state.cardCollapsed : state.cardExpanded).add(id);
+function setCardCollapsed(m, collapsed) {
+  const key = cardKey(m);
+  for (const set of [state.cardCollapsed, state.cardExpanded]) {
+    set.delete(key);
+    set.delete(m.id);
+  }
+  if (collapsed !== cardDefaultCollapsed(m.scope)) {
+    (collapsed ? state.cardCollapsed : state.cardExpanded).add(key);
   }
 }
 
@@ -2657,21 +2770,24 @@ function isSuspected(m) {
   return m.user_turn_count === 1 && !m.human_confirmed;
 }
 
-// The set of sessions the dashboard actually displays right now: source filter → search → suspected-run filter.
+// The set of sessions the dashboard actually displays right now: one entry per conversation,
+// then source filter → search → suspected-run filter.
 // Extracted so "collapse all" can operate over the full dataset — including cards inside unexpanded groups that aren't currently rendered to the DOM.
+// Superseded records are dropped first, so every count downstream counts conversations and
+// agrees with the list. Their content is still reachable: search hits fold onto the
+// conversation's entry, and each entry lists its records.
 function displayedItems() {
+  const entries = conversationItems();
   const scopedItems = state.sourceFilter === 'all'
-    ? state.items
-    : state.items.filter(m => (m.source || 'claude') === state.sourceFilter);
+    ? entries
+    : entries.filter(m => (m.source || 'claude') === state.sourceFilter);
   const q = state.q.toLowerCase();
   const matched = q ? scopedItems.filter(m => m.id in state.searchHits) : scopedItems;
-  const hiddenRewound = matched.filter(m => m.rewind_current_session_id && m.rewind_current_session_id !== m.id);
-  const visible = state.showRewound ? matched : matched.filter(m => !m.rewind_current_session_id || m.rewind_current_session_id === m.id);
-  const hiddenSuspected = state.hideOneshot ? visible.filter(isSuspected) : [];
-  let filtered = state.hideOneshot ? visible.filter(m => !isSuspected(m)) : visible;
+  const hiddenSuspected = state.hideOneshot ? matched.filter(isSuspected) : [];
+  let filtered = state.hideOneshot ? matched.filter(m => !isSuspected(m)) : matched;
   // Archive remains a deliberate hide action in the primary timeline, but search can still retrieve it.
   if (state.viewMode === 'timeline' && !q) filtered = filtered.filter(m => !m.archived);
-  return { scopedItems, filtered, hiddenSuspected, hiddenRewound };
+  return { scopedItems, filtered, hiddenSuspected };
 }
 
 let _hasRendered = false;  // The entrance animation runs only once: true on the first frame, after which all renders (including live polling) no longer replay it
@@ -2683,11 +2799,7 @@ function render() {
 
   // The unified filtering pipeline for source filter / search / suspected runs (see displayedItems).
   // state.items stays unchanged (still everything the backend returned), avoiding data loss when switching.
-  const { scopedItems, filtered, hiddenSuspected, hiddenRewound } = displayedItems();
-  const rewindFilter = document.getElementById('rewind-filter');
-  rewindFilter.hidden = !hiddenRewound.length && !state.showRewound;
-  document.getElementById('show-rewound').checked = state.showRewound;
-  document.getElementById('rewind-filter-label').textContent = `Show records before rewind${hiddenRewound.length ? ' (' + hiddenRewound.length + ')' : ''}`;
+  const { scopedItems, filtered, hiddenSuspected } = displayedItems();
 
   if (scopedItems.length === 0) {
     $count.textContent = '0 sessions';
@@ -2717,8 +2829,6 @@ function render() {
       document.getElementById('empty-show-suspected')?.addEventListener('click', () => {
         state.hideOneshot = false; syncSuspectedFilterUI(); saveUIState(); render();
       });
-    } else if (hiddenRewound.length && !state.showRewound) {
-      $list.innerHTML = `<div class="empty"><div class="empty-title">Matches found in records before rewind</div><div class="empty-hint">Use “Show records before rewind” above to view ${hiddenRewound.length} matching records.</div></div>`;
     } else {
       $list.innerHTML = `<div class="empty"><div class="empty-title">No matches for “${escapeHtml(state.q)}”</div><button class="empty-action" id="empty-clear-search">Clear search</button></div>`;
       document.getElementById('empty-clear-search')?.addEventListener('click', () => {
@@ -2824,7 +2934,7 @@ function bindCollapseAllBtn() {
     const collapsed = !expand;
     // Expand/collapse all: explicitly set an override on every displayed card (including cards inside collapsed groups that aren't rendered into the DOM).
     // Goes through setCardCollapsed to maintain the dual Sets, consistent with the section default (cards that exactly match the default write no override, auto-pruning id buildup).
-    for (const m of displayedItems().filtered) setCardCollapsed(m.id, m.scope, collapsed);
+    for (const m of displayedItems().filtered) setCardCollapsed(m, collapsed);
     // Don't go through render() — same feel as single-card collapse, avoids full-column reflow / scroll jump.
     // Directly toggle the class on rendered cards; the state of unrendered cards is already written to state, and render() applies it when their group expands.
     document.querySelectorAll('.card[data-id]').forEach(card => {
@@ -3048,7 +3158,9 @@ function bindGroupEvents() {
         // Find all unarchived sessions under this group.
         // scope is computed on the fly via computeScope(m) rather than reading the cached m.scope — just like projectKey, computed live,
         // upholding the "frontend scope is the source of truth" contract and avoiding stale cached values causing missed/wrong archiving.
-        const toArchive = state.items.filter(m =>
+        // One entry per conversation: archiving is the current record's state, so a superseded
+        // record is never addressed separately here.
+        const toArchive = conversationItems().filter(m =>
           !m.archived && computeScope(m) === gkScope && projectKey(m.project_path) === gkProjectKey
         );
         if (toArchive.length === 0) { toast('Nothing to archive'); return; }
@@ -3177,12 +3289,16 @@ function renderCard(m) {
   const noteIndicator = m.note
     ? `<span class="card-has-note" data-tooltip="Has a note">${ICONS.note}</span>`
     : '';
-  // Search match snippets
+  // Search match snippets. A hit found in a superseded record surfaces on this entry and
+  // names the record it came from, so the evidence still points at one physical file.
   const matchSnippets = state.searchHits[m.id];
   const matchBlock = matchSnippets && matchSnippets.length > 0
     ? `<div class="search-matches">${matchSnippets.map(s => {
         const role = s.role ? `<span class="search-match-role">${escapeHtml(s.role)}</span>` : '';
-        return `<div class="search-match">${role}${highlightTerms(escapeHtml(s.text), state.q)}</div>`;
+        const record = s.from_older_record
+          ? `<span class="search-match-record" title="Matched in earlier record ${escapeHtml(s.record_id || '')}">EARLIER RECORD ${escapeHtml(shortId(s.record_id))}</span>`
+          : '';
+        return `<div class="search-match">${record}${role}${highlightTerms(escapeHtml(s.text), state.q)}</div>`;
       }).join('')}</div>`
     : '';
   const archiveLabel = m.archived ? 'unarchive' : 'archive';
@@ -3243,13 +3359,37 @@ function renderCard(m) {
   const sourceChip = `<span class="source-chip ${sourceClass}" title="${sourceTitle}">${sourceCode}</span>`;
   const collapsed = cardIsCollapsed(m);
   const collapseBtn = `<button class="card-collapse-btn" data-act="collapse" data-tooltip="${collapsed ? 'Expand card' : 'Collapse card'}" aria-label="Toggle card collapse">${ICONS.chevron}</button>`;
+  // One conversation is one entry. Its earlier records are listed here, collapsed, each with
+  // how it follows the one before it, and each still openable at its own id.
+  const records = conversationRecords(m);
+  const recordsBlock = records.length > 1
+    ? `<details class="card-records" data-act="records"><summary>${records.length} records in this conversation</summary>${
+        records.map(r => {
+          // Every record says how it follows the one before it; the current one is also marked,
+          // because that is the transcript still being written to.
+          const label = recordRelationLabel(r.relation) + (r.is_current ? ' · current' : '');
+          const cls = r.is_current ? 'card-records-relation card-records-current' : 'card-records-relation';
+          return `<div class="card-records-row"><span class="${cls}">${escapeHtml(label)}</span> · <a href="/?session=${encodeURIComponent(r.id)}" target="_blank" rel="noopener" title="${escapeHtml(r.id)}">${escapeHtml(r.id)}</a></div>`;
+        }).join('')
+      }</details>`
+    : '';
+  // A fork is a separate conversation; it only says where it came from.
+  const forkedFrom = m.forked_from_record_id || m.forked_from_conversation_id || '';
+  const lineageBlock = forkedFrom
+    ? `<div class="card-lineage" data-act="lineage">Forked from <a href="/?session=${encodeURIComponent(forkedFrom)}" target="_blank" rel="noopener" title="${escapeHtml(forkedFrom)}">${escapeHtml(shortId(forkedFrom))}</a></div>`
+    : '';
+  const olderNotes = Array.isArray(m.older_notes) ? m.older_notes.filter(n => n && n.note) : [];
+  const olderNotesBlock = olderNotes.length
+    ? `<div class="card-older-notes">${olderNotes.map(n =>
+        `<div class="card-older-note"><span class="card-older-note-id" title="${escapeHtml(n.record_id || '')}">${escapeHtml(shortId(n.record_id))}</span>${escapeHtml(n.note)}</div>`
+      ).join('')}</div>`
+    : '';
   return `
     <div class="card ${m.archived ? 'archived' : ''}${collapsed ? ' collapsed' : ''}" data-id="${escapeHtml(m.id)}" data-source="${m.source || 'claude'}" data-scope="${m.scope || 'recent'}">
       ${collapseBtn}
       ${filesAbsBtn}
       ${titleBlock}
       ${suspectedBadge}
-      ${m.rewind_current_session_id && m.rewind_current_session_id !== m.id ? '<div class="rewind-record-label">Record before rewind</div>' : ''}
       ${pathrow}
       <div class="card-foot">
         <span class="card-sid-wrap">
@@ -3267,9 +3407,12 @@ function renderCard(m) {
           ${filesInlineBtn}
         </div>
       </div>
+      ${recordsBlock}
+      ${lineageBlock}
       ${msgsBlock}
       ${matchBlock}
       ${noteBlock}
+      ${olderNotesBlock}
     </div>`;
 }
 
@@ -3298,9 +3441,12 @@ async function mutatingFetch(url, opts) {
   }
 }
 
-async function toggleArchive(id, opts = {}) {
-  const m = state.items.find(x => x.id === id);
+// Personal state belongs to the conversation, so every write resolves to its current record
+// first — the same record the backend would write to for any member id it was handed.
+async function toggleArchive(addressedId, opts = {}) {
+  const m = currentItemFor(addressedId);
   if (!m) return;
+  const id = m.id;
   const newArchived = !m.archived;
   const oldArchived = m.archived;
   const oldScope = m.scope;
@@ -3331,7 +3477,9 @@ async function toggleArchive(id, opts = {}) {
 // After a modal archive: make the corresponding card on the dashboard flash for 0.6s to indicate its new position.
 // Note: toggleArchive has already called render() internally, so the DOM is currently being rebuilt,
 // and we need to wait until the next frame to get the new .card node.
-function flashCard(id) {
+function flashCard(addressedId) {
+  // The card carries the conversation's current record id, which is what any member resolves to.
+  const id = currentItemFor(addressedId)?.id || addressedId;
   requestAnimationFrame(() => {
     const card = document.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
     if (card) {
@@ -3340,16 +3488,17 @@ function flashCard(id) {
       card.addEventListener('animationend', () => card.classList.remove('card-flash'), {once: true});
     } else {
       // Fallback: after the scope switch the card got collapsed away, so tell the user where it went
-      const m = state.items.find(x => x.id === id);
+      const m = currentItemFor(id);
       const scopeName = m ? (SECTION_LABELS[m.scope]?.title || m.scope) : '';
       toast(scopeName ? `Moved to ${scopeName}` : 'Moved');
     }
   });
 }
 
-async function toggleStar(id) {
-  const m = state.items.find(x => x.id === id);
+async function toggleStar(addressedId) {
+  const m = currentItemFor(addressedId);
   if (!m) return;
+  const id = m.id;
   const newStarred = !m.starred;
   const oldStarred = m.starred;
   const oldScope = m.scope;
@@ -3384,7 +3533,7 @@ function bindCardEvents() {
     card.querySelector('[data-act="collapse"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
       const nowCollapsed = card.classList.toggle('collapsed');
-      setCardCollapsed(id, card.dataset.scope, nowCollapsed);
+      setCardCollapsed(findItem(id) || {id, scope: card.dataset.scope}, nowCollapsed);
       const btn = e.currentTarget;
       btn.dataset.tooltip = nowCollapsed ? 'Expand card' : 'Collapse card';
       saveUIState();
@@ -3398,22 +3547,25 @@ function bindCardEvents() {
     // Copy source reference (link icon), needs stopPropagation to avoid triggering the card's whole-card open
     card.querySelector('[data-act="copy-path"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
-      const m = state.items.find(x => x.id === id);
+      const m = findItem(id);
       const path = m?.jsonl_path;
       if (!path) { toast('No source reference'); return; }
       navigator.clipboard.writeText(path).then(() => toast('Copied source reference'), () => toast('Copy failed'));
     });
-    // Copy a shareable direct link (/?session=<id>), using location.origin to capture the current host:port
+    // Copy a shareable direct link (/?session=<id>), using location.origin to capture the current host:port.
+    // A conversation made of several records is linked by its conversation id, so the link keeps
+    // opening the right transcript after the next rewind; a single record keeps its own id.
     card.querySelector('[data-act="copy-link"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
-      const url = `${location.origin}/?session=${encodeURIComponent(id)}`;
+      const m = findItem(id);
+      const url = `${location.origin}/?session=${encodeURIComponent(m ? shareId(m) : id)}`;
       navigator.clipboard.writeText(url).then(() => toast('Copied session link'), () => toast('Copy failed'));
     });
     // Files shortcut entry: uses this card's project_path as current, and all paths with the same projectKey as tabs,
     // matching the behavior of the folder header's Files btn (the modal can still switch worktree tabs).
     card.querySelector('[data-act="files"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
-      const m = state.items.find(x => x.id === id);
+      const m = findItem(id);
       if (!m?.project_path) { toast('No project path'); return; }
       const key = projectKey(m.project_path);
       const pathSet = new Set();
@@ -3436,7 +3588,7 @@ function bindCardEvents() {
     }
     card.querySelector('[data-act="note"]').addEventListener('click', async (e) => {
       e.stopPropagation();
-      const m = state.items.find(x => x.id === id);
+      const m = currentItemFor(id);
       if (!m) return;
       const current = m.note || '';
       const next = await window.openNoteModal(current);
@@ -3445,7 +3597,7 @@ function bindCardEvents() {
       m.note = next;
       render();
       try {
-        const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(id)}/note`, {
+        const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(m.id)}/note`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({note: next}),
@@ -3489,7 +3641,7 @@ function openConversation(sessionId, opts = {}) {
   _convIncludeRewound = !!opts.includeRewound;
   const meta = opts.standalone
     ? null  // in standalone mode the dashboard isn't loaded, so meta is inferred from the conv data after fetch
-    : state.items.find(x => x.id === sessionId);
+    : findItem(sessionId);
   $conv.classList.add('open');
   $conv.innerHTML = `
     <div class="conv-modal">
@@ -3519,7 +3671,7 @@ function openConversation(sessionId, opts = {}) {
       if (generation !== _convLiveGeneration) return;
       renderConv(data, meta);
       // Both the overlay and standalone reader follow the open session.
-      startConvLive(sessionId, data.fingerprint);
+      startConvLive(sessionId, data.fingerprint, data);
     })
     .catch(err => {
       if (generation !== _convLiveGeneration) return;
@@ -3849,14 +4001,18 @@ async function openFileInSystem(filePath) {
   }
 }
 
+// Every object the change has to land on so it survives a redraw: the loaded transcript, the
+// card this reader was opened from, the record's own entry, and — when a rewind or compaction
+// made this one record of several — the conversation's current entry, which is where the
+// backend writes and which the list draws.
 function sessionMetadataTargets(data, meta) {
-  return [...new Set([data, meta, state.items.find(item => item.id === data.id)].filter(Boolean))];
+  return [...new Set([data, meta, findItem(data.id), currentItemFor(data.id)].filter(Boolean))];
 }
 
 function redrawSessionMetadata(data, meta) {
   const scrollTop = $conv?.querySelector('.conv-body')?.scrollTop || 0;
   if (!_convStandalone) render();
-  renderConv(data, state.items.find(item => item.id === data.id) || meta);
+  renderConv(data, findItem(data.id) || meta);
   const body = $conv?.querySelector('.conv-body');
   if (body) body.scrollTop = scrollTop;
 }
@@ -3926,11 +4082,17 @@ function renderConv(data, meta) {
   const userCount = data.turns.filter(t => t.type === 'user').length;
   const toolTurns = data.turns.filter(t => t.type === 'tool').length;
   const hasMeta = !!meta;
-  const starLabel = meta?.starred ? 'unstar' : 'star';
-  const archiveLabel = meta?.archived ? 'unarchive' : 'archive';
-  const archiveClass = meta?.archived ? '' : 'btn-danger';
-  const archiveIcon = meta?.archived ? ICONS.unarchive : ICONS.archive;
-  const humanConfirmed = Boolean(meta?.human_confirmed ?? data.human_confirmed);
+  // Two different things, deliberately kept apart. `meta` is this *record*: its size, its
+  // modification time, its source. `stateMeta` is the *conversation*: the star, the archive,
+  // the note and the personal title, which are one answer for all of a conversation's records
+  // and which the backend writes to the current one. On an ordinary single-record session the
+  // two are the same object, so nothing about that case changes.
+  const stateMeta = currentItemFor(data.id) || meta;
+  const starLabel = stateMeta?.starred ? 'unstar' : 'star';
+  const archiveLabel = stateMeta?.archived ? 'unarchive' : 'archive';
+  const archiveClass = stateMeta?.archived ? '' : 'btn-danger';
+  const archiveIcon = stateMeta?.archived ? ICONS.unarchive : ICONS.archive;
+  const humanConfirmed = Boolean(stateMeta?.human_confirmed ?? data.human_confirmed);
   // Raw toggle: shown in all modes (including standalone), independent of meta. Highlighted accent when active.
   const rawBtnHtml = `<button class="btn conv-raw-btn ${_convRaw ? 'active' : ''}" id="conv-raw" aria-pressed="${_convRaw}" data-tooltip="${_convRaw ? 'Showing raw text in this view — click for rendered markdown' : 'Show raw text for this view'}">${ICONS.code}${_convRaw ? 'raw on' : 'raw'}</button>`;
   // Export submenu: three export actions (shown in all modes, independent of meta) collected into one menu.
@@ -3958,8 +4120,8 @@ function renderConv(data, meta) {
       </div>
     </div>`;
   const metaBtnsHtml = hasMeta ? `
-      <button class="btn btn-star ${meta?.starred ? 'starred' : ''}" id="conv-star" data-tooltip="${meta?.starred ? 'Unstar' : 'Star'}">${ICONS.star}${starLabel}</button>
-      <button class="btn ${archiveClass}" id="conv-archive" data-tooltip="${meta?.archived ? 'Unarchive' : 'Archive'}">${archiveIcon}${archiveLabel}</button>` : '';
+      <button class="btn btn-star ${stateMeta?.starred ? 'starred' : ''}" id="conv-star" data-tooltip="${stateMeta?.starred ? 'Unstar' : 'Star'}">${ICONS.star}${starLabel}</button>
+      <button class="btn ${archiveClass}" id="conv-archive" data-tooltip="${stateMeta?.archived ? 'Unarchive' : 'Archive'}">${archiveIcon}${archiveLabel}</button>` : '';
   const actionsHtml = `
     <div class="conv-actions">
       ${rawBtnHtml}${exportMenuHtml}${metaBtnsHtml}
@@ -3972,7 +4134,7 @@ function renderConv(data, meta) {
   const closeHtml = _convStandalone ? '' :
     `<button class="conv-close" id="conv-close">${ICONS.close}</button>`;
 
-  const titleOverride = meta?.title_override ?? data.title_override ?? '';
+  const titleOverride = stateMeta?.title_override ?? data.title_override ?? '';
   const sourceTitle = data.custom_title || meta?.custom_title || '';
   const headTitle = titleOverride || sourceTitle || data.project_path || data.id;
   const subtitleParts = [];
@@ -3985,7 +4147,13 @@ function renderConv(data, meta) {
   const humanIdentityHtml = userCount === 1
     ? `<span class="conv-identity-label">${humanConfirmed ? 'Human-confirmed · single-turn' : 'Suspected automated run · single-turn'}</span><button type="button" id="conv-human">${humanConfirmed ? 'Undo' : 'I participated in this Session'}</button>`
     : '';
-  const localMetadataHtml = `<div class="conv-identity">${humanIdentityHtml}<button type="button" id="conv-title-edit">${titleOverride ? 'Edit personal title' : 'Add personal title'}</button></div>`;
+  // A personal title set on a record a rewind later superseded still names the conversation;
+  // say so, so "I never named this one" does not read as a bug.
+  const titleSourceId = stateMeta?.title_override_source_id ?? data.title_override_source_id ?? null;
+  const titleSourceHtml = titleOverride && titleSourceId && titleSourceId !== data.id
+    ? `<span class="conv-identity-label" title="${escapeHtml(titleSourceId)}">Title set on an earlier record</span>`
+    : '';
+  const localMetadataHtml = `<div class="conv-identity">${humanIdentityHtml}${titleSourceHtml}<button type="button" id="conv-title-edit">${titleOverride ? 'Edit personal title' : 'Add personal title'}</button></div>`;
   // Source pill: modal identity tag, on the same line as conv-title
   const sourceVal = (meta?.source || data.source || 'claude');
   const SRC_PILL = {
@@ -4007,18 +4175,40 @@ function renderConv(data, meta) {
     const openSource = f.relation === 'shared_history' && f.session_id ? `<a class="conv-link-btn" href="/?session=${encodeURIComponent(f.session_id)}" target="_blank" rel="noopener" data-tooltip="Open this source session" aria-label="Open this source session">${ICONS.externalLink}</a>` : '';
     return `<div>${escapeHtml(relation)} · Session <span class="conv-copy-id" data-copy-id="${escapeHtml(f.session_id)}" data-tooltip="Click to copy session ID">${escapeHtml(f.session_id)}</span>${openSource} · L${f.first_line}–L${f.last_line}<br><span>${escapeHtml(f.path)}</span><button class="conv-link-btn" data-copy-path="${escapeHtml(f.path)}" data-tooltip="Copy this source path" aria-label="Copy this source path">${ICONS.link}</button></div>`;
   }).join('')}</details>` : '';
-  const rewindCurrentId = data.rewind_current_session_id || meta?.rewind_current_session_id;
-  const rewindHistory = data.rewind_history || meta?.rewind_history || [];
+  // Conversation identity in the reader. Both entry points render this same block: the modal
+  // has `meta`, standalone does not, so every field is read from `data` first and only falls
+  // back to `meta`. When the backend serves no conversation fields at all — an older build, or
+  // a scan cache too cold to answer — `records` is empty and this collapses to nothing.
+  const convRecords = conversationRecords(data).length ? conversationRecords(data) : conversationRecords(meta);
+  const convCurrentId = data.conversation_current_id || meta?.conversation_current_id || data.id;
+  const isEarlierRecord = convRecords.length > 1 && convCurrentId !== data.id;
+  const forkedFrom = data.forked_from_record_id || data.forked_from_conversation_id
+    || meta?.forked_from_record_id || meta?.forked_from_conversation_id || '';
   const historicalView = !!data.include_rewound;
-  const currentUrl = `/?session=${encodeURIComponent(rewindCurrentId || data.id)}`;
-  const rewindLinks = rewindHistory.map(item => `<div class="conv-rewind-record"><a href="/?session=${encodeURIComponent(item.session_id)}" target="_blank" rel="noopener">${escapeHtml((item.rewound_at ? fmtAbsTime(item.rewound_at) + ' · ' : '') + (item.title || item.session_id))}</a></div>`).join('');
+  const currentUrl = `/?session=${encodeURIComponent(convCurrentId || data.id)}`;
+  const recordLinks = convRecords.length > 1 ? convRecords.map(r => {
+    const label = recordRelationLabel(r.relation) + (r.is_current ? ' · current' : '');
+    const cls = r.is_current ? 'conv-rewind-relation conv-rewind-current' : 'conv-rewind-relation';
+    return r.id === data.id
+      ? `<div class="conv-rewind-record"><span class="${cls}">${escapeHtml(label)}</span> · ${escapeHtml(r.id)} (reading this one)</div>`
+      : `<div class="conv-rewind-record"><span class="${cls}">${escapeHtml(label)}</span> · <a href="/?session=${encodeURIComponent(r.id)}" target="_blank" rel="noopener">${escapeHtml(r.id)}</a></div>`;
+  }).join('') : '';
+  const forkHtml = forkedFrom
+    ? `<div class="conv-rewind-record">Forked from <a href="/?session=${encodeURIComponent(forkedFrom)}" target="_blank" rel="noopener">${escapeHtml(forkedFrom)}</a>. It stays a separate conversation.</div>`
+    : '';
+  // Rows an in-file rewind abandoned are excluded from the turns by the backend. Say how many,
+  // so a shorter transcript is never silently shorter. Absent or zero renders nothing at all.
+  const abandonedRows = Number(data.rewind_abandoned_rows) || 0;
+  const abandonedHtml = abandonedRows > 0
+    ? `<div class="conv-abandoned">${abandonedRows} ${abandonedRows === 1 ? 'record was' : 'records were'} abandoned by a rewind and ${abandonedRows === 1 ? 'is' : 'are'} not shown.</div>`
+    : '';
   const sameFileHistory = data.rewind?.status === 'selected' && data.rewind.hidden_message_count > 0
     ? `<div class="conv-rewind-record"><a href="/?session=${encodeURIComponent(data.id)}&include_rewound=1" target="_blank" rel="noopener">View saved records in this session</a></div>` : '';
   const rewindHtml = `<div class="conv-rewind">${historicalView
     ? `All saved records, including earlier history. This is not the current conversation. <a href="${currentUrl}">Back to current conversation</a>`
-    : rewindCurrentId && rewindCurrentId !== data.id
-      ? `Record before rewind. <a href="${currentUrl}">Open current conversation</a>` : ''}${!historicalView && (rewindLinks || sameFileHistory)
-    ? `<details><summary>${rewindLinks ? 'View records before rewind' : 'View earlier saved records'}</summary>${rewindLinks}${sameFileHistory}</details>` : ''}</div>`;
+    : isEarlierRecord
+      ? `This is an earlier record of a conversation that continued elsewhere. <a href="${currentUrl}">Open the current one</a>` : ''}${forkHtml}${!historicalView && (recordLinks || sameFileHistory)
+    ? `<details><summary>${recordLinks ? `Records in this conversation (${convRecords.length})` : 'View earlier saved records'}</summary>${recordLinks}${sameFileHistory}</details>` : ''}</div>`;
   const pathBtnHtml = sourcePath
     ? `<button class="conv-link-btn" data-copy-path="${escapeHtml(sourcePath)}" data-tooltip="${pathLabel}" aria-label="${pathLabel}">${ICONS.link}</button>`
     : '';
@@ -4040,6 +4230,7 @@ function renderConv(data, meta) {
         </div>
         ${subtitleHtml}
         <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} ${data.source === 'devin' ? 'database nodes' : 'raw lines'}</div>
+        ${abandonedHtml}
         ${localMetadataHtml}
         ${rewindHtml}
         ${data.context_complete === false ? `<details class="conv-meta"><summary role="alert">Conversation history is incomplete — some earlier context is unavailable.</summary><pre>${escapeHtml(JSON.stringify(data.history_issues || [], null, 2))}</pre></details>` : ''}
@@ -4073,15 +4264,21 @@ function renderConv(data, meta) {
     </div>
     ${detailHtml}`;
 
+  // A link out of the reader names the conversation only when the reader is showing its current
+  // record. A deliberately opened earlier record keeps its own id: retargeting someone's link
+  // to a different transcript behind their back is exactly what must never happen.
+  const linkId = (convRecords.length > 1 && !isEarlierRecord && !historicalView)
+    ? (data.conversation_id || meta?.conversation_id || data.id)
+    : data.id;
   if (!_convStandalone) {
     head.querySelector('#conv-close').addEventListener('click', closeConversation);
     head.querySelector('#conv-popout').addEventListener('click', () => {
-      window.open(`/?session=${encodeURIComponent(data.id)}${data.include_rewound ? '&include_rewound=1' : ''}`, '_blank', 'noopener');
+      window.open(`/?session=${encodeURIComponent(linkId)}${data.include_rewound ? '&include_rewound=1' : ''}`, '_blank', 'noopener');
     });
   }
   // The share button exists in both modes, so its binding sits outside the standalone gate
   head.querySelector('#conv-share')?.addEventListener('click', () => {
-    const url = `${location.origin}/?session=${encodeURIComponent(data.id)}${data.include_rewound ? '&include_rewound=1' : ''}`;
+    const url = `${location.origin}/?session=${encodeURIComponent(linkId)}${data.include_rewound ? '&include_rewound=1' : ''}`;
     navigator.clipboard.writeText(url).then(() => toast('Copied session link'), () => toast('Copy failed'));
   });
   // Raw toggle: flip mode for the current view + re-render the same session/meta. Preserve scroll position (raw/rendered heights
@@ -4103,7 +4300,7 @@ function renderConv(data, meta) {
       // star is a "keep viewing" state, so don't close the modal
       toggleStar(data.id);
       // Fallback meta: in extreme cases live polling may remove this entry from state.items, so find returns undefined → the meta section disappears
-      renderConv(data, state.items.find(x => x.id === data.id) || meta);
+      renderConv(data, findItem(data.id) || meta);
     });
     head.querySelector('#conv-archive').addEventListener('click', () => {
       // archive / unarchive both close the modal and flash the dashboard to locate the card
@@ -4834,20 +5031,36 @@ document.addEventListener('keydown', (e) => {
   target.select();  // select existing content so typing overwrites it directly
 }, true);
 
+// Fold search hits onto the entry the list actually draws. A hit in a record that a rewind, a
+// resume or a compaction superseded belongs to the conversation that continued, so it surfaces
+// on that conversation's entry and says which record it came from. The snippet keeps its own
+// text, role and record, so the evidence still points at one physical file.
+function applySearchHits(hits) {
+  const merged = {};
+  for (const h of (Array.isArray(hits) ? hits : [])) {
+    if (!h || !h.id) continue;
+    const entryId = h.conversation_current_id || h.id;
+    const fromOlder = entryId !== h.id;
+    const list = merged[entryId] || (merged[entryId] = []);
+    for (const s of (h.snippets || [])) {
+      list.push(fromOlder ? {...s, record_id: h.id, from_older_record: true} : s);
+    }
+  }
+  state.searchHits = merged;
+}
+
 async function load() {
   $count.textContent = 'loading…';
   try {
     const res = await fetch('/api/sessions');
-    state.items = await res.json();
+    setItems(await res.json());
     pruneCardCollapsed();  // clear fold records for sessions that no longer exist
 
     // When restoring a persisted search term, fire a backend search once more
     if (state.q) {
       try {
         const sr = await fetch('/api/search?q=' + encodeURIComponent(state.q));
-        const hits = await sr.json();
-        state.searchHits = {};
-        for (const h of hits) state.searchHits[h.id] = h.snippets;
+        applySearchHits(await sr.json());
       } catch { state.searchHits = {}; }
     }
 
@@ -4904,15 +5117,11 @@ $search.addEventListener('input', () => {
       const sessRes = await fetch('/api/sessions');
       if (seq !== searchSeq) return;  // a newer request has taken over, keep searching
       const items = await sessRes.json();
-      state.items = items;
+      setItems(items);
       _liveSig = sessionsSignature(items);  // align the live baseline, avoiding an empty redraw on the first poll after clearing the search
       const res = await fetch('/api/search?q=' + encodeURIComponent(newQ));
       if (seq !== searchSeq) return;
-      const hits = await res.json();
-      state.searchHits = {};
-      for (const h of hits) {
-        state.searchHits[h.id] = h.snippets;
-      }
+      applySearchHits(await res.json());
     } catch {
       if (seq !== searchSeq) return;
       state.searchHits = {};
@@ -4928,11 +5137,6 @@ if (state.q) {
   syncSearchClear();
   // Defer the search until load completes (triggered inside load())
 }
-
-document.getElementById('show-rewound').addEventListener('change', (event) => {
-  state.showRewound = event.target.checked;
-  render();
-});
 
 // ---------- Source filter dropdown ----------
 // Replaces the original "Claude Sessions" title position. Clicking the trigger expands the dropdown; options toggle the global filter state.
@@ -5073,7 +5277,8 @@ function sessionsSignature(items) {
   for (const m of items) {
     s += m.id + ':' + m.mtime + ':' + activityTime(m) + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0)
       + ':' + (m.human_confirmed ? 1 : 0) + ':' + (m.title_override || '')
-      + ':' + (m.rewind_current_session_id || '') + ':' + JSON.stringify(m.rewind_history || []) + ',';
+      + ':' + (m.note || '') + ':' + JSON.stringify(m.older_notes || [])
+      + ':' + conversationCurrentId(m) + ':' + JSON.stringify(conversationRecords(m)) + ',';
   }
   return s;
 }
@@ -5101,8 +5306,10 @@ function beatLive() {
 // No scrollIntoView — a background update shouldn't hijack the user's viewport; just give a subtle flash in place to signal "this changed here".
 function flashLiveCards(ids) {
   if (!ids || !ids.length) return;
+  // A record that moved may be a superseded member; the card that shows it is its conversation's.
+  const cardIds = [...new Set(ids.map(id => currentItemFor(id)?.id || id))];
   requestAnimationFrame(() => {
-    ids.slice(0, 10).forEach(id => {
+    cardIds.slice(0, 10).forEach(id => {
       const card = document.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
       if (card) {
         card.classList.add('card-flash');
@@ -5138,7 +5345,7 @@ async function livePoll() {
       const prev = new Map(state.items.map(m => [m.id, activityTime(m)]));
       const changedIds = items.filter(m => !prev.has(m.id) || activityTime(m) > prev.get(m.id)).map(m => m.id);
       _liveSig = sig;
-      state.items = items;
+      setItems(items);
       _lastInteractionAt = Date.now();  // a real change → enter active cadence, ask more frequently next round
       render();
       flashLiveCards(changedIds);
@@ -5169,6 +5376,11 @@ let _convLiveFingerprint = null; // last fingerprint rendered
 let _convLiveTimer = null;
 let _convLivePolling = false;
 let _convLiveGeneration = 0;    // invalidates requests when closing or switching readers
+// Was the record on screen the conversation's current one when it was opened? If a rewind or a
+// compaction happens while the page is open, that flips, and the file being followed stops
+// growing. The reader then offers the new current record instead of quietly following a dead
+// file — it never navigates on its own, because a record id must always open that record.
+let _convLiveWasCurrent = false;
 
 function stopConvLive() {
   clearTimeout(_convLiveTimer);
@@ -5176,14 +5388,33 @@ function stopConvLive() {
   _convLiveId = null;
   _convLiveFingerprint = null;
   _convLivePolling = false;
+  _convLiveWasCurrent = false;
   _convLiveGeneration++;
 }
 
-function startConvLive(sessionId, fingerprint) {
+function startConvLive(sessionId, fingerprint, data) {
   _convLiveId = sessionId;
   _convLiveFingerprint = fingerprint || null;
+  _convLiveWasCurrent = !data || (data.conversation_current_id || data.id) === data.id;
   _lastInteractionAt = Date.now();
   scheduleConvLive();
+}
+
+// The record on screen was the current one and no longer is: a rewind, a resume or a compaction
+// started a new file. Say so once and offer the new record; the reader stays where the user put
+// it, and the banner renderConv already drew keeps the way forward visible afterwards.
+function noticeConversationMoved(data) {
+  const current = data.conversation_current_id || data.id;
+  const stillCurrent = current === data.id;
+  if (_convLiveWasCurrent && !stillCurrent) {
+    toast('This conversation continued in a new record', {
+      action: {label: 'Open it', fn: () => {
+        if (_convStandalone) location.href = `/?session=${encodeURIComponent(current)}`;
+        else openConversation(current);
+      }},
+    });
+  }
+  _convLiveWasCurrent = stillCurrent;
 }
 
 function scheduleConvLive() {
@@ -5250,8 +5481,9 @@ async function convLivePoll() {
     if (generation !== _convLiveGeneration || convLivePaused()) return;
     if (!data.unchanged && data.fingerprint !== _convLiveFingerprint) {
       const snap = captureConvUiState($conv.querySelector('.conv-body'));
-      renderConv(data, _convStandalone ? null : state.items.find(item => item.id === sessionId));
+      renderConv(data, _convStandalone ? null : findItem(data.id));
       restoreConvUiState($conv.querySelector('.conv-body'), snap);
+      noticeConversationMoved(data);
       _convLiveFingerprint = data.fingerprint;
       _lastInteractionAt = Date.now();  // the session is moving → stay on the fast cadence
     }

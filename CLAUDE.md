@@ -66,9 +66,11 @@ DATA (read-only)
   ~/.pi/agent/sessions/*/*.jsonl         (Pi; PI_CODING_AGENT_DIR / PI_CODING_AGENT_SESSION_DIR supported)
     └─► server.py: scan_sessions()       [incremental, by mtime]
         └─► _cache {jsonl_path: meta}
-            └─► enriched_sessions()      [meta + state + scope]
+            └─► enriched_sessions()      [meta + state + scope + conversation identity]
                 └─► GET /api/sessions
-                    └─► frontend: filter → timeline (default) or project groups → render
+                    └─► frontend: setItems() indexes by record id AND conversation id
+                        └─► one entry per conversation → filter → timeline (default)
+                            or project groups → render
 
 STATE (writable)
   POST /api/sessions/:id/{star,archive,note,title,human}
@@ -81,6 +83,10 @@ UI (browser-only)
     'session-logbook-ui' = { q, sectionOpen/Closed, groupOpen/Closed,
                   cardCollapsed, cardExpanded, recentDays, colLeftPct,
                   hideOneshot, sourceFilter, viewMode }
+    cardCollapsed / cardExpanded hold CONVERSATION ids (`cardKey()`), so a collapse
+    choice survives a rewind minting a new record id. Entries an older build wrote are
+    record ids; they are still read as a fallback and replaced on the next write, and
+    `pruneCardCollapsed()` keeps both kinds alive. Never crash on an old shape.
 ```
 
 Each agent's on-disk format is adapted to a common shape by a module under `sources/`
@@ -143,8 +149,9 @@ record actually written, `addressed_id` is what the caller asked for.
 
 | URL | Mode | Notes |
 |---|---|---|
-| `/` | dashboard | cross-project timeline by default; optional project view |
-| `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text; follows a running session in place (`startConvLive` polls `/conversation?fingerprint=…`, redraws only on change, keeps scroll / open state) |
+| `/` | dashboard | cross-project timeline by default; optional project view; **one entry per conversation** — superseded records are reachable from the entry's record list, not drawn as peers |
+| `/?session=<record id>` | standalone | that exact record, always. When it is no longer the conversation's current record the page says so and links the current one; it never redirects. Follows a running session in place (`startConvLive` polls `/conversation?fingerprint=…`, redraws only on change, keeps scroll / open state), and when the current record changes while the page is open it announces the move and offers the new record (`noticeConversationMoved`) |
+| `/?session=<conversation id>` | standalone | the conversation's **current** record, so the link stays good across a later rewind. Links the UI generates use this form only when the entry really has several records (`shareId()`); a single-record session keeps its record id exactly as before |
 
 ## 5. Agent-facing CLI and Skill
 
@@ -217,7 +224,10 @@ launcher gets its own `backups/` next to its temp state file rather than no back
 | `index.html` `<style>` | all CSS (custom props in `:root`) |
 | `index.html` `stripWorktree` / `projectKey` | path normalization + grouping keys |
 | `index.html` `computeScope` | frontend scope override |
-| `index.html` `render` / `renderCard` / `renderConv` | list, card, and conversation rendering |
+| `index.html` `setItems` / `findItem` / `currentItemFor` | the **only** id resolver: `setItems` is the one place `state.items` is replaced and it rebuilds the record and conversation indexes; `findItem` answers for either kind of id with the record always tried first; `currentItemFor` gives the entry a write applies to. Never reintroduce a linear `state.items.find(x => x.id === …)` — there were twelve, each free to drift |
+| `index.html` `conversationItems` / `shareId` / `cardKey` | entries the list draws; the id a generated link uses; the localStorage collapse key |
+| `index.html` `applySearchHits` | folds `/api/search` hits onto the entry that is drawn, tagging a hit found in a superseded record |
+| `index.html` `render` / `renderCard` / `renderConv` | list, card, and conversation rendering. `renderConv` keeps `meta` (this record: size, time, source) and `stateMeta` (this conversation: star, archive, note, title) apart, and reads conversation facts from the response before the card so the modal and the standalone page behave identically |
 | `index.html` `bindConvNav` | user-message navigation (j/k + goto + scroll state machine) |
 
 ## 8. Style
@@ -238,6 +248,14 @@ python3 scripts/check_no_cjk.py
 
 `tests/` uses Python `unittest` with synthetic fixtures. All tests must pass before merge;
 CI runs the same command on every push and PR.
+
+**Frontend behaviour is testable without a browser.** `tests/conversation_live_test.js` and
+`tests/conversation_identity_frontend_test.js` read the real functions out of `index.html`
+with `vm` and run them against stubs, so they test what ships rather than a copy. The
+first one renders every reader case **twice — once as the modal, once as the full page** —
+because a feature that works in only one of the two has shipped here before. Their Python
+wrappers skip when Node is absent; `tests/test_conversation_identity_frontend.py` also
+carries static guards that hold with no Node at all.
 
 **Search is the primary capability; changing it has two extra gates.**
 
