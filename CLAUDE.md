@@ -110,7 +110,7 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 | `GET /api/session-choices?source=claude` | optional source | Recent primary and single-turn candidates (up to 100 each); shared relationship and selection hints, title and recent user preview. No authorization changes. |
 | `GET /api/search?q=…` | multi-word = AND; session title and ID match too | `[{id, snippets:[{text, role, term}]}]` |
 | `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` |
-| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, title_override, display_title, human_confirmed, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
+| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, title_override, display_title, human_confirmed, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh). Antigravity adds `rewind_abandoned_rows` + `rewinds` — an in-file rewind is read as live history only, and this is how many raw lines it removed |
 | `GET /api/sessions/:id/anchored` | — | Plain-text transcript with `[L#]` original-line anchors (for agents to read / download) |
 | `GET /api/recent-files` / `GET /api/find-files` | Files panel | recent-changed / `fd` name search |
 | `POST /api/sessions/:id/star` | `{starred: bool}` | `{id, …entry}` |
@@ -177,7 +177,7 @@ State lives at `~/.session-logbook/state.json`, with rotating backups under
 | `server.py` `list_recent_files` / `find_files_by_name` | Files panel backends |
 | `sources/codex_history.py` `load` | the single entry point for a Codex session's effective history (continued pages and forks stitched across rollout files, served from the history index when available). Readers must call `load`, never `resolve`; `tests/test_history_entry_point.py` enforces this. If another client starts splitting sessions across files, give its source module the same kind of single entry point and route its readers through it, rather than generalizing Codex's format |
 | `sources/codex.py` `is_codex_path` / `CODEX_ARCHIVED_ROOT` | Codex (`~/.codex`) data source; `is_codex_path` is the centralized dual-root predicate (active `sessions` + `archived_sessions`) |
-| `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source |
+| `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source; `rewind_plan` / `live_records` select the live history of an in-file rewind (a `step_index` drop counts only when that step slot is already held by a live row) and every reader here goes through them |
 | `sources/pi.py` | Pi JSONL selected-branch reader, metadata, search, and exports; no source writes. CLI follow returns the full branch; raw evidence retains physical line numbers. |
 | `sources/kimi.py` `is_kimi_path` / `find_wire_by_session_id` | Kimi Code (`$KIMI_CODE_HOME`, default `~/.kimi-code`) data source; scans `sessions/*/*/agents/main/wire.jsonl` only (other agents are sub-agents); `is_kimi_path` is the directory-boundary-safe predicate |
 | `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex` / `render_kimi`); the single source of truth behind the `/anchored` endpoint |
