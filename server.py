@@ -44,7 +44,11 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 12
+# 13 covers two independent shape changes that were developed in parallel and each claimed
+# 12: conversation identity added head_session_id / compaction_parent_uuids to the metadata,
+# and the Antigravity in-file rewind changed the turn counts it produces. A cache written by
+# either one alone is wrong for the other, so the combined build takes a number of its own.
+CACHE_SCHEMA_VERSION = 13
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -2332,9 +2336,11 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     terms is a lowercase search-term list with AND semantics: every term must appear in the
     same session to count as a hit. Return [] for no match.
 
-    lines, when given, replaces reading a Claude, Antigravity or Kimi file: the raw lines
-    that contain at least one term, in file order. Every other line is skipped by the
-    line prefilter below anyway, so the result is the same. Other sources ignore it.
+    lines, when given, replaces reading a Claude, Antigravity or Kimi file: the
+    (physical line number, raw line) pairs that contain at least one term, in file order.
+    Every other line is skipped by the line prefilter below anyway, so the result is the
+    same. The line number is what lets Antigravity drop rows a rewind abandoned. Other
+    sources ignore it.
     """
     if codex_source.is_codex_path(jsonl_path):
         return _search_codex_history(jsonl_path, terms, session_meta)
@@ -2406,11 +2412,17 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     # frequency terms that rg cannot narrow at file level but most lines still do not contain.
     prefilter_safe = not any(c in t for t in terms for c in '"\\\n\r\t')
 
+    # An Antigravity rewind abandons earlier rows inside the same file. Search the live
+    # history only, in line with the reader and with the other branching sources.
+    skip_lines = ag_source.abandoned_line_numbers(jsonl_path) if is_ag else frozenset()
+
     try:
         with contextlib.ExitStack() as stack:
-            f = lines if lines is not None else stack.enter_context(
-                open(jsonl_path, "r", encoding="utf-8", errors="replace"))
-            for line in f:
+            f = lines if lines is not None else enumerate(stack.enter_context(
+                open(jsonl_path, "r", encoding="utf-8", errors="replace")), 1)
+            for line_number, line in f:
+                if line_number in skip_lines:
+                    continue
                 # Supplied lines were already selected by ripgrep for containing a term.
                 if prefilter_safe and lines is None:
                     line_lower = line.lower()
@@ -2704,7 +2716,8 @@ def _search_by_matching_lines(terms, entries, chains):
         finished.add(path)
         if path in by_path:
             meta, jsonl_path = by_path[path]
-            rows = (raw.decode("utf-8", "replace") for _, _, _, raw in same_file())
+            rows = ((number, raw.decode("utf-8", "replace"))
+                    for _, number, _, raw in same_file())
             results[path] = _search_session(jsonl_path, terms, meta, lines=rows)
             for _ in same_file():  # drain lines left after an early stop
                 pass
