@@ -137,6 +137,18 @@ class DesktopRewindTests(unittest.TestCase):
         self.items[0]['jsonl_path'] = self.items[1]['jsonl_path']
         self.assert_open()
 
+    def test_working_directory_drift_keeps_explicit_rewind_chain(self):
+        self.items[2]['project_path'] = str(Path(self.project) / 'tools' / 'parser')
+        result = self.annotate()
+        self.assertEqual(result[0]['rewind_current_session_id'], NEW)
+        self.assertEqual([h['session_id'] for h in result[2]['rewind_history']], [MID, OLD])
+        self.items[0]['project_path'] = str(Path(self.project) / 'another-subdirectory')
+        self.assertIn('rewind_history', self.annotate()[2])
+
+    def test_similar_directory_prefix_is_not_the_same_project(self):
+        self.items[2]['project_path'] = self.project + '-other'
+        self.assert_open()
+
     def test_malformed_and_partial_descriptor_are_ignored(self):
         for value in ('{', '[]', '{"sessionId": "local_example"}'):
             (self.folder / 'local_example.json').write_text(value)

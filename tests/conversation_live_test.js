@@ -67,3 +67,49 @@ const flush = async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
   run("stopConvLive();");
   console.log('PASS: overlay updates, scroll/metadata, selection, stale requests, close, search, hidden, retry, standalone');
 })().catch(error=>{console.error(error);process.exitCode=1;});
+
+// Execute the real renderer in both entry modes. Only DOM plumbing is stubbed;
+// replacing renderConv itself would miss a feature gated to one mode.
+const renderContext = vm.createContext({assert, console});
+vm.runInContext(`
+function element() {
+  return {innerHTML:'', scrollTop:0, addEventListener(){}, setAttribute(){},
+    querySelectorAll(){return [];},
+    querySelector(selector) {
+      return selector.startsWith('#') && this.innerHTML.includes('id="'+selector.slice(1)+'"')
+        ? element() : null;
+    }};
+}
+const head=element(), body=element();
+const $conv={setAttribute(){},querySelector:s=>s==='.conv-head'?head:body};
+const ICONS={};
+const escapeHtml=x=>String(x ?? '');
+const fmtAbsTime=x=>String(x);
+const activityISO=x=>x.activity_at_iso || '';
+const bindConvNav=()=>null, bindConvFind=()=>{};
+const closeConversation=()=>{};
+const document={title:''};
+let _convStandalone=false, _convRaw=false, $convNav=null;
+`, renderContext);
+vm.runInContext(section('function renderConv(', '// User-msg navigation:'), renderContext);
+vm.runInContext(`
+const base={id:'current',source:'claude',turns:[],total_lines:1};
+const cases=[
+  [{rewind_history:[{session_id:'old',title:'Previous conversation',rewound_at:123}]},
+   ['View records before rewind','/?session=old']],
+  [{id:'old',rewind_current_session_id:'current'},
+   ['Record before rewind','Open current conversation','/?session=current']],
+  [{rewind:{status:'selected',hidden_message_count:2}},
+   ['View earlier saved records','include_rewound=1']],
+  [{include_rewound:true},['All saved records','Back to current conversation']]
+];
+for (const [fields,expected] of cases) {
+  for (const standalone of [false,true]) {
+    _convStandalone=standalone;
+    renderConv({...base,...fields},standalone?null:{id:fields.id||base.id,size:100});
+    for(const text of expected) assert.ok(head.innerHTML.includes(text),
+      (standalone?'full page':'modal')+' missing '+text);
+  }
+}
+console.log('PASS: real renderer exposes rewind navigation in modal and full page');
+`, renderContext);
