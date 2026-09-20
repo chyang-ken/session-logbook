@@ -11,6 +11,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Preserve genuine Claude user text appended after desktop handoff reminders in search, previews, the reader, and exports; refresh cached metadata for existing sessions.
 
 ### Added
+- Add a `recent` Agent CLI command that lists recently active Sessions without a known target, with title, source, project, latest user time and the dashboard's selection hints; single-turn Sessions and sub-agents are opt-in. `--since` also accepts hours such as `6h`.
 - Read Pi sessions from local JSONL: selected-branch search, reader, exports, and Agent CLI, with original-line evidence and existing local metadata controls.
 - Browse sessions across projects in a default, newest-first timeline; the project view remains available.
 - Hide suspected automated runs with an explicit, reversible filter. Single-turn sessions are the initial signal; users can confirm their participation to keep a session visible.

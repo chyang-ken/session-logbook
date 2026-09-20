@@ -147,6 +147,7 @@ transcripts remain read-only. Semantic judgments belong to the consuming Agent.
 | `observe <target>` | Return runtime facts and conversation with independent cursors (Devin excluded) |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
 | `search <query>` | Search real User/Assistant messages with source/project/date/role filters |
+| `recent` | List recently active Sessions when no target is known yet: `--since 6h`, `--by user`, source/project filters, title, and the dashboard's selection hints (single-turn Sessions and sub-agents are opt-in) |
 
 The single packaged Skill is `skills/session-logbook/`. It routes Agent requests to this CLI;
 do not add separate find/read/compress Skills or duplicate source parsing in Skill instructions.
