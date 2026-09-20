@@ -153,3 +153,96 @@ def metadata_for_session(session_id, items, descriptor_root=None):
                     ('desktop_session_id', 'rewind_history', 'rewind_current_session_id')
                     if key in item}
     return {}
+
+
+def _ordered_members(priors, current):
+    """Return the descriptor's CLI session ids oldest to newest, current last."""
+    members = []
+    for value in priors:
+        if value != current and value not in members:
+            members.append(value)
+    members.append(current)
+    return members
+
+
+def descriptor_memberships(descriptor_root=None):
+    """Return every conversation a Desktop descriptor claims, without touching cards.
+
+    A membership is the raw, descriptor-level answer to "which CLI session ids belong to
+    this Desktop conversation": ``priorCliSessionIds`` in order, then ``cliSessionId``.
+    ``relations`` names how each member follows its predecessor, and only an explicit
+    ``rewindEdges`` entry can say ``rewind`` -- a prior without an edge is a plain
+    ``continuation``. Fork and spawn pointers travel as lineage, never as membership.
+
+    Nothing here inspects cards, so the caller still has to verify that each member
+    resolves to exactly one card. Contradictory descriptors are dropped, not guessed at:
+    the caller then sees no membership and keeps the records separate.
+    """
+    by_desktop = {}
+    claimed = {}
+    for descriptor in _descriptors(DESKTOP_ROOT if descriptor_root is None else descriptor_root):
+        desktop = descriptor.get('sessionId')
+        current = descriptor.get('cliSessionId')
+        if not _identity(desktop) or not _identity(current):
+            continue
+        by_desktop.setdefault(desktop, []).append(descriptor)
+        claimed.setdefault(current, set()).add(desktop)
+    result = []
+    for desktop, copies in by_desktop.items():
+        descriptor = copies[0]
+        keys = ('cliSessionId', 'cwd', 'rewindEdges', 'priorCliSessionIds')
+        if any(any(copy.get(key) != descriptor.get(key) for key in keys) for copy in copies[1:]):
+            continue  # Two stores disagree about the same conversation; trust neither.
+        current = descriptor['cliSessionId']
+        project = _project(descriptor.get('cwd'))
+        if not project:
+            continue
+        priors = descriptor.get('priorCliSessionIds')
+        if priors is None:
+            priors = []
+        if not isinstance(priors, list) or not all(_identity(value) for value in priors):
+            continue  # Unreadable lineage is not a reason to invent one.
+        edges = descriptor.get('rewindEdges')
+        if edges is None:
+            edges = []
+        if not isinstance(edges, list):
+            continue
+        parents = {}
+        valid = True
+        for edge in edges:
+            if not isinstance(edge, dict):
+                valid = False
+                break
+            parent, child = edge.get('parent'), edge.get('child')
+            if (not _identity(parent) or not _identity(child) or parent == child
+                    or not _identity(edge.get('forkPoint'))
+                    or _project(edge.get('cwd')) != project
+                    or (child in parents and parents[child] != parent)):
+                valid = False
+                break
+            parents[child] = parent
+        if not valid:
+            continue
+        members = _ordered_members(priors, current)
+        relations = {}
+        for index, member in enumerate(members[1:], start=1):
+            relations[member] = ('rewind' if parents.get(member) == members[index - 1]
+                                 else 'continuation')
+        for member in members:
+            claimed.setdefault(member, set()).add(desktop)
+        spawned = descriptor.get('spawnedFrom')
+        spawned = spawned.get('sessionId') if isinstance(spawned, dict) else None
+        forked = descriptor.get('forkedFromSessionId')
+        result.append({
+            'conversation_id': desktop,
+            'members': members,
+            'relations': relations,
+            'current': current,
+            'project': project,
+            'forked_from_conversation_id': forked if _identity(forked) else None,
+            'spawned_from_conversation_id': spawned if _identity(spawned) else None,
+        })
+    # A record two Desktop conversations both claim proves the evidence is wrong somewhere.
+    # Dropping both memberships leaves the records separate instead of hiding one behind
+    # the other, which is the only failure this layer is allowed to have.
+    return [m for m in result if all(len(claimed.get(sid, ())) == 1 for sid in m['members'])]

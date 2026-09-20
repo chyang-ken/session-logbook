@@ -100,26 +100,44 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 4. **Suspected automation is intentionally simple.** A single-turn Session is suspected
    unless local `human_confirmed` metadata says otherwise. Confirmed sub-agents remain excluded
    by their source adapter; do not merge the two concepts.
-5. **No auth.** Binds `127.0.0.1` only.
+5. **Record ID vs conversation ID.** A record is one transcript file and keeps its `id`,
+   path and `[L#]` anchors forever; a conversation is the ordered set of records a rewind,
+   resume or cross-file compaction produced. `conversation_id` / `conversation_current_id` /
+   `conversation_records` are **additive**: no id is ever renamed or retargeted, and
+   contradictory evidence dissolves a group back into single records. See
+   [`docs/decisions/2026-09-20-conversation-identity.md`](docs/decisions/2026-09-20-conversation-identity.md).
+6. **`state.json` stays keyed by record and is never re-keyed.** The conversation-level view
+   is produced at read time by `session_identity.merge_conversation_state` -- one function,
+   one place to change the policy. Starred is a union (earliest `starred_at`); archived is
+   the current record's only; the current record's note is the conversation's note and older
+   ones come back as `older_notes`; the title falls back to the newest older override and
+   reports its source; `human_confirmed` is a union; a cached `brief` is never merged.
+7. **No auth.** Binds `127.0.0.1` only.
 
 ## 3. API
 
 | Endpoint | In | Out |
 |---|---|---|
-| `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, title_override, display_title, human_confirmed, scope, archived, archived_at, starred, starred_at, note}]` |
-| `GET /api/session-choices?source=claude` | optional source | Recent primary and single-turn candidates (up to 100 each); shared relationship and selection hints, title and recent user preview. No authorization changes. |
-| `GET /api/search?q=…` | multi-word = AND; session title and ID match too | `[{id, snippets:[{text, role, term}]}]` |
-| `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` |
-| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, title_override, display_title, human_confirmed, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
+| `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, title_override, title_override_source_id, display_title, human_confirmed, scope, archived, archived_at, starred, starred_at, note, older_notes, conversation_id, conversation_current_id, conversation_records, forked_from_record_id?, forked_from_conversation_id?, spawned_from_conversation_id?}]`; the conversation-level state view lands on the current record only (see §2.6) |
+| `GET /api/session-choices?source=claude` | optional source | Recent primary and single-turn candidates (up to 100 each); shared relationship and selection hints, title and recent user preview. Superseded records are not offered. No authorization changes. |
+| `GET /api/search?q=…` | multi-word = AND; session title and ID match too | `[{id, conversation_id, conversation_current_id, snippets:[{text, role, term}]}]`; snippets stay per record so anchors remain traceable |
+| `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` counted per **conversation**, so the bar and the list agree |
+| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>`; `:id` may be a conversation id | `{id, project_path, custom_title, title_override, display_title, human_confirmed, note, older_notes, conversation_id, conversation_records, resolved_from_conversation_id?, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
 | `GET /api/sessions/:id/anchored` | — | Plain-text transcript with `[L#]` original-line anchors (for agents to read / download) |
 | `GET /api/recent-files` / `GET /api/find-files` | Files panel | recent-changed / `fd` name search |
-| `POST /api/sessions/:id/star` | `{starred: bool}` | `{id, …entry}` |
-| `POST /api/sessions/:id/archive` | `{archived: bool, note?}` | `{id, …entry}` |
-| `POST /api/sessions/:id/note` | `{note: string}` | `{id, …entry}` |
-| `POST /api/sessions/:id/title` | `{title_override: string}` | `{id, …entry}`; empty clears the personal title |
-| `POST /api/sessions/:id/human` | `{human_confirmed: bool}` | `{id, …entry}`; false clears the correction |
+| `POST /api/sessions/:id/star` | `{starred: bool}` | `{id, …entry, addressed_id, conversation_members}` |
+| `POST /api/sessions/:id/archive` | `{archived: bool, note?}` | `{id, …entry, addressed_id, conversation_members}` |
+| `POST /api/sessions/:id/note` | `{note: string}` | `{id, …entry, addressed_id, conversation_members}` |
+| `POST /api/sessions/:id/title` | `{title_override: string}` | `{id, …entry, addressed_id, conversation_members}`; empty clears the personal title |
+| `POST /api/sessions/:id/human` | `{human_confirmed: bool}` | `{id, …entry, addressed_id, conversation_members}`; false clears the correction |
 
 A POST body missing `starred` / `archived` defaults to `True`.
+
+Every `:id` above accepts a **record id** or a **conversation id**. A record id always
+resolves to exactly that record; a conversation id resolves to the conversation's current
+record and the response says so (`resolved_from_conversation_id`). Writes land on the
+current record; un-star also clears every starred member. `id` in a write response is the
+record actually written, `addressed_id` is what the caller asked for.
 
 ## 4. Frontend routes
 
@@ -140,13 +158,21 @@ transcripts remain read-only. Semantic judgments belong to the consuming Agent.
 
 | Command | Outcome |
 |---|---|
-| `locate <target>` | Resolve a Session ID, exact JSONL path, or bounded search query |
+| `locate <target>` | Resolve a Session ID, a conversation ID, an exact JSONL path, or a bounded search query |
 | `context <target>` | Emit the standard anchored transcript plus the next line cursor |
 | `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record |
 | `status <target>` | Report observed file/session metadata without guessing process liveness |
 | `observe <target>` | Return runtime facts and conversation with independent cursors (Devin excluded) |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
 | `search <query>` | Search real User/Assistant messages with source/project/date/role filters |
+
+Every `<target>` accepts a record ID or a conversation ID. A record ID resolves to exactly
+that record, always. A conversation ID resolves to that conversation's current record, and
+`locate` / `status` report it as `resolved_from_conversation_id`, while `context` / `follow` /
+`evidence` print a `# RESOLVED_FROM_CONVERSATION:` header line. Nothing is ever retargeted
+silently. `locate` / `status` / `search` also report `conversation_id` and, on `status`, the
+per-record `conversation_runtime_observations` (runtime events are unioned at read time and
+never re-keyed).
 
 The single packaged Skill is `skills/session-logbook/`. It routes Agent requests to this CLI;
 do not add separate find/read/compress Skills or duplicate source parsing in Skill instructions.
@@ -163,14 +189,19 @@ do not add separate find/read/compress Skills or duplicate source parsing in Ski
 | `SEARCH_SNIPPET_CONTEXT` / `SEARCH_MAX_SNIPPETS` | 60 / 3 | search snippet sizing |
 
 State lives at `~/.session-logbook/state.json`, with rotating backups under
-`~/.session-logbook/backups/`.
+`~/.session-logbook/backups/`. `save_state` reads the file back after writing and reports a
+mismatch on stderr, and the backup follows `STATE_FILE` when it is rebound (a smoke-test
+launcher gets its own `backups/` next to its temp state file rather than no backup at all).
 
 ## 7. Code map
 
 | Location | Responsibility |
 |---|---|
-| `server.py` `extract_metadata` | card preview (first user + tailed user/assistant) + turn counts + custom title |
+| `server.py` `extract_metadata` / `_scan_title_and_compactions` | card preview (first user + tailed user/assistant) + turn counts + custom title + the two pieces of identity evidence: `head_session_id` (a fork keeps the source's id in the file head) and `compaction_parent_uuids` (a compaction boundary whose parent record is not above it in this file) |
 | `server.py` `extract_conversation` | conversation view (pairs tool_use/tool_result, filters thinking, detects skill injection) |
+| `server.py` `annotate_conversations` / `conversation_index` / `conversation_for_record` / `conversation_state_targets` / `compaction_links` | conversation identity for the server: resolves cross-file compaction parents (bounded to sibling transcripts, memoized), stamps identity on cards, resolves a conversation ID to its current record for `_find_jsonl`, and picks the record a write lands on |
+| `sources/session_identity.py` `conversation_identity` / `merge_conversation_state` | the single home for conversation identity and for folding per-record personal state into the conversation's view. Change the merge policy here and nowhere else |
+| `sources/claude_desktop.py` `descriptor_memberships` | the raw, descriptor-level membership answer (prior CLI sessions + current, with rewind vs continuation), alongside the existing `annotate_sessions` rewind display fields |
 | `server.py` `compute_scope` / `_effective_archived` | backend scope (pure function, unit-tested); `_effective_archived` derives archived state (explicit state > Codex file location) |
 | `server.py` `load_scan_cache` / `save_scan_cache` / `CACHE_SCHEMA_VERSION` | persistent warm scan cache (`~/.session-logbook/scan-cache.json`): load on start + incremental scan. Bump the schema version on any meta-shape change, or stale caches break |
 | `server.py` `search_sessions` / `_rg_prefilter` / `_rg_matching_lines` / `_search_session` | full-text search (ripgrep file prefilter → ripgrep streams only lines containing a term, JSON keys excluded → per-session AND match; whole-file Python fallback). See `docs/decisions/2026-09-19-search-matching-lines.md` |
