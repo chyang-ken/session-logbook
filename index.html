@@ -4003,10 +4003,16 @@ function renderConv(data, meta) {
   const sourcePath = data.jsonl_path || meta?.jsonl_path;
   const pathLabel = sourceVal === 'codex' ? 'Copy latest segment path' : 'Copy source reference';
   const sourceFilesHtml = data.source_files?.length ? `<details class="conv-sources"><summary>Source file details (${data.source_files.length})</summary>${data.history_semantics === 'selected_file_only' ? '<div>Selected file only. Other source branches are not merged.</div>' : ''}${data.source_files.map(f => {
-    const relation = f.relation === 'shared_history' ? (f.relationship_kind === 'same_id_copy' ? 'Same-ID history copy; select source explicitly' : 'Shared history; continuation or fork undetermined') : f.relation;
+    const relation = f.relation === 'shared_history' ? (f.relationship_kind === 'same_id_copy' ? 'Same-ID history copy; select source explicitly' : 'Shared history; continuation or fork undetermined')
+      : f.relation === 'unlinked' ? 'Earlier page of this session; the record carries no link to it'
+      : f.relation;
     const openSource = f.relation === 'shared_history' && f.session_id ? `<a class="conv-link-btn" href="/?session=${encodeURIComponent(f.session_id)}" target="_blank" rel="noopener" data-tooltip="Open this source session" aria-label="Open this source session">${ICONS.externalLink}</a>` : '';
     return `<div>${escapeHtml(relation)} · Session <span class="conv-copy-id" data-copy-id="${escapeHtml(f.session_id)}" data-tooltip="Click to copy session ID">${escapeHtml(f.session_id)}</span>${openSource} · L${f.first_line}–L${f.last_line}<br><span>${escapeHtml(f.path)}</span><button class="conv-link-btn" data-copy-path="${escapeHtml(f.path)}" data-tooltip="Copy this source path" aria-label="Copy this source path">${ICONS.link}</button></div>`;
   }).join('')}</details>` : '';
+  // A Codex user fork is its own conversation. Name the parent instead of letting the
+  // inherited pre-fork turns read as this session's own.
+  const forkedFrom = data.forked_from;
+  const forkedHtml = forkedFrom?.session_id ? `<div class="conv-rewind-record">Forked from <a href="/?session=${encodeURIComponent(forkedFrom.session_id)}" target="_blank" rel="noopener">${escapeHtml(forkedFrom.session_id)}</a>${Number.isInteger(forkedFrom.ordinal_exclusive) ? ` at record ${forkedFrom.ordinal_exclusive}` : ''}. Earlier turns belong to that session.</div>` : '';
   const rewindCurrentId = data.rewind_current_session_id || meta?.rewind_current_session_id;
   const rewindHistory = data.rewind_history || meta?.rewind_history || [];
   const historicalView = !!data.include_rewound;
@@ -4041,6 +4047,7 @@ function renderConv(data, meta) {
         ${subtitleHtml}
         <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} ${data.source === 'devin' ? 'database nodes' : 'raw lines'}</div>
         ${localMetadataHtml}
+        ${forkedHtml}
         ${rewindHtml}
         ${data.context_complete === false ? `<details class="conv-meta"><summary role="alert">Conversation history is incomplete — some earlier context is unavailable.</summary><pre>${escapeHtml(JSON.stringify(data.history_issues || [], null, 2))}</pre></details>` : ''}
       </div>

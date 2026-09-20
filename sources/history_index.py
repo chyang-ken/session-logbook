@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 import sqlite3
 
-SCHEMA = 1
+# 2: segments carry the relation resolve() assigned (current / continuation / inherited /
+# unlinked). A payload saved under schema 1 has no relation and is rebuilt rather than read.
+SCHEMA = 2
 
 
 def index_path():
@@ -77,6 +79,7 @@ def from_history(history, retain_records=False):
     for segment in history['segments']:
         rows = segment['records']
         segments.append({'path': segment['path'], 'session_id': segment['session_id'],
+                         'relation': segment.get('relation'),
                          'coordinates': [[r['line'], r['start'], r['end'], r['record'].get('ordinal')] for r in rows],
                          **({'_records': rows} if retain_records else {})})
     return {'complete': history['complete'], 'issues': history['issues'], 'segments': segments}

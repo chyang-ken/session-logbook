@@ -580,6 +580,10 @@ def extract_conversation(jsonl_path: Path) -> Optional[dict]:
         "jsonl_path": str(Path(jsonl_path).resolve()),
         "segment_size": Path(jsonl_path).stat().st_size,
         "source_files": codex_history.references(jsonl_path, history),
+        # A user fork is its own conversation; its pre-fork turns belong to the parent
+        # session and are labelled "inherited" in source_files. Report the lineage as data
+        # so a reader can open the parent instead of reading the prefix as this session's.
+        "forked_from": history.get("forked_from"),
         "context_complete": history["complete"],
         "history_issues": history["issues"],
         "source": "codex",
