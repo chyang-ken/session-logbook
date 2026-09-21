@@ -308,6 +308,11 @@ feature branch ──PR──► staging ──deploy──► maintainer's mach
   That tag date is when the soak clock starts for that commit and everything before it. The
   restart command and health URL are machine-specific and live in git-ignored `_private/deploy.json`
   (shape documented at the top of the script).
+  The read-back waits up to `HEALTH_TIMEOUT_S` (180 s), which `_private/deploy.json` can raise or
+  lower with an optional `health_timeout_s`. It is that long because a deploy that bumps
+  `CACHE_SCHEMA_VERSION` makes the restarted service re-read every session file before it answers;
+  the wait ends as soon as the service replies, so a warm restart is not slowed. If it still times
+  out, nothing is tagged and running `deploy` again is safe — the second run meets a warm cache.
 - **Checking = the session-start hook.** `.claude/settings.json` runs
   `scripts/release_flow.py check --quiet` whenever an agent session starts here, so "is anything
   ready for `main`?" is asked automatically when work resumes. It prints only when something is
