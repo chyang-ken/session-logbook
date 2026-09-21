@@ -69,6 +69,9 @@ ID, an exact JSONL path, or a search query:
 # Compact context with [L#] anchors back to the original JSONL
 python3 session_logbook_cli.py context '<session-id-or-path>'
 
+# Just the tail: the last 3 human turns, addressed by the [U#] the transcript prints
+python3 session_logbook_cli.py context '<session-id-or-path>' --last-turns 3
+
 # On the next check, repeat the cursor line once, then return later content
 python3 session_logbook_cli.py follow '<session-id-or-path>' --cursor-line 427
 

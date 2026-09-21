@@ -22,6 +22,11 @@ python3 scripts/session_logbook.py <command> ...
 
 - **Known Session handed to this Agent:** run `context <ID-or-path>`. Read the anchored
   transcript as context. Expand only necessary `[L#]` evidence with `evidence`.
+- **Only the end of a Session (catching up, not absorbing):** add `--last-turns N` to
+  `context`, or `--from-turn U13` to resume reading at a turn already seen. Both are bounded
+  by the `[U#]` the transcript prints, and the reply reports `TURN_SLICE` and
+  `OMITTED_BEFORE_SLICE`, so never present a slice as the whole Session. A turn number is
+  local to one transcript -- to follow new work, keep using `NEXT_CURSOR` with `follow`.
 - **No target yet (what has been active lately?):** run `recent --since 6h`. It lists
   Sessions newest first with title, project, source and the dashboard's selection hints.
   Single-turn Sessions are hidden as *suspected* automated runs, not proven ones; add
@@ -100,6 +105,9 @@ python3 scripts/session_logbook.py locate '<target>'
 
 # Token-reduced Agent context with source anchors
 python3 scripts/session_logbook.py context '<target>'
+
+# Only the last 3 human turns and everything after them
+python3 scripts/session_logbook.py context '<target>' --last-turns 3
 
 # Start from the previous cursor; its line is deliberately repeated once
 python3 scripts/session_logbook.py follow '<target>' --cursor-line 427

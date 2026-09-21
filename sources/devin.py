@@ -214,14 +214,16 @@ def digest_header(path):
     ])
 
 
-def render_context(path, after_line=0):
+def render_context(path, after_line=0, first_turn=None, last_turns=None):
+    from sources import anchored_transcript
     meta, chain = read_session(path)
     turns = _turns(chain)
-    out = [digest_header(path), '# SESSION_ID: devin:' + meta['id'],
-           f'# INPUT_CURSOR: N{after_line}',
-           f'# NEXT_CURSOR: N{chain[-1]["row_id"] if chain else 0}',
-           '# FOLLOW_MODE: full-snapshot', '# EXPLICIT_TERMINAL: unknown',
-           '# A quiet database does not prove completion or liveness.', '']
+    head = [digest_header(path), '# SESSION_ID: devin:' + meta['id'],
+            f'# INPUT_CURSOR: N{after_line}',
+            f'# NEXT_CURSOR: N{chain[-1]["row_id"] if chain else 0}',
+            '# FOLLOW_MODE: full-snapshot', '# EXPLICIT_TERMINAL: unknown',
+            '# A quiet database does not prove completion or liveness.']
+    out = []
     u = 0
     for t in turns:
         anchor = f'[N{t["node_id"]}]'
@@ -237,7 +239,11 @@ def render_context(path, after_line=0):
             out.append(f'{anchor} TOOL {t["name"]} {t["summary"]}\n{result_anchor} result: {status}, {t.get("result_size", 0)} chars {detail}')
         else:
             out.append(f'{anchor} {t.get("text", "")}')
-    return '\n\n'.join(out)
+    # Slice on the rendered body only, so the header a reader needs to orient itself -- and
+    # to learn that this IS a slice -- survives the cut.
+    body, turn_notes = anchored_transcript.slice_from_turn(
+        '\n\n'.join(out), first_turn, last_turns)
+    return '\n\n'.join(head + turn_notes + ['', body])
 
 
 def extract_transcript(path):
