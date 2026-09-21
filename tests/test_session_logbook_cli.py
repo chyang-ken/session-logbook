@@ -12,7 +12,8 @@ from sources import codex as codex_source
 from sources import kimi as kimi_source
 
 
-AG_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+# Distinct from the single-turn Claude fixture the `recent` tests write.
+AG_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> Path:
@@ -108,26 +109,26 @@ class SessionLogbookCliTests(unittest.TestCase):
             self.ag_root / AG_ID / ".system_generated" / "logs" / "transcript.jsonl",
             [
                 {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
-                 "status": "DONE", "created_at": "2026-08-20T10:00:00Z",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:00Z",
                  "content": "<USER_REQUEST>review the deploy script</USER_REQUEST>"},
                 {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
-                 "status": "DONE", "created_at": "2026-08-20T10:00:01Z",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:01Z",
                  "content": "Abandoned draft answer."},
                 {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
-                 "status": "DONE", "created_at": "2026-08-20T10:00:02Z",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:02Z",
                  "content": "<USER_REQUEST>trace the deploy failure</USER_REQUEST>"},
                 {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
-                 "status": "DONE", "created_at": "2026-08-20T10:00:03Z",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:03Z",
                  "thinking": "weighing a stale cache against a bad tag",
                  "tool_calls": [{"name": "run_command", "args": {
                      "toolSummary": '"run the deploy check"', "CommandLine": '"./check.sh"',
                      "Cwd": '"/Users/alice/deploy-app"'}}]},
                 {"step_index": 2, "source": "SYSTEM", "type": "RUN_COMMAND",
-                 "status": "DONE", "created_at": "2026-08-20T10:00:04Z",
-                 "content": "Created At: 2026-08-20T10:00:04Z\nCompleted At: 2026-08-20T10:00:05Z\n"
+                 "status": "DONE", "created_at": "2026-08-20T09:00:04Z",
+                 "content": "Created At: 2026-08-20T09:00:04Z\nCompleted At: 2026-08-20T09:00:05Z\n"
                             "stale cache detected\nexit 0"},
                 {"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE",
-                 "status": "DONE", "created_at": "2026-08-20T10:00:06Z",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:06Z",
                  "content": "The deploy failed on a stale cache."},
             ],
         )
@@ -160,6 +161,62 @@ class SessionLogbookCliTests(unittest.TestCase):
         for patcher in reversed(self.patches):
             patcher.stop()
         self.tmp.cleanup()
+
+    def test_recent_lists_newest_first_without_a_known_target(self):
+        rows = cli.recent_sessions(since="2026-08-01")
+        self.assertEqual([row["id"] for row in rows], [
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            AG_ID,
+        ])
+        self.assertEqual(rows[0]["title"], "design payment retry")
+        self.assertEqual(rows[1]["title"], "Codex Launch Review")
+        self.assertEqual(rows[2]["source"], "antigravity")
+        self.assertEqual(rows[0]["last_user_at_iso"], "2026-08-20T10:00:02+00:00")
+        self.assertTrue(all(row["selection_group"] == "primary" for row in rows))
+
+    def test_recent_since_excludes_older_conversations(self):
+        self.assertEqual(cli.recent_sessions(since="2026-08-21"), [])
+        self.assertEqual(cli.recent_sessions(since="6h"), [])
+
+    def test_recent_hides_single_turn_sessions_until_asked_or_confirmed(self):
+        sid = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+        _write_jsonl(self.claude_root / "-Users-alice-my-app" / f"{sid}.jsonl", [
+            {"type": "user", "timestamp": "2026-08-20T11:00:00Z", "cwd": "/Users/alice/my-app",
+             "message": {"content": "nightly dependency report"}},
+            {"type": "assistant", "timestamp": "2026-08-20T11:00:01Z", "cwd": "/Users/alice/my-app",
+             "message": {"content": [{"type": "text", "text": "report written"}],
+                         "stop_reason": "end_turn"}},
+        ])
+        self.assertNotIn(sid, [row["id"] for row in cli.recent_sessions(since="2026-08-01")])
+
+        shown = cli.recent_sessions(since="2026-08-01", include_suspected=True)
+        suspected = next(row for row in shown if row["id"] == sid)
+        self.assertEqual(shown[0]["id"], sid)
+        self.assertEqual((suspected["selection_group"], suspected["selection_reason"]),
+                         ("other", "single_user_turn"))
+
+        server._state[sid] = {"human_confirmed": True}
+        confirmed = next(row for row in cli.recent_sessions(since="2026-08-01") if row["id"] == sid)
+        self.assertEqual((confirmed["selection_group"], confirmed["selection_reason"]),
+                         ("primary", "human_confirmed"))
+
+    def test_recent_prefers_the_personal_title_and_filters_by_project(self):
+        server._state["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] = {"title_override": "Billing recovery"}
+        rows = cli.recent_sessions(since="2026-08-01", project="my-app")
+        self.assertEqual([(row["id"], row["title"]) for row in rows],
+                         [("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Billing recovery")])
+
+    def test_recent_subagents_are_opt_in(self):
+        rows = cli.recent_sessions(since="2026-08-01", include_subagents=True)
+        child = next(row for row in rows if row["is_subagent"])
+        self.assertEqual(child["parent_session_id"], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        self.assertFalse(any(row["is_subagent"] for row in cli.recent_sessions(since="2026-08-01")))
+
+    def test_recent_by_user_falls_back_when_a_source_has_no_message_times(self):
+        rows = cli.recent_sessions(since="2026-08-01", by="user", source="codex")
+        self.assertEqual([row["id"] for row in rows], ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"])
+        self.assertIsNone(rows[0]["last_user_at_iso"])
 
     def test_known_id_resolves_without_dashboard_server(self):
         path = cli.resolve_target("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -291,7 +348,7 @@ class SessionLogbookCliTests(unittest.TestCase):
         rendered = cli.render_context(self.antigravity)
         self.assertIn("Navigable transcript of a Antigravity session", rendered)
         self.assertIn("Abandoned by rewind: 2 raw lines at L1-L2", rendered)
-        self.assertIn("[U1] [L3] USER 2026-08-20T10:00:02", rendered)
+        self.assertIn("[U1] [L3] USER 2026-08-20T09:00:02", rendered)
         self.assertIn("[L4]   💭 THINK: weighing a stale cache against a bad tag", rendered)
         self.assertIn("[L4]   🔧 run_command: run the deploy check", rendered)
         self.assertIn("[L5]   ⮑ RESULT OK run_command:", rendered)

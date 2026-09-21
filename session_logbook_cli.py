@@ -265,14 +265,15 @@ def _parse_since(value: Optional[str]) -> Optional[float]:
         return None
     raw = value.strip()
     try:
-        if raw.endswith("d") and raw[:-1].isdigit():
-            return datetime.now(tz=timezone.utc).timestamp() - int(raw[:-1]) * 86400
+        if raw[-1:] in ("d", "h") and raw[:-1].isdigit():
+            seconds = 86400 if raw.endswith("d") else 3600
+            return datetime.now(tz=timezone.utc).timestamp() - int(raw[:-1]) * seconds
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.timestamp()
     except ValueError as exc:
-        raise SessionLookupError("--since must be an ISO date/time or a value such as 7d") from exc
+        raise SessionLookupError("--since must be an ISO date/time or a value such as 7d or 6h") from exc
 
 
 def _candidate_paths(source: Optional[str], include_subagents: bool) -> list[Path]:
@@ -459,6 +460,110 @@ def conversation_facts(item: dict, target: Optional[str] = None) -> dict:
         facts["resolved_from_conversation_id"] = target
         facts["resolution_note"] = (f"conversation {target} -> current record {record_id}")
     return facts
+
+
+def _timestamp(value) -> float:
+    """Parse one message timestamp; unusable values count as never."""
+    try:
+        if isinstance(value, str):
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            value = parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).timestamp()
+        return float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def recent_sessions(
+    *,
+    since: Optional[str] = "1d",
+    by: str = "activity",
+    source: Optional[str] = None,
+    project: Optional[str] = None,
+    include_suspected: bool = False,
+    include_subagents: bool = False,
+    limit: int = 50,
+) -> list[dict]:
+    """List recently active Sessions using the dashboard's selection hints.
+
+    Discovery for a consumer that does not yet know which Session to read. The
+    single-turn rule is the same reversible presentation hint the dashboard uses:
+    it is not proof of automation, and a local human confirmation overrides it.
+    """
+    since_ts = _parse_since(since)
+    server.load_state()
+    rows = []
+    for path in _candidate_paths(source, include_subagents):
+        try:
+            # Message times never exceed the file's modification time, so an older file
+            # cannot hold newer activity. Database-backed sources have no file to stat.
+            if since_ts is not None and path.stat().st_mtime < since_ts:
+                continue
+        except OSError:
+            pass
+        try:
+            item = session_metadata(path)
+        except SessionLookupError:
+            continue
+        if project and project.lower() not in str(item.get("project_path") or "").lower():
+            continue
+        if item["is_subagent"] and not include_subagents:
+            continue
+
+        # A record that a later rewind, resume or compaction superseded is not where new
+        # work lands, so discovery offers the conversation's current record only -- the same
+        # rule /api/session-choices follows. Identity stays additive: the row keeps its own
+        # record id, and an unknown conversation (cold scan cache) is never assumed away.
+        facts = server.conversation_for_record(item.get("id")) or {}
+        if (facts.get("conversation_current_id") or item.get("id")) != item.get("id"):
+            continue
+        # Personal state is stored per record and read per conversation, so a title or a
+        # participation confirmation written before a rewind still speaks for it. Without
+        # this, the filter above would hide the record that carries the confirmation and
+        # the conversation would silently fall back to "suspected".
+        merged = session_identity.merge_conversation_state(
+            [record["id"] for record in facts.get("conversation_records") or []]
+            or [item.get("id")], item.get("id"), server._state)
+        group, reason = item["selection_group"], item["selection_reason"]
+        if group == "other" and merged["human_confirmed"]:
+            group, reason = "primary", "human_confirmed"
+        if group == "other" and not include_suspected:
+            continue
+
+        users = [m for m in item.get("recent_msgs", []) if m.get("role") == "user" and m.get("text")]
+        last_user = max((_timestamp(m.get("ts")) for m in users), default=0.0)
+        activity = float(activity_time(item) or 0)
+        # Some adapters (Codex) keep preview text without per-message times. Rather than
+        # drop those Sessions from a user-ranked list, rank them by conversation activity
+        # and report the unknown user time as null.
+        moment = (last_user or activity) if by == "user" else activity
+        if since_ts is not None and moment < since_ts:
+            continue
+
+        opener = next((m for m in users if m.get("is_first")), users[0] if users else {})
+        title = (merged["title_override"] or item.get("custom_title") or opener.get("text")
+                 or Path(item.get("project_path") or "").name or "Untitled session")
+        rows.append({
+            "id": item.get("id"),
+            # The record id above is what every other command takes. The conversation id
+            # only says which conversation this record is the current member of.
+            "conversation_id": facts.get("conversation_id", item.get("id")),
+            "source": item["source"],
+            "title": " ".join(str(title).split())[:100],
+            "project_path": item.get("project_path"),
+            "jsonl_path": item["jsonl_path"],
+            "activity_at_iso": item.get("activity_at_iso"),
+            "last_user_at_iso": (datetime.fromtimestamp(last_user, timezone.utc).isoformat()
+                                 if last_user else None),
+            "selection_group": group,
+            "selection_reason": reason,
+            "is_subagent": item["is_subagent"],
+            "parent_session_id": item["parent_session_id"],
+            "_moment": moment,
+        })
+    rows.sort(key=lambda row: row["_moment"], reverse=True)
+    for row in rows:
+        del row["_moment"]
+    return rows[:limit]
 
 
 def resolve_target(
@@ -711,7 +816,7 @@ def _observe_codex(path, args):
 
 
 def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False,
-                   cursor_source_path=None, target=None) -> str:
+                   cursor_source_path=None, target=None, delta: bool = False) -> str:
     item = session_metadata(path)
     if item["source"] == "codex":
         return _codex_context(path, after_line, cursor_source_path, historical_terminal)
@@ -728,7 +833,21 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     claude_selection = claude_history.rewind_status(path) if item['source'] == 'claude' else {}
     full_claude_branch = (item['source'] == 'claude' and
                           claude_selection.get('reason') != 'missing_leaf_pointer')
-    if full_claude_branch:
+    facts = conversation_facts(item, target)
+    # Opt-in for readers that keep their own cursor: return only the cursor onward and
+    # name the earlier anchors a rewind removed, instead of the whole branch to diff.
+    delta_requested = bool(delta) and full_claude_branch and after_line > 0
+    # A conversation id names the conversation's current record, which is not necessarily
+    # the record the caller read last, and a bare line number carries no file identity.
+    # Applying it to a different transcript would silently skip lines this reader never saw,
+    # so return the full selected branch instead and say why. Naming the cursor's own record
+    # with --cursor-source-path maps it explicitly, and delta applies again.
+    cursor_unattributed = bool(delta_requested and not cursor_source_path
+                               and facts.get("resolved_from_conversation_id")
+                               and len(facts.get("conversation_records") or []) > 1)
+    delta_mode = delta_requested and not cursor_unattributed
+    removed = claude_history.hidden_lines(path, after_line) if delta_mode else None
+    if full_claude_branch and not delta_mode:
         after_line = 0
     total_lines = (claude_history.summary(path)['physical_lines'] if item["source"] == "claude"
                    else _line_count(path))
@@ -758,7 +877,6 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     if item["source"] not in {"pi", "claude"}:
         body = _filter_from_cursor_line(body, after_line)
     header = anchored_transcript.digest_header(path.resolve(), item["source"])
-    facts = conversation_facts(item, target)
     records = " ".join(
         f"{record['id']}{'*' if record.get('is_current') else ''}"
         f"{'(' + record['relation'] + ')' if record.get('relation') else ''}"
@@ -778,7 +896,20 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         *(['# FOLLOW_MODE: full selected branch; reconcile removed entries after rewind'
            if claude_selection.get('evidence') else
            '# FOLLOW_MODE: full saved history; selected branch unverified, reconcile previous context']
-          if full_claude_branch else []),
+          if full_claude_branch and not delta_mode else []),
+        *(['# FOLLOW_MODE: delta from cursor; selected branch verified',
+           f'# REMOVED_BEFORE_CURSOR: {anchored_transcript.line_ranges(removed)}']
+          if delta_mode and removed is not None else []),
+        *([f"# FOLLOW_MODE: delta from cursor; selected branch unverified ({claude_selection.get('reason')}), "
+           'every saved record is kept, so removed entries cannot be determined',
+           '# REMOVED_BEFORE_CURSOR: unknown']
+          if delta_mode and removed is None else []),
+        *(['# DELTA_NOT_APPLIED: the target was given as a conversation id, the conversation '
+           f"has several records and the current one is {facts.get('conversation_current_id')}, "
+           'so a bare cursor cannot be attributed to this transcript; the full selected branch '
+           'is returned instead. Re-run with --cursor-source-path naming the record the cursor '
+           'came from to get the delta.']
+          if cursor_unattributed else []),
         *(['# FOLLOW_MODE: full selected branch (Pi can change branches)'] if item["source"] == "pi" else []),
         *(['# FOLLOW_MODE: live history after in-file rewinds; abandoned rows are not rendered']
           if item["source"] == "antigravity" else []),
@@ -915,6 +1046,11 @@ def parse_args(argv=None):
     )
 
     follow.add_argument("--cursor-source-path")
+    follow.add_argument(
+        "--delta", action="store_true",
+        help="Claude only: return the cursor onward plus the earlier anchors a rewind removed, "
+             "instead of the full selected branch",
+    )
 
     status = sub.add_parser("status", help="report observed transcript state")
     _add_target_filters(status)
@@ -932,6 +1068,17 @@ def parse_args(argv=None):
     evidence.add_argument("--line", type=int, required=True)
     evidence.add_argument("--context", type=int, default=1)
     evidence.add_argument("--max-chars", type=int, default=12_000)
+
+    recent = sub.add_parser("recent", help="list recently active sessions")
+    recent.add_argument("--since", default="1d", help="ISO date/time, or relative such as 6h or 7d")
+    recent.add_argument("--by", choices=("activity", "user"), default="activity",
+                        help="rank and filter by the latest message, or by the latest user message")
+    recent.add_argument("--source", choices=SUPPORTED_SOURCES)
+    recent.add_argument("--project", help="project-path substring")
+    recent.add_argument("--include-suspected", action="store_true",
+                        help="also list single-turn sessions the dashboard hides by default")
+    recent.add_argument("--include-subagents", action="store_true")
+    recent.add_argument("--limit", type=int, default=50)
 
     search = sub.add_parser("search", help="search session message text")
     search.add_argument("query")
@@ -972,6 +1119,18 @@ def main(argv=None) -> int:
             ))
             return 0
 
+        if args.command == "recent":
+            _print_json(recent_sessions(
+                since=args.since,
+                by=args.by,
+                source=args.source,
+                project=args.project,
+                include_suspected=args.include_suspected,
+                include_subagents=args.include_subagents,
+                limit=max(1, args.limit),
+            ))
+            return 0
+
         path = _resolve_from_args(args)
         target = getattr(args, "target", None)
         if args.command == "locate":
@@ -988,7 +1147,8 @@ def main(argv=None) -> int:
         elif args.command in {"context", "follow"}:
             print(render_context(path, after_line=args.after_line,
                                  cursor_source_path=args.cursor_source_path,
-                                 target=target))
+                                 target=target,
+                                 delta=getattr(args, "delta", False)))
         elif args.command == "status":
             _print_json(status_for(path))
         elif args.command == "observe":
