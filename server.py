@@ -3561,13 +3561,19 @@ class Handler(BaseHTTPRequestHandler):
                     conversation['resolved_from_conversation_id'] = sid
                 conversation_state = {}
                 current_id = conversation.get('conversation_current_id') or record_id
+                members = ([r['id'] for r in conversation.get('conversation_records') or []]
+                           or [record_id])
                 if current_id == record_id:
                     conversation_state = session_identity.merge_conversation_state(
-                        [r['id'] for r in conversation.get('conversation_records') or []]
-                        or [record_id], record_id, _state)
+                        members, record_id, _state)
+                # A note is a note about the conversation, and a write lands on the current
+                # record whichever member is addressed. So an earlier record on screen shows
+                # the same note the card shows and the same note an edit here would change -
+                # otherwise a deep link to a superseded record looks like the note was lost.
+                note_state = conversation_state or session_identity.merge_conversation_state(
+                    members, current_id, _state)
                 fingerprint += ':' + hashlib.sha256(json.dumps(
-                    [conversation, conversation_state.get('older_notes'),
-                     conversation_state.get('note'),
+                    [conversation, note_state.get('older_notes'), note_state.get('note'),
                      conversation_state.get('title_override')],
                     sort_keys=True, default=str).encode()).hexdigest()
                 seen = (qs.get('fingerprint') or [''])[0]
@@ -3596,8 +3602,8 @@ class Handler(BaseHTTPRequestHandler):
                     conv['title_override_source_id'] = conversation_state['title_override_source_id']
                     conv['display_title'] = conv['title_override'] or conv.get('custom_title', '')
                     conv['human_confirmed'] = conversation_state['human_confirmed']
-                    conv['note'] = conversation_state['note']
-                    conv['older_notes'] = conversation_state['older_notes']
+                conv['note'] = note_state['note']
+                conv['older_notes'] = note_state['older_notes']
                 conv['fingerprint'] = fingerprint
                 return self._send_json(200, conv)
             except Exception as e:

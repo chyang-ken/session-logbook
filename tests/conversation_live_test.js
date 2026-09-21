@@ -152,6 +152,21 @@ const cases=[
   // Rows an in-file rewind abandoned are counted out loud, never silently missing.
   [{rewind_abandoned_rows:3},['3 records were abandoned by a rewind and are not shown.']],
   [{rewind_abandoned_rows:1},['1 record was abandoned by a rewind and is not shown.']],
+  // The conversation's note is readable and editable from the reader itself, not only the
+  // card -- and the card does not exist at all on the full page.
+  [{note:'Rerun this against the staging copy.'},
+   ['conv-note-text','Rerun this against the staging copy.','id="conv-note-edit"','Edit note']],
+  // With no note, the reader offers to add one and shows no empty note block.
+  [{},['id="conv-note-edit"','Add note']],
+  // Notes left on superseded records are listed beside the current one, each labelled with
+  // the record it belongs to, and never merged into it.
+  [{conversation_id:'conv',conversation_current_id:'current',conversation_records:chain,
+    note:'Current thinking',older_notes:[{record_id:'old',note:'Pre-rewind thought'}]},
+   ['conv-older-notes','conv-older-note-id','Pre-rewind thought','Current thinking']],
+  // An earlier record deep-linked on its own still shows the conversation's note.
+  [{id:'old',conversation_id:'conv',conversation_current_id:'current',
+    conversation_records:chain,note:'Lives on the current record'},
+   ['Lives on the current record','id="conv-note-edit"']],
 ];
 for (const [fields,expected] of cases) {
   for (const standalone of [false,true]) {
@@ -179,6 +194,19 @@ for (const fields of [{rewind_abandoned_rows:0},{rewind_abandoned_rows:null},{}]
   assert.ok(!head.innerHTML.includes('abandoned by a rewind'),
     'a missing or zero abandoned-row count must stay silent');
 }
+// With nothing written, the reader shows the affordance and no note block at all.
+for (const standalone of [false,true]) {
+  _convStandalone=standalone;
+  setItems(standalone?[]:[{id:'current',size:100}]);
+  renderConv({...base},standalone?null:findItem('current'));
+  assert.ok(!head.innerHTML.includes('conv-note-text'),
+    (standalone?'full page':'modal')+' drew an empty note block');
+  assert.ok(!head.innerHTML.includes('conv-older-notes'),
+    (standalone?'full page':'modal')+' drew an empty earlier-notes block');
+  assert.ok(head.innerHTML.includes('Add note'),
+    (standalone?'full page':'modal')+' hid the add-note affordance');
+}
+
 // The three Claude event kinds are rendered in place, as system events, in both modes.
 // The bar they must clear: never the user class, because the whole point is that none of
 // them is something the person said and had received.

@@ -154,6 +154,13 @@ record and the response says so (`resolved_from_conversation_id`). Writes land o
 current record; un-star also clears every starred member. `id` in a write response is the
 record actually written, `addressed_id` is what the caller asked for.
 
+`note` and `older_notes` come back from `/conversation` for **every** member of a
+conversation, including a superseded one. The note belongs to the conversation and a write
+lands on the current record whichever member is addressed, so a deep link to an earlier
+record has to show the same note the card shows — otherwise it reads as though the note had
+been lost, behind an editor that silently writes somewhere else. `title_override` and
+`human_confirmed` stay per-record on an earlier record, as before.
+
 ## 4. Frontend routes
 
 | URL | Mode | Notes |
@@ -239,7 +246,7 @@ launcher gets its own `backups/` next to its temp state file rather than no back
 | `index.html` `setItems` / `findItem` / `currentItemFor` | the **only** id resolver: `setItems` is the one place `state.items` is replaced and it rebuilds the record and conversation indexes; `findItem` answers for either kind of id with the record always tried first; `currentItemFor` gives the entry a write applies to. Never reintroduce a linear `state.items.find(x => x.id === …)` — there were twelve, each free to drift |
 | `index.html` `conversationItems` / `shareId` / `cardKey` | entries the list draws; the id a generated link uses; the localStorage collapse key |
 | `index.html` `applySearchHits` | folds `/api/search` hits onto the entry that is drawn, tagging a hit found in a superseded record |
-| `index.html` `render` / `renderCard` / `renderConv` / `renderConvTurn` | list, card, and conversation rendering. `renderConv` keeps `meta` (this record: size, time, source) and `stateMeta` (this conversation: star, archive, note, title) apart, and reads conversation facts from the response before the card so the modal and the standalone page behave identically |
+| `index.html` `render` / `renderCard` / `renderConv` / `renderConvTurn` | list, card, and conversation rendering. `renderConv` keeps `meta` (this record: size, time, source) and `stateMeta` (this conversation: star, archive, note, title) apart, and reads conversation facts from the response before the card so the modal and the standalone page behave identically. It also draws the conversation's note and the notes left on superseded records; `editSessionNote` reuses the card's dialog and write path, so one edit updates both surfaces and rolls both back |
 | `index.html` `bindConvNav` | user-message navigation (j/k + goto + scroll state machine). Its targets are `.conv-user` only, which is why an event row can never be navigated to or counted |
 
 ## 8. Style
