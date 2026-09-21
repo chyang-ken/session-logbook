@@ -51,7 +51,39 @@ class ConvIdTests(unittest.TestCase):
         self.assertEqual(ag._conv_id(CONV_B), "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 
+class PathPredicateTests(unittest.TestCase):
+    """The one predicate every caller uses to recognize this source."""
+
+    def setUp(self):
+        self.addCleanup(setattr, ag, "AG_BRAIN", ag.AG_BRAIN)
+        ag.AG_BRAIN = BRAIN
+
+    def test_a_transcript_under_the_brain_root_is_recognized(self):
+        self.assertTrue(ag.is_antigravity_path(CONV_A))
+        self.assertTrue(ag.is_antigravity_path(str(CONV_A)))
+
+    def test_a_sibling_whose_name_merely_starts_with_the_root_is_not(self):
+        # The string prefix `str(AG_BRAIN)` matches this path; a directory boundary does not.
+        sibling = BRAIN.parent / (BRAIN.name + "-backup") / "x" / "transcript.jsonl"
+        self.assertTrue(str(sibling).startswith(str(BRAIN)))
+        self.assertFalse(ag.is_antigravity_path(sibling))
+
+    def test_an_unrelated_path_is_not(self):
+        self.assertFalse(ag.is_antigravity_path(Path("/Users/alice/my-app/session.jsonl")))
+
+    def test_the_root_is_read_at_call_time(self):
+        ag.AG_BRAIN = BRAIN / "nope"
+        self.assertFalse(ag.is_antigravity_path(CONV_A))
+
+
 class ScanTests(unittest.TestCase):
+    def test_scan_uses_the_current_root_when_none_is_given(self):
+        # The default must not be bound at import, or a repointed root is ignored.
+        self.addCleanup(setattr, ag, "AG_BRAIN", ag.AG_BRAIN)
+        ag.AG_BRAIN = BRAIN
+        ids = {ag._conv_id(p) for p in ag.scan_sessions()}
+        self.assertIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", ids)
+
     def test_scan_finds_transcripts(self):
         ids = {ag._conv_id(p) for p in ag.scan_sessions(BRAIN)}
         self.assertIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", ids)

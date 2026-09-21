@@ -10,12 +10,14 @@ These tests cover the classifier and every reader that presents Antigravity cont
 All fixtures are synthetic. See docs/decisions/2026-09-20-antigravity-rewind-history.md.
 """
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
 import server
 import session_logbook_cli as cli
+from sources import anchored_transcript as at
 from sources import antigravity as ag
 
 
@@ -215,6 +217,11 @@ class TranscriptFileMixin:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # Keep every reader in this file off the machine's real Antigravity data.
+        for attribute, value in (("AG_SUMMARIES", Path(self.tmp.name) / "no-summaries.pb"),
+                                 ("_TITLE_CACHE", {"mtime": 0.0, "data": {}})):
+            self.addCleanup(setattr, ag, attribute, getattr(ag, attribute))
+            setattr(ag, attribute, value)
 
 
 REWOUND_ID = "eeeeeeee-1111-4111-8111-eeeeeeeeeeee"
@@ -341,14 +348,13 @@ class SearchTests(TranscriptFileMixin, unittest.TestCase):
 
 
 class FollowTests(TranscriptFileMixin, unittest.TestCase):
-    """Following a live conversation across a rewind that lands while it is open.
+    """The web reader follows a live conversation across a rewind that lands while it is open.
 
-    Antigravity has no cursor-based follow: the CLI does not read this source, and the
-    standalone reader follows a running conversation by polling
-    /conversation?fingerprint=… and redrawing the whole payload when the file changes.
-    That is the right shape here, because a rewind retroactively removes rows a follower
-    has already been shown. The redraw carries the new abandoned-row count, so the
-    follower is told that earlier steps are gone rather than silently losing them.
+    The standalone reader polls /conversation?fingerprint=… and redraws the whole payload
+    when the file changes, which is the right shape here because a rewind retroactively
+    removes rows a follower has already been shown. The redraw carries the new
+    abandoned-row count, so the follower is told that earlier steps are gone rather than
+    silently losing them. CommandTests covers the CLI's cursor-based equivalent.
     """
 
     def test_a_rewind_that_arrives_later_is_reported_on_the_next_read(self):
@@ -372,16 +378,199 @@ class FollowTests(TranscriptFileMixin, unittest.TestCase):
                          [{"line": 4, "step": 0, "abandoned_rows": 3}])
 
 
-class SurfaceBoundaryTests(TranscriptFileMixin, unittest.TestCase):
-    """A tripwire for the surfaces that do not read Antigravity yet."""
+class AnchoredRendererTests(TranscriptFileMixin, unittest.TestCase):
+    """The anchored transcript renders the live history at the file's own line numbers."""
 
-    def test_antigravity_is_not_an_anchored_or_cli_source(self):
-        # The anchored renderer and the Agent CLI have no Antigravity reader, so there is
-        # no third place presenting this content today. If either gains one, this test
-        # fails: apply the live-history rule there before shipping it.
-        self.assertNotIn("antigravity", cli.SUPPORTED_SOURCES)
+    def render(self, conversation_id, rows):
+        return at.render_antigravity(self.write_transcript(conversation_id, rows))
+
+    def test_a_plain_transcript_renders_every_row_at_its_physical_line(self):
+        text = self.render(STRAIGHT_ID, STRAIGHT_ROWS)
+        self.assertIn("[U1] [L1] USER", text)
+        self.assertIn("[L2] ASSISTANT: Only answer.", text)
+
+    def test_a_rewind_renders_the_live_branch_only(self):
+        text = self.render(REWOUND_ID, REWOUND_ROWS)
+        # The live user turn is the file's fourth line and the transcript's first turn.
+        self.assertIn("[U1] [L4] USER", text)
+        self.assertIn("[L5] ASSISTANT: Live answer.", text)
+        self.assertNotIn("[U2]", text)
+        for gone in ("Abandoned answer.", "abandoned command output", "abandoned first question"):
+            self.assertNotIn(gone, text)
+
+    def test_stacked_rewinds_leave_only_the_final_branch(self):
+        rows = [user(0, "q"), planner(1, "a"),
+                user(2, "detour"), planner(3, "side"), result(4, "side out"),
+                user(2, "second try"), planner(3, "second answer"),
+                user(0, "start over"), planner(1, "fresh answer")]
+        text = self.render("eeeeeeee-5555-4555-8555-eeeeeeeeeeee", rows)
+        self.assertIn("[U1] [L8] USER", text)
+        self.assertIn("[L9] ASSISTANT: fresh answer", text)
+        self.assertNotIn("second answer", text)
+        self.assertNotIn("side out", text)
+
+    def test_a_write_order_artifact_abandons_nothing_and_renders_in_file_order(self):
+        # One planner row issues three parallel calls whose results were persisted first.
+        # step_index drops without a rewind, so every row must still be rendered.
+        rows = [user(0, "q"), result(2, "r1", "VIEW_FILE"), result(3, "r2", "VIEW_FILE"),
+                result(4, "r3", "VIEW_FILE"),
+                planner(1, "", tools=("view_file", "view_file", "view_file")),
+                planner(5, "answer")]
+        text = self.render("eeeeeeee-6666-4666-8666-eeeeeeeeeeee", rows)
+        anchors = [int(number) for number in re.findall(r"\[L(\d+)\]", text)]
+        self.assertEqual(anchors, sorted(anchors), text)
+        self.assertEqual(anchors.count(5), 3)  # the three calls share their planner's line
+        self.assertIn("[L6] ASSISTANT: answer", text)
+
+    def test_tool_calls_and_results_stay_at_their_own_lines(self):
+        rows = [user(0, "q"), planner(1, "", tools=("run_command",)),
+                result(2, "command output text")]
+        text = self.render("eeeeeeee-7777-4777-8777-eeeeeeeeeeee", rows)
+        self.assertIn("[L2]   🔧 run_command: run_command call", text)
+        # A successful body collapses to status and size, expandable by its own anchor.
+        self.assertRegex(text, r"\[L3\]   ⮑ RESULT OK run_command: \[1 lines, \d+ chars hidden")
+
+    def test_an_errored_result_keeps_its_leading_text(self):
+        rows = [user(0, "q"), planner(1, "", tools=("run_command",)),
+                {"step_index": 2, "source": "SYSTEM", "type": "ERROR_MESSAGE",
+                 "status": "ERROR", "created_at": "2026-02-01T00:00:00Z",
+                 "content": "command not found"}]
+        text = self.render("eeeeeeee-8888-4888-8888-eeeeeeeeeeee", rows)
+        self.assertIn("⮑ RESULT ERROR run_command: command not found", text)
+
+    def test_a_user_row_that_carries_no_words_is_not_a_turn(self):
+        # A settings-change row cleans to nothing. Counting it would make [U#] disagree
+        # with the reader's user turns for the same session.
+        rows = [user(0, "real question"),
+                {"step_index": 1, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+                 "status": "DONE", "created_at": "2026-02-01T00:00:00Z",
+                 "content": "<USER_SETTINGS_CHANGE>Model Selection from a to b."
+                            "</USER_SETTINGS_CHANGE>"},
+                user(2, "second question")]
+        path = self.write_transcript("eeeeeeee-1010-4010-8010-eeeeeeeeeeee", rows)
+        text = at.render_antigravity(path)
+        self.assertIn("[U1] [L1] USER", text)
+        self.assertIn("[U2] [L3] USER", text)
+        self.assertNotIn("[L2]", text)
+        # The same count the web reader reports for this conversation.
+        self.assertEqual(sum(1 for turn in ag.extract_conversation(path)["turns"]
+                             if turn["type"] == "user"), 2)
+
+    def test_the_digest_header_names_the_source_and_the_abandoned_lines(self):
         path = self.write_transcript(REWOUND_ID, REWOUND_ROWS)
-        self.assertIsNone(cli.detect_source(path))
+        header = at.digest_header(path, "antigravity")
+        self.assertIn("Navigable transcript of a Antigravity session", header)
+        self.assertIn("Abandoned by rewind: 3 raw lines at L1-L3", header)
+        self.assertIn("open them at their [L#] as evidence", header)
+
+    def test_the_digest_header_states_zero_when_nothing_was_rewound(self):
+        header = at.digest_header(self.write_transcript(STRAIGHT_ID, STRAIGHT_ROWS),
+                                  "antigravity")
+        self.assertIn("Abandoned by rewind: 0 raw lines", header)
+        self.assertNotIn("raw lines at L", header)
+
+    def test_every_anchor_points_at_the_row_it_rendered(self):
+        path = self.write_transcript(REWOUND_ID, REWOUND_ROWS)
+        raw = path.read_text(encoding="utf-8").splitlines()
+        anchors = {int(number) for number
+                   in re.findall(r"\[L(\d+)\]", at.render_antigravity(path))}
+        self.assertEqual(anchors, {4, 5})
+        for anchor in anchors:
+            self.assertIn(json.loads(raw[anchor - 1])["type"],
+                          {"USER_INPUT", "PLANNER_RESPONSE"})
+
+
+class CommandTests(TranscriptFileMixin, unittest.TestCase):
+    """The Agent CLI reads Antigravity, and reports what a rewind took back."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, ag, "AG_BRAIN", ag.AG_BRAIN)
+        ag.AG_BRAIN = Path(self.tmp.name) / "brain"
+        for attribute, value in (("_cache", {}), ("_state", {}), ("_state_loaded", True)):
+            self.addCleanup(setattr, server, attribute, getattr(server, attribute))
+            setattr(server, attribute, value)
+        self.rewound = self.write_transcript(REWOUND_ID, REWOUND_ROWS)
+        self.straight = self.write_transcript(STRAIGHT_ID, STRAIGHT_ROWS)
+
+    def test_antigravity_is_a_supported_cli_source(self):
+        self.assertIn("antigravity", cli.SUPPORTED_SOURCES)
+        self.assertEqual(cli.detect_source(self.rewound), "antigravity")
+
+    def test_locate_resolves_a_conversation_id_to_its_transcript(self):
+        self.assertEqual(cli.resolve_target(REWOUND_ID), self.rewound.resolve())
+        self.assertEqual(cli.session_metadata(self.rewound)["source"], "antigravity")
+
+    def test_status_counts_the_abandoned_rows_without_hiding_the_raw_file(self):
+        status = cli.status_for(self.rewound)
+        self.assertEqual(status["total_lines"], 5)
+        self.assertEqual(status["next_cursor"], "L5")
+        self.assertEqual(status["rewind_abandoned_rows"], 3)
+        self.assertEqual(status["rewind_abandoned_lines"], "L1-L3")
+        self.assertEqual(cli.status_for(self.straight)["rewind_abandoned_lines"], "none")
+
+    def test_context_returns_the_live_history(self):
+        text = cli.render_context(self.rewound)
+        self.assertIn("[U1] [L4] USER", text)
+        self.assertNotIn("Abandoned answer.", text)
+        self.assertIn("# NEXT_CURSOR: L5", text)
+
+    def test_follow_after_a_rewind_lands_names_the_lines_it_already_delivered(self):
+        # A follower reads the opening branch, then a rewind is appended underneath it.
+        path = self.write_transcript("eeeeeeee-9999-4999-8999-eeeeeeeeeeee", [
+            user(0, "first question"), planner(1, "first answer"), result(2, "output")])
+        self.assertIn("# NEXT_CURSOR: L3", cli.render_context(path))
+        self.assertIn("# REMOVED_BEFORE_CURSOR: none", cli.render_context(path, after_line=3))
+
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(user(0, "asked differently")) + "\n")
+
+        text = cli.render_context(path, after_line=3)
+        # The three rows the follower already holds left the conversation; it is told so
+        # rather than silently keeping them.
+        self.assertIn("# REMOVED_BEFORE_CURSOR: L1-L3", text)
+        self.assertIn("# FOLLOW_MODE: live history after in-file rewinds", text)
+        self.assertNotIn("first answer", text)
+        self.assertIn("[U1] [L4] USER", text)
+
+    def test_follow_reports_none_when_the_cursor_survived(self):
+        self.assertIn("# REMOVED_BEFORE_CURSOR: none",
+                      cli.render_context(self.straight, after_line=2))
+
+    def test_a_message_that_quotes_an_anchor_does_not_move_the_cursor(self):
+        # Messages are preserved in full, so one can contain "[L1]" -- real local history
+        # does, from pasting an anchored transcript into a conversation. Reading that as the
+        # line's own anchor would drop the rest of the message from a follow.
+        path = self.write_transcript("eeeeeeee-2222-4222-8222-ffffffffffff", [
+            user(0, "q"),
+            planner(1, "first paragraph\nsee [L1] for the earlier note\nlast paragraph")])
+        text = cli.render_context(path, after_line=2)
+        self.assertIn("first paragraph", text)
+        self.assertIn("see [L1] for the earlier note", text)
+        self.assertIn("last paragraph", text)
+
+    def test_follow_does_not_report_lines_abandoned_after_the_cursor(self):
+        # The rewind on L5 abandons L3-L4, which are past a follower sitting at L2. It
+        # never received them, so naming them would ask it to retire anchors it never had.
+        path = self.write_transcript("eeeeeeee-1111-4111-8111-ffffffffffff", [
+            user(0, "opening"), planner(1, "answer one"),
+            user(2, "detour"), planner(3, "side branch"),
+            user(2, "asked again"), planner(3, "new answer")])
+        self.assertEqual(ag.abandoned_line_numbers(path), {3, 4})
+        text = cli.render_context(path, after_line=2)
+        self.assertIn("# REMOVED_BEFORE_CURSOR: none", text)
+        self.assertNotIn("side branch", text)
+        self.assertIn("[L6] ASSISTANT: new answer", text)
+
+    def test_evidence_still_reads_an_abandoned_line_through_a_resolved_target(self):
+        self.assertIn("Abandoned answer.",
+                      cli.read_evidence(cli.resolve_target(REWOUND_ID), line=2, context=0))
+
+    def test_search_matches_the_live_branch_only(self):
+        self.assertEqual([hit["id"] for hit in
+                          cli.search_sessions("live question", source="antigravity")],
+                         [REWOUND_ID])
+        self.assertEqual(cli.search_sessions("abandoned first", source="antigravity"), [])
 
 
 if __name__ == "__main__":

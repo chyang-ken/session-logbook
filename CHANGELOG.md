@@ -7,10 +7,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- Keep the whole of a message during an Agent CLI `follow`. The cursor filter read `[L#]` anywhere in a rendered line as that line's anchor, so a User or Assistant message that quotes an anchor (pasting an anchored transcript into a conversation does exactly that) moved the cursor and silently dropped the rest of that message. Only a line's leading anchor counts now; this also affected Kimi Code follows.
 - Order sessions and show recency by conversation time rather than file rewrites; rebuild cached metadata for existing sessions.
 - Preserve genuine Claude user text appended after desktop handoff reminders in search, previews, the reader, and exports; refresh cached metadata for existing sessions.
 
 ### Added
+- Read Antigravity sessions from the `/anchored` download and the Agent CLI (`locate`, `context`, `follow`, `status`, `evidence`, `search`). The export used to render a header with no body and call itself a Claude Code session, and the CLI refused the source outright. Both now read the live history of an in-file rewind, state how many raw lines that rewind abandoned, and keep those lines reachable with `evidence`; `follow` names the abandoned lines at or before your cursor as `REMOVED_BEFORE_CURSOR`.
 - Read Pi sessions from local JSONL: selected-branch search, reader, exports, and Agent CLI, with original-line evidence and existing local metadata controls.
 - Browse sessions across projects in a default, newest-first timeline; the project view remains available.
 - Hide suspected automated runs with an explicit, reversible filter. Single-turn sessions are the initial signal; users can confirm their participation to keep a session visible.

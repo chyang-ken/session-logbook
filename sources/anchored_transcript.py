@@ -9,10 +9,13 @@ their target path, search scope, or command prefix. Successful tool-result bodie
 status and size; leading error text remains visible. Thinking, injected context, and binary
 content are reduced. An agent can use `[L#]` to recover any hidden detail from the raw jsonl.
 
-Three sources:
+Sources:
 - `render_claude(path)` — Claude Code session jsonl (`~/.claude/projects/...`)
 - `render_codex(path)`  — Codex rollout jsonl (`~/.codex/sessions/...`)
 - `render_kimi(path)`   — Kimi Code CLI wire jsonl (`~/.kimi-code/sessions/.../agents/main/wire.jsonl`)
+- `render_pi(path)`     — Pi session jsonl (selected branch only)
+- `render_antigravity(path)` — Antigravity transcript jsonl
+  (`~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl`), live history only
 
 All produce the **same anchored-transcript format**. The module has zero heavy dependencies
 (only json/re) and is the single source of truth behind the server's `/anchored` download
@@ -38,6 +41,26 @@ def trunc(s, n):
     return s if len(s) <= n else s[:n] + f" …[+{len(s)-n} chars truncated]"
 
 
+def line_ranges(lines) -> str:
+    """Render physical line numbers as compact anchors: `L5-L9, L14`; empty gives `none`.
+
+    One spelling for "these source lines", shared by the digest header and the Agent CLI, so
+    a reader parses a single format wherever anchors are reported in bulk.
+    """
+    spans, start, prev = [], None, None
+    for line in sorted(set(lines)):
+        if start is None:
+            start = prev = line
+        elif line == prev + 1:
+            prev = line
+        else:
+            spans.append((start, prev))
+            start = prev = line
+    if start is not None:
+        spans.append((start, prev))
+    return ", ".join(f"L{a}" if a == b else f"L{a}-L{b}" for a, b in spans) or "none"
+
+
 # ───────────────────────── Self-describing header (download artifact only) ─────────────────────────
 
 def digest_header(jsonl_path, source="claude", source_files=None) -> str:
@@ -50,7 +73,8 @@ def digest_header(jsonl_path, source="claude", source_files=None) -> str:
     knowing the anchor semantics, and its "byte-for-byte identical" contract must not be broken.
     See docs/handoffs/2026-06-11-anchored-render-to-service-layer.md.
     """
-    label = {"codex": "Codex", "kimi": "Kimi Code", "pi": "Pi"}.get(source, "Claude Code")
+    label = {"codex": "Codex", "kimi": "Kimi Code", "pi": "Pi",
+             "antigravity": "Antigravity"}.get(source, "Claude Code")
     lines = [
         "# ┌─ COMPACT SESSION DIGEST ─────────────────────────────────────────",
         f"# │ Navigable transcript of a {label} session. User and Assistant messages",
@@ -86,6 +110,18 @@ def digest_header(jsonl_path, source="claude", source_files=None) -> str:
             lines += ['# FORKED FROM SESSION: ' + forked['session_id'] +
                       (' at ordinal ' + str(at) if at is not None else ' (fork point not recorded)'),
                       '# This session branched off that one. Records before the fork point belong to it.']
+    if source == 'antigravity' and Path(jsonl_path).is_file():
+        from sources import antigravity
+        abandoned = sorted(antigravity.abandoned_line_numbers(jsonl_path))
+        lines += ['# HISTORY: live rows only. An Antigravity rewind never leaves this file; the rows',
+                  '# it abandoned are not rendered below and are not part of the conversation.']
+        lines += [f"# Abandoned by rewind: {len(abandoned)} raw lines"
+                  + (f" at {line_ranges(abandoned)}" if abandoned else "")]
+        if abandoned:
+            lines += ['# Those lines are still in the SOURCE file; open them at their [L#] as evidence.']
+        lines += ['# Antigravity may store a row with fields it already shortened itself '
+                  '(truncated_fields);',
+                  '# [L#] gives the full stored record, which can still be shorter than what ran.']
     if source == 'claude' and Path(jsonl_path).is_file():
         from sources import claude_history
         info = claude_history.describe(jsonl_path)
@@ -205,6 +241,42 @@ def render_pi(path) -> str:
         else:
             output.append(f"[L{line}] [SYSTEM]: {trunc(turn['text'], 300)}")
     return "\n".join(output)
+
+
+def render_antigravity(path) -> str:
+    """Antigravity transcript jsonl → anchored-transcript string, same format as the others.
+
+    Antigravity differences: a rewind stays inside the file, re-opening an earlier step and
+    appending over it, so which rows exist at all is a decision — `sources.antigravity`
+    makes it and this renderer only formats the rows it returns. Abandoned rows are not
+    rendered; `[L#]` stays the file's own physical line, so an agent can still read one with
+    `evidence`, and the digest header says how many were left out. Tool calls ride on a
+    planner row and their results land on later rows, so each is anchored where it was
+    written and `[L#]` stays ascending for a cursor-based reader.
+    """
+    from sources import antigravity
+    uturn = 0
+    o_lines = []
+    for turn in antigravity.collect_turns(path):
+        ln, kind = turn['line'], turn['type']
+        if kind == 'user':
+            uturn += 1
+            o_lines.append("")
+            o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {turn['ts']} ━━━━━━━━━━")
+            o_lines.append(turn['text'])
+        elif kind == 'assistant':
+            o_lines.append(f"[L{ln}] ASSISTANT: {turn['text']}")
+        elif kind == 'think':
+            o_lines.append(f"[L{ln}]   💭 THINK: {trunc(turn['text'], 1400)}")
+        elif kind == 'tool':
+            o_lines.append(f"[L{ln}]   🔧 {turn['name']}: {trunc(turn['summary'], 300)}")
+        elif kind == 'result':
+            status = 'ERROR' if turn['is_error'] else 'OK'
+            o_lines.append(f"[L{ln}]   ⮑ RESULT {status} {turn['name']}: "
+                           f"{_result_index(turn['text'], turn['is_error'])}")
+        elif kind == 'compacted':
+            o_lines.append(f"[L{ln}] [CONTEXT COMPACTED]")
+    return "\n".join(o_lines)
 
 
 def render_claude(path, records=None) -> str:

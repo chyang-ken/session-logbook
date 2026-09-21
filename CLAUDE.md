@@ -91,6 +91,9 @@ UI (browser-only)
 
 Each agent's on-disk format is adapted to a common shape by a module under `sources/`
 (`codex.py`, `antigravity.py`, `kimi.py`, `devin.py`, `pi.py`); Claude Code is read directly in `server.py`.
+Every surface that presents a source -- cards, reader, export, search, the `/anchored`
+download and the Agent CLI -- goes through its adapter. An Antigravity in-file rewind is
+resolved once, in `antigravity.py`, so no surface can show a branch the conversation dropped.
 
 ## 2. Cross-layer contracts
 
@@ -167,7 +170,7 @@ transcripts remain read-only. Semantic judgments belong to the consuming Agent.
 |---|---|
 | `locate <target>` | Resolve a Session ID, a conversation ID, an exact JSONL path, or a bounded search query |
 | `context <target>` | Emit the standard anchored transcript plus the next line cursor |
-| `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record |
+| `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record. Antigravity adds `# REMOVED_BEFORE_CURSOR:` -- the lines at or before the cursor that a later in-file rewind abandoned |
 | `status <target>` | Report observed file/session metadata without guessing process liveness |
 | `observe <target>` | Return runtime facts and conversation with independent cursors (Devin excluded) |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
@@ -215,11 +218,11 @@ launcher gets its own `backups/` next to its temp state file rather than no back
 | `server.py` `list_recent_files` / `find_files_by_name` | Files panel backends |
 | `sources/codex_history.py` `load` | the single entry point for a Codex session's effective history (continued pages and forks stitched across rollout files, served from the history index when available). Readers must call `load`, never `resolve`; `tests/test_history_entry_point.py` enforces this. If another client starts splitting sessions across files, give its source module the same kind of single entry point and route its readers through it, rather than generalizing Codex's format |
 | `sources/codex.py` `is_codex_path` / `CODEX_ARCHIVED_ROOT` | Codex (`~/.codex`) data source; `is_codex_path` is the centralized dual-root predicate (active `sessions` + `archived_sessions`) |
-| `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source; `rewind_plan` / `live_records` select the live history of an in-file rewind (a `step_index` drop counts only when that step slot is already held by a live row) and every reader here goes through them |
+| `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source; `is_antigravity_path` is the centralized directory-boundary-safe predicate; `rewind_plan` / `live_records` / `live_history` select the live history of an in-file rewind (a `step_index` drop counts only when that step slot is already held by a live row) and every reader here goes through them; `collect_turns` / `iter_messages` are the normalized feeds the anchored renderer and the Agent CLI consume, so neither restates this parsing |
 | `sources/pi.py` | Pi JSONL selected-branch reader, metadata, search, and exports; no source writes. CLI follow returns the full branch; raw evidence retains physical line numbers. |
 | `sources/kimi.py` `is_kimi_path` / `find_wire_by_session_id` | Kimi Code (`$KIMI_CODE_HOME`, default `~/.kimi-code`) data source; scans `sessions/*/*/agents/main/wire.jsonl` only (other agents are sub-agents); `is_kimi_path` is the directory-boundary-safe predicate |
 | `sources/codex_history.py` `resolve` / `load` / `fork_lineage` | Codex session identity: one `session_meta.id` is one conversation, spread over one or more rollout files. `resolve` walks `history_base`, then adds any same-id page that link never reaches (a restart after an aborted turn writes one), placing it by record timestamps or reporting `unlinked_same_id_segment`. Each segment is labelled `current` / `continuation` / `inherited` / `unlinked`; `fork_lineage` reports a user fork's parent and never mistakes a sub-agent for one |
-| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex` / `render_kimi`); the single source of truth behind the `/anchored` endpoint |
+| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex` / `render_kimi` / `render_pi` / `render_antigravity`); the single source of truth behind the `/anchored` endpoint. `digest_header` names the source and, for Antigravity, how many raw lines a rewind abandoned; `line_ranges` is the one spelling for a bulk list of anchors |
 | `session_logbook_cli.py` | read-only Agent access: resolve, search, anchored handoff, incremental follow, status, and evidence expansion |
 | `skills/session-logbook/` | the single Agent-facing Skill; thin routing layer over `session_logbook_cli.py` |
 | `index.html` `<style>` | all CSS (custom props in `:root`) |
