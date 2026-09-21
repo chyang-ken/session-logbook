@@ -1055,12 +1055,17 @@ def status_for(path: Path) -> dict:
 
 def _add_target_filters(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("target", help="session ID, source reference, or search query")
-    parser.add_argument("--source", choices=SUPPORTED_SOURCES)
+    parser.add_argument("--source", choices=SUPPORTED_SOURCES,
+                        help="restrict to one agent client; a target that resolves to a "
+                             "different source is an error, never a silent match")
     parser.add_argument("--project", help="project-path substring")
-    parser.add_argument("--include-subagents", action="store_true")
+    parser.add_argument("--include-subagents", action="store_true",
+                        help="also consider sub-agent records, which are machine-to-machine "
+                             "work and are left out by default")
 
 
-def parse_args(argv=None):
+def build_parser():
+    """The command surface, built separately so tests can inspect it without parsing."""
     parser = argparse.ArgumentParser(
         description="Read, hand off, follow, audit, and search local Agent sessions."
     )
@@ -1071,8 +1076,15 @@ def parse_args(argv=None):
 
     context = sub.add_parser("context", help="render an anchored context snapshot")
     _add_target_filters(context)
-    context.add_argument("--after-line", default=0)
-    context.add_argument("--cursor-source-path")
+    context.add_argument("--after-line", default=0, metavar="N",
+                         help="resume at this physical line (or a Codex SOURCE_CURSOR token) "
+                              "where the source can. Claude and Pi answer with the whole "
+                              "selected branch instead, because a rewind can replace earlier "
+                              "lines; the reply's FOLLOW_MODE always says which you received")
+    context.add_argument("--cursor-source-path", metavar="PATH",
+                         help="the record a bare cursor line came from; a line number carries "
+                              "no file identity, so a conversation spanning several records "
+                              "needs this to attribute it")
     turns = context.add_mutually_exclusive_group()
     turns.add_argument("--from-turn", metavar="U13",
                        help="start at this human turn, spelled as the transcript prints it (U13 or 13)")
@@ -1086,7 +1098,9 @@ def parse_args(argv=None):
         help="numeric NEXT_CURSOR line or Codex SOURCE_CURSOR token; Devin returns a full snapshot",
     )
 
-    follow.add_argument("--cursor-source-path")
+    follow.add_argument("--cursor-source-path", metavar="PATH",
+                        help="the record the cursor came from; required for --delta when the "
+                             "target is a conversation id with several records")
     follow.add_argument(
         "--delta", action="store_true",
         help="Claude only: return the cursor onward plus the earlier anchors a rewind removed, "
@@ -1098,38 +1112,60 @@ def parse_args(argv=None):
 
     observe = sub.add_parser("observe", help="read runtime facts and incremental conversation")
     _add_target_filters(observe)
-    observe.add_argument("--event-cursor", type=int, default=0)
-    observe.add_argument("--native-line-cursor", default=0)
-    observe.add_argument("--cursor-line", default=0)
-    observe.add_argument("--limit", type=int, default=50)
-    observe.add_argument("--cursor-source-path")
+    observe.add_argument("--event-cursor", type=int, default=0, metavar="N",
+                         help="resume Logbook's own runtime events after this many already read")
+    observe.add_argument("--native-line-cursor", default=0, metavar="N",
+                         help="resume the source's own lifecycle events at this line "
+                              "(or a Codex SOURCE_CURSOR token)")
+    observe.add_argument("--cursor-line", default=0, metavar="N",
+                         help="resume the conversation body at this line (or a Codex "
+                              "SOURCE_CURSOR token); independent of the event cursors above")
+    observe.add_argument("--limit", type=int, default=50, metavar="N",
+                         help="most runtime events to return in one page (1-200)")
+    observe.add_argument("--cursor-source-path", metavar="PATH",
+                         help="the record these cursors came from; all of them must name the "
+                              "same one")
 
     evidence = sub.add_parser("evidence", help="read source lines or Devin database nodes around an anchor")
     _add_target_filters(evidence)
-    evidence.add_argument("--line", type=int, required=True)
-    evidence.add_argument("--context", type=int, default=1)
-    evidence.add_argument("--max-chars", type=int, default=12_000)
+    evidence.add_argument("--line", type=int, required=True, metavar="N",
+                          help="the [L#] source line, or Devin [N#] node, to read around")
+    evidence.add_argument("--context", type=int, default=1, metavar="N",
+                          help="raw lines to include on each side of the anchor")
+    evidence.add_argument("--max-chars", type=int, default=12_000, metavar="N",
+                          help="truncate the raw extract at this many characters")
 
     recent = sub.add_parser("recent", help="list recently active sessions")
     recent.add_argument("--since", default="1d", help="ISO date/time, or relative such as 6h or 7d")
     recent.add_argument("--by", choices=("activity", "user"), default="activity",
                         help="rank and filter by the latest message, or by the latest user message")
-    recent.add_argument("--source", choices=SUPPORTED_SOURCES)
+    recent.add_argument("--source", choices=SUPPORTED_SOURCES, help="restrict to one agent client")
     recent.add_argument("--project", help="project-path substring")
     recent.add_argument("--include-suspected", action="store_true",
                         help="also list single-turn sessions the dashboard hides by default")
-    recent.add_argument("--include-subagents", action="store_true")
-    recent.add_argument("--limit", type=int, default=50)
+    recent.add_argument("--include-subagents", action="store_true",
+                        help="also list sub-agent records, which are left out by default")
+    recent.add_argument("--limit", type=int, default=50, metavar="N",
+                        help="most sessions to list")
 
     search = sub.add_parser("search", help="search session message text")
-    search.add_argument("query")
-    search.add_argument("--role", choices=("any", "user", "assistant"), default="any")
-    search.add_argument("--source", choices=SUPPORTED_SOURCES)
+    search.add_argument("query", help="one or more words; several are matched with AND "
+                                      "across a session, and a session title or ID matches too")
+    search.add_argument("--role", choices=("any", "user", "assistant"), default="any",
+                        help="match only what a person typed, only what the model replied, "
+                             "or either")
+    search.add_argument("--source", choices=SUPPORTED_SOURCES, help="restrict to one agent client")
     search.add_argument("--project", help="project-path substring")
     search.add_argument("--since", help="ISO date/time or relative days such as 7d")
-    search.add_argument("--include-subagents", action="store_true")
-    search.add_argument("--limit", type=int, default=10)
-    return parser.parse_args(argv)
+    search.add_argument("--include-subagents", action="store_true",
+                        help="also search sub-agent records, which are left out by default")
+    search.add_argument("--limit", type=int, default=10, metavar="N",
+                        help="most sessions to return")
+    return parser
+
+
+def parse_args(argv=None):
+    return build_parser().parse_args(argv)
 
 
 def _resolve_from_args(args) -> Path:
