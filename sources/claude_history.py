@@ -315,6 +315,21 @@ def rewind_status(path):
     return _selection(summary(path))[1]
 
 
+def hidden_lines(path, upto):
+    """Physical lines at or before ``upto`` that the selected chain no longer contains.
+
+    Returns ``None`` when the chain cannot be verified: every record is then preserved,
+    so nothing can be declared removed. A cursor-holding reader uses the list to retire
+    anchors it already consumed, instead of re-reading the branch to find them.
+    """
+    value = summary(path)
+    selected = _selection(value)[0]
+    if selected is None:
+        return None
+    return sorted({row['line'] for row in value['rows']
+                   if row['uuid'] and row['uuid'] not in selected and row['line'] <= int(upto)})
+
+
 def records(path, first=0, include_rewound=False):
     """Read selected history with original physical anchors; opt in to all branches."""
     path = Path(path).resolve()

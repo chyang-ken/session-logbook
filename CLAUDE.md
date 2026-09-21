@@ -183,19 +183,26 @@ transcripts remain read-only. Semantic judgments belong to the consuming Agent.
 |---|---|
 | `locate <target>` | Resolve a Session ID, a conversation ID, an exact JSONL path, or a bounded search query |
 | `context <target>` | Emit the standard anchored transcript plus the next line cursor |
-| `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record |
+| `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record. Claude returns the full selected branch; `--delta` returns only the cursor onward plus the earlier anchors a rewind removed |
 | `status <target>` | Report observed file/session metadata without guessing process liveness |
 | `observe <target>` | Return runtime facts and conversation with independent cursors (Devin excluded) |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
 | `search <query>` | Search real User/Assistant messages with source/project/date/role filters |
+| `recent` | List recently active Sessions when no target is known yet: `--since 6h`, `--by user`, source/project filters, title, and the dashboard's selection hints (single-turn Sessions and sub-agents are opt-in). Like `/api/session-choices`, it offers each conversation's **current** record only |
 
 Every `<target>` accepts a record ID or a conversation ID. A record ID resolves to exactly
 that record, always. A conversation ID resolves to that conversation's current record, and
 `locate` / `status` report it as `resolved_from_conversation_id`, while `context` / `follow` /
 `evidence` print a `# RESOLVED_FROM_CONVERSATION:` header line. Nothing is ever retargeted
-silently. `locate` / `status` / `search` also report `conversation_id` and, on `status`, the
+silently. `locate` / `status` / `search` / `recent` also report `conversation_id` and, on `status`, the
 per-record `conversation_runtime_observations` (runtime events are unioned at read time and
 never re-keyed).
+
+A cursor belongs to one physical record. `follow --delta` against a **conversation** ID whose
+conversation has several records therefore needs `--cursor-source-path` to say which record the
+cursor came from; without it the command returns the full selected branch and prints
+`# DELTA_NOT_APPLIED:` rather than counting a bare line number against a transcript it may not
+have come from.
 
 The single packaged Skill is `skills/session-logbook/`. It routes Agent requests to this CLI;
 do not add separate find/read/compress Skills or duplicate source parsing in Skill instructions.
@@ -325,6 +332,11 @@ feature branch ──PR──► staging ──deploy──► maintainer's mach
   That tag date is when the soak clock starts for that commit and everything before it. The
   restart command and health URL are machine-specific and live in git-ignored `_private/deploy.json`
   (shape documented at the top of the script).
+  The read-back waits up to `HEALTH_TIMEOUT_S` (180 s), which `_private/deploy.json` can raise or
+  lower with an optional `health_timeout_s`. It is that long because a deploy that bumps
+  `CACHE_SCHEMA_VERSION` makes the restarted service re-read every session file before it answers;
+  the wait ends as soon as the service replies, so a warm restart is not slowed. If it still times
+  out, nothing is tagged and running `deploy` again is safe — the second run meets a warm cache.
 - **Checking = the session-start hook.** `.claude/settings.json` runs
   `scripts/release_flow.py check --quiet` whenever an agent session starts here, so "is anything
   ready for `main`?" is asked automatically when work resumes. It prints only when something is

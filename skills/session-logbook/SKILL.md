@@ -22,6 +22,14 @@ python3 scripts/session_logbook.py <command> ...
 
 - **Known Session handed to this Agent:** run `context <ID-or-path>`. Read the anchored
   transcript as context. Expand only necessary `[L#]` evidence with `evidence`.
+- **No target yet (what has been active lately?):** run `recent --since 6h`. It lists
+  Sessions newest first with title, project, source and the dashboard's selection hints.
+  Single-turn Sessions are hidden as *suspected* automated runs, not proven ones; add
+  `--include-suspected` to see them. `--by user` ranks by the latest user message; sources
+  that keep no per-message time report `last_user_at_iso: null` and rank by activity.
+  A rewind or a resume mints a new record for the same conversation, so each row is a
+  conversation's **current** record; `conversation_id` names the conversation, and `id`
+  stays the record id every other command takes.
 - **Unknown Session:** run `search`, show a small candidate set when ambiguous, then use the
   selected ID with `context`. Do not load candidate transcripts during discovery.
 - **Follow or monitor:** first record `NEXT_CURSOR` from `context`; later run
@@ -94,12 +102,15 @@ python3 scripts/session_logbook.py follow '<target>' --cursor-line 427
 # Raw evidence around an [L#] anchor
 python3 scripts/session_logbook.py evidence '<target>' --line 427 --context 1
 
+# Recently active Sessions, newest first; no target needed
+python3 scripts/session_logbook.py recent --since 6h --by user
+
 # Search real messages; terms use AND semantics
 python3 scripts/session_logbook.py search 'payment retry' --role user --project my-app
 ```
 
-Useful search filters are `--source claude|codex|kimi|devin|pi`, `--project <substring>`, `--since 7d`
-or an ISO date, and `--include-subagents`.
+Useful `search` and `recent` filters are `--source claude|codex|kimi|devin|pi`, `--project <substring>`,
+`--since 7d`, `--since 6h` or an ISO date, and `--include-subagents`.
 
 ## Devin Local anchors
 
@@ -125,6 +136,37 @@ original row, including an abandoned branch.
   project, source, and time to identify the intended Session.
 - Never write to source transcripts or databases. Resume or message a Session only when the user separately
   requests that external action.
+
+## Claude follow: full branch by default, delta on request
+
+A Claude Desktop rewind hides earlier records, so plain `follow` on a Claude Session
+returns the whole selected branch and asks the reader to reconcile. A reader that keeps
+its own cursor can pass `--delta` instead:
+
+```bash
+python3 scripts/session_logbook.py follow '<target>' --cursor-line 427 --delta
+```
+
+It returns only line 427 onward, and names what the reader must retire:
+
+- `# REMOVED_BEFORE_CURSOR: L12-L18, L40` - anchors at or before the cursor that the
+  selected branch no longer contains. Drop anything derived from them. Logbook keeps no
+  record of what a reader consumed, so the list covers every hidden line up to the cursor;
+  retiring an anchor twice is harmless.
+- `# REMOVED_BEFORE_CURSOR: none` - nothing before the cursor was rewound.
+- `# REMOVED_BEFORE_CURSOR: unknown` - the branch could not be verified, so every saved
+  record is kept and returned in physical order; removal cannot be determined. The
+  `FOLLOW_MODE` line gives the reason.
+
+`--delta` with cursor 0, and every non-Claude source, behaves exactly like plain `follow`.
+
+A cursor belongs to one physical record, and a rewind or resume can make a conversation's
+current record a different file from the one the cursor was read in. So when the target is a
+**conversation** id with several records, pass the `CURSOR_SOURCE_PATH` you saved alongside the
+cursor as `--cursor-source-path`. Without it the command cannot tell which record the line
+number came from: it returns the full selected branch and says
+`# DELTA_NOT_APPLIED: …` instead of counting the line against a transcript it may not belong
+to. Targeting the record id directly needs nothing extra.
 
 ## Claude Desktop copied history and explicit target changes
 

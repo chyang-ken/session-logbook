@@ -11,6 +11,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Preserve genuine Claude user text appended after desktop handoff reminders in search, previews, the reader, and exports; refresh cached metadata for existing sessions.
 
 ### Added
+- Add an opt-in `follow --delta` for Claude Sessions: it returns only the cursor onward and lists the earlier anchors a rewind removed (`REMOVED_BEFORE_CURSOR`), so cursor-holding readers no longer re-read and diff the whole branch. Against a conversation id with several records it needs `--cursor-source-path` to know which record the cursor came from, and otherwise returns the full branch with `DELTA_NOT_APPLIED`. Default `follow` is unchanged.
+- Add a `recent` Agent CLI command that lists recently active Sessions without a known target, with title, source, project, latest user time, conversation id and the dashboard's selection hints; single-turn Sessions and sub-agents are opt-in. Each conversation is offered as its current record only, so a transcript a rewind superseded is never listed as a live peer. `--since` also accepts hours such as `6h`.
 - Read Pi sessions from local JSONL: selected-branch search, reader, exports, and Agent CLI, with original-line evidence and existing local metadata controls.
 - Browse sessions across projects in a default, newest-first timeline; the project view remains available.
 - Hide suspected automated runs with an explicit, reversible filter. Single-turn sessions are the initial signal; users can confirm their participation to keep a session visible.

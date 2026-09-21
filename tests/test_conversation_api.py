@@ -205,6 +205,10 @@ class ApiFixture(unittest.TestCase):
             mock.patch.object(server, "_state_loaded", True),
             mock.patch.object(claude_desktop, "DESKTOP_ROOT", self.descriptors),
             mock.patch.object(server.codex_source, "scan_sessions", return_value=[]),
+            # The CLI walks the Codex roots itself instead of calling scan_sessions, so the
+            # roots have to be rebound too or a CLI test would read the real local library.
+            mock.patch.object(server.codex_source, "CODEX_ROOT", self.root / "no-codex"),
+            mock.patch.object(server.codex_source, "CODEX_ARCHIVED_ROOT", self.root / "no-codex-archive"),
             mock.patch.object(server.ag_source, "scan_sessions", return_value=[]),
             mock.patch.object(server.pi_source, "scan_sessions", return_value=[]),
             mock.patch.object(server.kimi_source, "scan_sessions", return_value=[]),
@@ -455,6 +459,85 @@ class CliTests(ApiFixture):
         hits = {hit["id"]: hit for hit in cli.search_sessions("question", source="claude")}
         self.assertEqual(hits[R1]["conversation_id"], CONVERSATION)
         self.assertEqual(hits[LONE]["conversation_id"], LONE)
+
+    def test_recent_discovery_offers_only_current_records(self):
+        # R1 and R2 were superseded by the rewind: still readable by id, never offered as
+        # peers to attach to. Same rule as /api/session-choices.
+        rows = {row["id"]: row for row in
+                cli.recent_sessions(since="2026-08-01", include_suspected=True)}
+        self.assertEqual(sorted(rows), sorted([R3, LONE]))
+        self.assertEqual(rows[R3]["conversation_id"], CONVERSATION)
+        self.assertEqual(rows[LONE]["conversation_id"], LONE)
+
+    def test_recent_reads_state_left_on_a_superseded_record(self):
+        # The confirmation and the title were set before the rewind. Hiding R1 must not
+        # hide what the user told us about the conversation.
+        self.state[R1] = {"human_confirmed": True, "title_override": "Named before the rewind"}
+        rows = {row["id"]: row for row in cli.recent_sessions(since="2026-08-01")}
+        self.assertEqual(sorted(rows), [R3])
+        self.assertEqual((rows[R3]["selection_group"], rows[R3]["selection_reason"]),
+                         ("primary", "human_confirmed"))
+        self.assertEqual(rows[R3]["title"], "Named before the rewind")
+
+
+class CliDeltaFollowTests(ApiFixture):
+    """`follow --delta` against a conversation whose current record was itself rewound."""
+
+    def setUp(self):
+        super().setUp()
+        # Give the current record an in-file rewind, so the delta has something to report.
+        rows = [
+            self.record("r3-start", None, "question rewound"),
+            self.record("r3-old", "r3-start", "abandoned answer", "assistant"),
+            self.record("r3-new", "r3-start", "current answer", "assistant"),
+            {"type": "last-prompt", "leafUuid": "r3-new", "sessionId": R3},
+        ]
+        self.current = self.projects / SLUG / f"{R3}.jsonl"
+        self.current.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        server.scan_sessions(force=True)
+        server._conversation_memo.update(generation=None, at=0.0, index={}, by_record={})
+
+    def record(self, uuid, parent, text, role="user"):
+        return {"type": role, "uuid": uuid, "parentUuid": parent, "sessionId": R3, "cwd": CWD,
+                "timestamp": "2026-08-20T10:00:05Z",
+                "message": {"role": role,
+                            "content": text if role == "user" else [{"type": "text", "text": text}]}}
+
+    def test_delta_by_conversation_id_reports_the_record_it_used(self):
+        # The reader saved CURSOR_SOURCE_PATH with its cursor, so the cursor is attributable
+        # and the delta applies while the header still names the substitution.
+        text = cli.render_context(cli.resolve_target(CONVERSATION), after_line=3,
+                                  target=CONVERSATION, cursor_source_path=str(self.current),
+                                  delta=True)
+        self.assertIn(f"# SESSION_ID: {R3}", text)
+        self.assertIn(f"conversation {CONVERSATION} -> current record {R3}", text)
+        self.assertIn("# REMOVED_BEFORE_CURSOR: L2", text)
+        self.assertIn("current answer", text)
+        self.assertNotIn("question rewound", text)
+        self.assertNotIn("abandoned answer", text)
+
+    def test_a_bare_cursor_is_not_applied_to_a_record_it_may_not_come_from(self):
+        # Same conversation, but nothing says which record produced line 3. The conversation
+        # has three records, so the cursor could belong to a superseded transcript.
+        text = cli.render_context(cli.resolve_target(CONVERSATION), after_line=3,
+                                  target=CONVERSATION, delta=True)
+        self.assertIn("# DELTA_NOT_APPLIED:", text)
+        self.assertIn(R3, text.split("# DELTA_NOT_APPLIED:")[1].split("\n")[0])
+        self.assertIn("--cursor-source-path", text)
+        self.assertNotIn("REMOVED_BEFORE_CURSOR", text)
+        # The documented full-branch answer, which any reader can reconcile against.
+        self.assertIn("# FOLLOW_MODE: full selected branch", text)
+        self.assertIn("question rewound", text)
+        self.assertIn("current answer", text)
+        self.assertNotIn("abandoned answer", text)
+
+    def test_a_record_id_target_still_gets_the_plain_delta(self):
+        text = cli.render_context(cli.resolve_target(R3), after_line=3, target=R3, delta=True)
+        self.assertIn("# FOLLOW_MODE: delta from cursor; selected branch verified", text)
+        self.assertIn("# REMOVED_BEFORE_CURSOR: L2", text)
+        self.assertNotIn("DELTA_NOT_APPLIED", text)
+        self.assertNotIn("RESOLVED_FROM_CONVERSATION", text)
+        self.assertNotIn("question rewound", text)
 
 
 if __name__ == "__main__":
