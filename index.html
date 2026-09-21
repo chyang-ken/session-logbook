@@ -2061,6 +2061,9 @@
   .conv-skill { background: rgba(var(--role-skill-rgb), 0.07); }
   .conv-skill .conv-role { color: var(--role-skill-fg); }
   .conv-skill .conv-text { color: var(--text-3); font-size: 12px; }
+  /* The client's compaction summary: a skill-shaped block (folded reference text nobody said),
+     on the system-event gray rather than the external-content orange. No new token. */
+  .conv-compact-summary { background: rgba(var(--role-system-rgb), 0.07); }
   .conv-user .conv-role { color: var(--text-1); }
 
   /* Subagent spawn — the inline signal at the moment "the main agent dispatches a subagent" (phase one doesn't expand the content)
@@ -4955,6 +4958,7 @@ const FOLD_LIMITS = {
   user: [300, 300],     // typical user paste = long text/paths/error logs; 300 on each side is enough for a quick scan
   assistant: [500, 400], // AI replies are information-dense; the head summary has high value, leave a bit less for the tail
   skill: [180, 80],     // skill body is system-injected reference; just need to see "which skill is loaded" + the ending
+  summary: [180, 200],  // the client's compaction summary: the head is boilerplate, the end says what was still pending
 };
 
 function renderConvTurn(turn) {
@@ -4982,6 +4986,21 @@ function renderConvTurn(turn) {
       <div class="conv-turn conv-skill conv-foldable">
         <div class="conv-turn-head">
           <span class="conv-role">skill</span>
+          <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
+        </div>
+        ${renderFoldableText(turn.text, h, t, true)}
+      </div>`;
+  }
+  // What the client wrote when it compacted the conversation. It keeps the skill block's
+  // classes on purpose: the scope filter, in-conversation search and the standalone font
+  // size all key on .conv-skill, and this is the same kind of thing - reference text the
+  // model received and nobody typed.
+  if (turn.type === 'compact_summary') {
+    const [h, t] = FOLD_LIMITS.summary;
+    return `
+      <div class="conv-turn conv-skill conv-compact-summary conv-foldable">
+        <div class="conv-turn-head">
+          <span class="conv-role">summary</span>
           <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
         </div>
         ${renderFoldableText(turn.text, h, t, true)}

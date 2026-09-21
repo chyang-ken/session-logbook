@@ -68,7 +68,16 @@ def normalize_record(row):
     return dict(row, type='user', message={'role': 'user', 'content': prompt})
 
 
-def user_record_text(row, joiner=' '):
+def is_compact_summary(row):
+    """Whether the client wrote this record to stand in for the turns it compacted away.
+
+    The flag is the evidence, not the opening sentence: a person can type "This session is
+    being continued", and a future client can reword its summary.
+    """
+    return isinstance(row, dict) and bool(row.get('isCompactSummary'))
+
+
+def user_record_text(row, joiner=' ', image_placeholder='[image]'):
     """Readable text of a user-role record: leading reminders stripped, images as [image].
 
     ``tool_result`` blocks are skipped rather than disqualifying the record. A record can
@@ -84,7 +93,7 @@ def user_record_text(row, joiner=' '):
             if block.get('type') == 'text':
                 parts.append(strip_leading_reminders(block.get('text') or ''))
             elif block.get('type') == 'image':
-                parts.append('[image]')
+                parts.append(image_placeholder)
         return joiner.join(part for part in parts if part).strip()
     return strip_leading_reminders(content) if isinstance(content, str) else ''
 
@@ -100,6 +109,8 @@ def anchored_user_text(row):
     - anything the client marks ``isMeta`` - it wrote that record itself: a skill body, the
       "[Image: source: ...]" note that follows a pasted image, hook feedback, a message
       relayed from another session;
+    - the summary the client marks ``isCompactSummary`` - it wrote that too, to replace the
+      turns it compacted away; the model receives it, and nobody said it;
     - the user-role pseudo-messages in ``is_system_user_string``: a background-task notice,
       bash-mode output, a teammate report, a slash-command injection, an interrupt marker;
     - a record holding nothing but tool results.
@@ -107,9 +118,22 @@ def anchored_user_text(row):
     A human turn, even though it has no typed words: a message that is only an image.
     """
     row = normalize_record(row)
-    if row.get('type') != 'user' or row.get('isMeta'):
+    if not isinstance(row, dict) or row.get('type') != 'user':
+        return ''
+    if row.get('isMeta') or is_compact_summary(row):
         return ''
     text = user_record_text(row)
     if not text.strip() or is_system_user_string(text.lstrip()):
         return ''
     return text
+
+
+def human_turn_words(row):
+    """Only the words the person typed in a human turn, or '' - for matching a search.
+
+    The same verdict as :func:`anchored_user_text`, without the ``[image]`` placeholder:
+    that word is ours, and a search for "image" must not find it in every pasted picture.
+    """
+    if not anchored_user_text(row):
+        return ''
+    return user_record_text(normalize_record(row), image_placeholder='')

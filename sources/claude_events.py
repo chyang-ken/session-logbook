@@ -1,6 +1,6 @@
 """Claude records that carry a fact but not a sentence anybody said.
 
-Four record shapes reach a Claude transcript without being human speech or model
+Five record shapes reach a Claude transcript without being human speech or model
 output. The reader used to drop the first three, which quietly cost the reader evidence
 about why a session stalled, and - for the queue - risked the opposite mistake:
 showing text the person typed as if the agent had received it.
@@ -27,6 +27,12 @@ showing text the person typed as if the agent had received it.
    the ``user`` record the client writes when the person presses Esc. The model receives
    it, but nobody said it: it reports that a turn was cut short.
 
+5. ``isCompactSummary: true`` marks the ``user`` record the client writes when it compacts
+   a conversation: its own account of the turns it is about to stop sending. It follows a
+   ``compact_boundary`` system record, the model receives it in place of those turns, and
+   nobody said it. It is long - thousands of characters - and the part a reader needs,
+   what was still pending, sits at its end.
+
 What is deliberately *not* here: a rule that guesses humanity from language, tone or
 script. The 2026-09-20 format audit found Chinese prose in machine records and English
 prose in human ones. Every predicate below keys on an explicit structural marker the
@@ -35,12 +41,13 @@ client wrote - a record type, an ``origin.kind``, a ``commandMode``, an XML wrap
 import re
 
 from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
-                                 interrupt_marker_text, is_system_user_string)
+                                 interrupt_marker_text, is_compact_summary,
+                                 is_system_user_string, user_record_text)
 
 __all__ = [
     'enqueued_text', 'delivered_text', 'notification_prompt', 'api_error_label',
     'parse_task_notification', 'parse_system_user_event', 'extract_inner_xml',
-    'ApiErrorRun', 'QUEUED_INPUT_ROLE',
+    'ApiErrorRun', 'QUEUED_INPUT_ROLE', 'compact_summary_text',
 ]
 
 #: Search snippets for text that was queued but never confirmed delivered use this role.
@@ -139,6 +146,17 @@ def notification_prompt(row):
         return None
     prompt = attachment.get('prompt')
     return prompt if isinstance(prompt, str) and prompt.strip() else None
+
+
+def compact_summary_text(row):
+    """The summary the client wrote at a compaction, else ``None``.
+
+    Keyed on the ``isCompactSummary`` flag alone. The summary's opening sentence is not
+    evidence: a person can type it, and the client can reword it.
+    """
+    if not is_compact_summary(row) or row.get('type') != 'user':
+        return None
+    return user_record_text(row, joiner='\n').strip() or None
 
 
 def parse_task_notification(text):

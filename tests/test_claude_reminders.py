@@ -7,11 +7,16 @@ from pathlib import Path
 import server
 import session_logbook_cli as cli
 from sources import anchored_transcript
-from sources.claude_text import strip_leading_reminders
+from sources.claude_text import anchored_user_text, strip_leading_reminders
 
 
 REMINDER = "<system-reminder>Desktop environment\nsettings</system-reminder>"
 BODY = "Please review the orchard plan."
+
+
+def human_text(content, **flags):
+    """What the shared rule says a person said in a user record with this content."""
+    return anchored_user_text(dict({"type": "user", "message": {"content": content}}, **flags))
 
 
 class ReminderTests(unittest.TestCase):
@@ -24,9 +29,13 @@ class ReminderTests(unittest.TestCase):
     def test_existing_system_and_tool_filters_remain(self):
         for text in (REMINDER, REMINDER + "<command-name>test</command-name>",
                      REMINDER + "<task-notification>done</task-notification>"):
-            self.assertEqual(server._user_text(text), "")
-        self.assertEqual(server._user_text([{"type": "tool_result", "content": REMINDER + BODY}]), "")
-        self.assertEqual(server._user_text([{"type": "text", "text": "ordinary skill body"}]), "")
+            self.assertEqual(human_text(text), "")
+        self.assertEqual(human_text([{"type": "tool_result", "content": REMINDER + BODY}]), "")
+        # A skill body is told apart by the flag the client sets, not by its shape: every
+        # real one is isMeta, and the same blocks without the flag are a person's message.
+        skill_body = [{"type": "text", "text": "ordinary skill body"}]
+        self.assertEqual(human_text(skill_body, isMeta=True), "")
+        self.assertEqual(human_text(skill_body), "ordinary skill body")
 
     def test_all_reading_paths_preserve_human_body(self):
         variants = [
@@ -41,7 +50,7 @@ class ReminderTests(unittest.TestCase):
                     row = {"type": "user", "cwd": "/Users/alice/my-app",
                            "timestamp": "2026-09-14T10:00:00Z", "message": {"content": content}}
                     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
-                    self.assertEqual(server._user_text(content), BODY)
+                    self.assertEqual(human_text(content), BODY)
                     self.assertIn(BODY, [m["text"] for m in server.extract_metadata(path)["recent_msgs"]])
                     turns = server.extract_conversation(path)["turns"]
                     self.assertEqual([t["text"] for t in turns if t["type"] == "user"], [BODY])

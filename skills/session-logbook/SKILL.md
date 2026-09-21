@@ -137,10 +137,17 @@ turns. In the anchored transcript each takes a `⚠ EVENT` marker line carrying 
   with the count and the span.
 - `INTERRUPTED` — the person pressed Esc. The client files this under the user role, but
   nobody typed it; the next `[U#]` is what they said after stopping the agent.
+- `COMPACTION_SUMMARY` — the client's own account of the turns it compacted away, kept
+  whole on the lines that follow the marker. The model received it in place of those
+  turns; the person did not write it. Read it to learn what the agent still knew
+  afterwards, never as something the person asked for. When a compaction opened a new
+  file it is that file's only account of what came before.
 
 So `[U#]` counts only real human turns, and matches the Session's turn count. Unconfirmed
 queued text is returned by `search` under the role `queued` (use `--role any`);
-notifications and errors are not indexed at all.
+notifications, errors and compaction summaries are not indexed at all. `search --role user`
+matches only words the person typed: the `[image]` placeholder that stands for a pasted
+picture in a transcript is not one of them.
 
 ## Devin Local anchors
 

@@ -116,6 +116,9 @@ new component.
 
 ## Found, and deliberately not changed here
 
+> The first two items were settled on 2026-09-21: see
+> [compaction summary and record-level previews](2026-09-21-compaction-summary-and-record-level-previews.md).
+
 * **Compaction summaries take a `[U#]`.** 88 records carry `isCompactSummary` and read
   "This session is being continued…". The client wrote them, yet every consumer counts
   them as a human turn — they *agree*, so they are outside this change, but by the
