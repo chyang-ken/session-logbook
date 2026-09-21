@@ -21,7 +21,12 @@ Only the git logic lives here. The machine-specific part (how to restart the ser
 URL proves it is up) is read from a git-ignored local file, `_private/deploy.json`:
 
     {"restart": ["/path/to/restart-command", "arg", "..."],
-     "health_url": "http://127.0.0.1:47821/api/stats"}
+     "health_url": "http://127.0.0.1:47821/api/stats",
+     "health_timeout_s": 180}
+
+`health_timeout_s` is optional and defaults to `HEALTH_TIMEOUT_S` below. Raise it on a machine
+whose dashboard regularly needs longer to answer after a restart; the wait ends the moment the
+service replies, so a longer limit never slows a healthy restart down.
 
 Python 3.9+, standard library only. `release` shells out to the GitHub CLI (`gh`).
 """
@@ -44,7 +49,12 @@ MAIN = "main"
 REMOTE = "origin"
 TAG_PREFIX = "deployed/"
 SOAK_DAYS = 14          # a deployed commit is releasable once it has been in use this long
-HEALTH_TIMEOUT_S = 30.0  # how long deploy waits for the restarted service before refusing to tag
+# How long deploy waits for the restarted service before refusing to tag. A deploy that bumps
+# the scan-cache schema invalidates the warm cache, so the restarted service re-reads every
+# session file before it answers: on a library of a few thousand sessions that took between one
+# and two minutes, and a 30 s limit refused to tag a service that had in fact come up fine. The
+# wait returns as soon as the service replies, so the higher limit costs a warm restart nothing.
+HEALTH_TIMEOUT_S = 180.0
 DEFAULT_CONFIG = Path("_private") / "deploy.json"
 
 
@@ -226,10 +236,16 @@ def load_config(root: Path, path: Optional[str]) -> dict:
         raise SystemExit("release-flow: deploy config needs a non-empty `restart` command list")
     if not isinstance(cfg.get("health_url"), str):
         raise SystemExit("release-flow: deploy config needs a `health_url` string")
+    timeout = cfg.get("health_timeout_s", HEALTH_TIMEOUT_S)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise SystemExit("release-flow: deploy config's optional `health_timeout_s` must be a "
+                         "positive number of seconds")
+    cfg["health_timeout_s"] = float(timeout)
     return cfg
 
 
 def wait_healthy(url: str, timeout_s: Optional[float] = None) -> bool:
+    """Poll until the service answers 200, or the limit runs out. Returns on the first answer."""
     deadline = time.time() + (HEALTH_TIMEOUT_S if timeout_s is None else timeout_s)
     while time.time() < deadline:
         try:
@@ -238,7 +254,8 @@ def wait_healthy(url: str, timeout_s: Optional[float] = None) -> bool:
                     return True
         except Exception:
             pass
-        time.sleep(1)
+        # Never sleep past the deadline: the answer is due then, not a second later.
+        time.sleep(max(0.0, min(1.0, deadline - time.time())))
     return False
 
 
@@ -265,9 +282,16 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     r = subprocess.run(cfg["restart"], capture_output=True, text=True)
     if r.returncode != 0:
         raise SystemExit(f"release-flow: restart command failed ({r.returncode}): {r.stderr.strip() or r.stdout.strip()}")
-    if not wait_healthy(cfg["health_url"]):
-        raise SystemExit(f"release-flow: service did not answer 200 at {cfg['health_url']} within {HEALTH_TIMEOUT_S:.0f} s; "
-                         f"NOT recording a deploy tag.")
+    timeout_s = cfg["health_timeout_s"]
+    if not wait_healthy(cfg["health_url"], timeout_s):
+        raise SystemExit(
+            f"release-flow: service did not answer 200 at {cfg['health_url']} within {timeout_s:g} s; "
+            f"NOT recording a deploy tag.\n"
+            f"If this deploy bumped the scan-cache schema, the restarted service has to re-read "
+            f"every session file before it serves a request, which takes minutes on a large "
+            f"history. Check that the service is up and run `deploy` again: repeating it is safe, "
+            f"nothing was tagged, and the second run meets a warm cache. Raise `health_timeout_s` "
+            f"in the deploy config if this machine needs longer than {timeout_s:g} s routinely.")
     print(f"release-flow: service answered at {cfg['health_url']}")
 
     already = [d for d in list_deployed(root) if d.commit == head]
