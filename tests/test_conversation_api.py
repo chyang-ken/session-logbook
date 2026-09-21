@@ -393,6 +393,30 @@ class HttpTests(ApiFixture):
         second = self.get(f"/api/sessions/{R3}/conversation")["fingerprint"]
         self.assertNotEqual(first, second)
 
+    def test_the_reader_serves_the_conversation_note_on_every_member(self):
+        """A deep link to a superseded record must not look as if the note was lost.
+
+        The reader is where a note is read and edited now, the note belongs to the
+        conversation, and a write lands on the current record whichever member is addressed.
+        So every member has to report the same note the card reports.
+        """
+        self.state[R1] = {"note": "written before the rewind"}
+        self.state[R3] = {"note": "written after"}
+        server._conversation_memo.update(generation=None, at=0.0)
+        for record_id in (R1, R2, R3, CONVERSATION):
+            body = self.get(f"/api/sessions/{record_id}/conversation")
+            self.assertEqual(body["note"], "written after", record_id)
+            self.assertEqual(body["older_notes"],
+                             [{"record_id": R1, "note": "written before the rewind"}], record_id)
+        lone = self.get(f"/api/sessions/{LONE}/conversation")
+        self.assertEqual((lone["note"], lone["older_notes"]), ("", []))
+
+    def test_an_earlier_records_fingerprint_also_follows_the_note(self):
+        first = self.get(f"/api/sessions/{R1}/conversation")["fingerprint"]
+        self.post(R1, "note", {"note": "new"})
+        server._conversation_memo.update(generation=None, at=0.0)
+        self.assertNotEqual(self.get(f"/api/sessions/{R1}/conversation")["fingerprint"], first)
+
 
 class CliTests(ApiFixture):
     def test_locate_by_record_id_reports_the_conversation(self):

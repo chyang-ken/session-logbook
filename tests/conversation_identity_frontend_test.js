@@ -175,4 +175,63 @@ assert.equal(recordRelationLabel('compaction-continuation'), 'Continued after a 
 assert.equal(recordRelationLabel('something-new'), 'something-new', 'an unknown relation is shown, not dropped');
 `);
 
-console.log('conversation identity frontend: all assertions passed');
+// --- editing the note from the reader writes once, and the card moves with it ---
+// The reader and the card show the same note, so an edit made in one has to be visible in
+// the other before the request lands, and has to come back out of both if it fails.
+vm.runInContext(`
+let posted = [], renders = 0, toasts = [], nextResponse = {ok: true};
+const render = () => { renders += 1; };
+const renderConv = () => {};
+const $conv = {querySelector: () => null};
+let _convStandalone = false;
+const toast = message => toasts.push(message);
+const mutatingFetch = async (url, options) => {
+  posted.push({url, body: JSON.parse(options.body)});
+  if (!nextResponse.ok) throw new Error('offline');
+  return nextResponse;
+};
+const window = {openNoteModal: async () => window.__answer};
+`, context);
+vm.runInContext(section('function sessionMetadataTargets(data, meta)',
+                        'async function setSessionHumanConfirmation('), context);
+
+const finish = async body => {
+  vm.runInContext(body, context);
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+};
+
+(async () => {
+  // A note typed in the reader lands on every view of the conversation, card included.
+  run(`window.__answer = 'Rerun against staging';
+       globalThis.pending = editSessionNote({id: 'rec-old'}, findItem('rec-old'));`);
+  await finish(`;`);
+  run(`
+assert.equal(posted.length, 1, 'exactly one write');
+assert.equal(posted[0].url, '/api/sessions/rec-old/note');
+assert.deepEqual(posted[0].body, {note: 'Rerun against staging'});
+assert.equal(currentItemFor('rec-old').note, 'Rerun against staging',
+  'the card entry carries the optimistic value');
+assert.ok(renders > 0, 'the list was redrawn so the card shows it');
+assert.deepEqual(toasts, ['Note saved']);
+`);
+
+  // A failed write puts the old note back on the card, not just in the reader.
+  run(`nextResponse = {ok: false}; posted = []; toasts = []; window.__answer = 'lost edit';
+       globalThis.pending = editSessionNote({id: 'rec-new'}, findItem('rec-new'));`);
+  await finish(`;`);
+  run(`
+assert.equal(currentItemFor('rec-new').note, 'Rerun against staging',
+  'a failed write rolls the card back to the previous note');
+assert.equal(toasts.length, 1);
+assert.ok(toasts[0].startsWith('Note failed: '), toasts[0]);
+`);
+
+  // Cancelling the dialog writes nothing at all.
+  run(`posted = []; toasts = []; window.__answer = null;
+       globalThis.pending = editSessionNote({id: 'rec-new'}, findItem('rec-new'));`);
+  await finish(`;`);
+  run(`assert.deepEqual(posted, [], 'cancelling must not write');
+       assert.deepEqual(toasts, []);`);
+
+  console.log('conversation identity frontend: all assertions passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });

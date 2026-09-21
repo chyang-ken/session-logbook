@@ -120,15 +120,47 @@ class ConversationIdentityFrontendStaticTests(unittest.TestCase):
         self.assertIn("olderNotesBlock", html)
         self.assertIn("card-older-note-id", html)
         self.assertIn("EARLIER NOTES · ", html)
+        # The reader lists them the same way, with the same per-record label.
+        self.assertIn("olderNotesHtml", html)
+        self.assertIn("conv-older-note-id", html)
+        self.assertEqual(html.count("content: 'EARLIER NOTES · ';"), 2)
+
+    def test_the_reader_reads_the_note_from_the_response_before_the_card(self):
+        """The standalone page has no card, so the payload has to answer in both modes."""
+        html = _index_html()
+        self.assertIn("const noteText = String(stateMeta?.note ?? data.note ?? '');", html)
+        self.assertIn("(stateMeta?.older_notes ?? data.older_notes ?? [])", html)
+        self.assertIn('id="conv-note-edit"', html)
+        self.assertIn("editSessionNote(data, meta);", html)
+        # One editor, one dialog, one write path - the card's.
+        self.assertEqual(html.count("async function editSessionNote("), 1)
+        self.assertIn("/note`, {", html[html.index("async function editSessionNote("):])
+
+    def test_event_rows_are_never_styled_or_labelled_as_user_messages(self):
+        html = _index_html()
+        for kind in ("queued_input", "api_error"):
+            self.assertIn("turn.type === '%s'" % kind, html)
+        block = html[html.index("if (turn.type === 'queued_input')"):
+                     html.index("function renderQaQuestion(")]
+        self.assertIn("conv-system-event", block)
+        self.assertNotIn("conv-user", block)
+        self.assertIn("Queued input", block)
+        # j/k navigation and the message counter both key on the user class / type only.
+        self.assertIn("const userTurns = [...body.querySelectorAll('.conv-user')];", html)
+        self.assertIn("data.turns.filter(t => t.type === 'user').length", html)
+        # Search buckets the new rows with the assistant side, via the shared class.
+        self.assertIn("'conv-system-event',", html)
 
     def test_ui_adds_no_new_colour_variables(self):
         """design-system.md §1: prove the existing tokens cannot cover it before adding one."""
         html = _index_html()
         root = html[html.index(":root {"):html.index("}", html.index(":root {"))]
         declared = set(re.findall(r"(--[a-z0-9-]+)\s*:", root))
-        expected_new = {"--card-records", "--conv-rewind-relation"}
+        expected_new = {"--card-records", "--conv-rewind-relation", "--conv-note",
+                        "--sysev-note", "--role-queued-rgb"}
         self.assertFalse(declared & expected_new)
-        for block in ("card-records", "card-lineage", "card-older-notes", "search-match-record"):
+        for block in ("card-records", "card-lineage", "card-older-notes", "search-match-record",
+                      "conv-note-text", "conv-older-notes", "conv-older-note-id"):
             rules = re.findall(r"\.%s[^{]*\{([^}]*)\}" % block, html)
             self.assertTrue(rules, block)
             for rule in rules:

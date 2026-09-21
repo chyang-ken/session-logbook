@@ -112,6 +112,34 @@ python3 scripts/session_logbook.py search 'payment retry' --role user --project 
 Useful `search` and `recent` filters are `--source claude|codex|kimi|antigravity|devin|pi`,
 `--project <substring>`, `--since 7d`, `--since 6h` or an ISO date, and `--include-subagents`.
 
+## Codex sub-agent threads
+
+A Codex rollout that its own metadata marks as a spawned sub-agent is a complete Session,
+not a Session with a missing prefix. `status` and `locate` report `spawned_from` with the
+Session that started it, and the digest header says `# SPAWNED BY SESSION: <id>`. Read that
+as lineage: open the parent if you want its side of the work, but do not treat this file as
+partial, and do not go looking for inherited history — a spawned thread inherits nothing by
+reference. `# CONTEXT_INCOMPLETE` still means what it says, and still appears for a user
+fork whose pre-fork turns really are elsewhere.
+
+## Claude records that are not speech
+
+A Claude transcript contains records no person said, and Logbook never presents them as
+turns. In the anchored transcript each takes a `⚠ EVENT` marker line carrying its own
+`[L#]`, and never a `[U#]`:
+
+- `QUEUED_INPUT (delivery not confirmed)` — text typed while the agent was busy, where
+  nothing in the file shows it being handed over. Read it as evidence about the file, not
+  proof the text never arrived; the person may still be waiting for an answer to it.
+- `TASK_NOTIFICATION` — a background task finished. The queued-only form carries the same
+  delivery qualifier.
+- `API_ERROR` — a request failed and was retried; consecutive retries collapse into one row
+  with the count and the span.
+
+So `[U#]` counts only real human turns, and matches the Session's turn count. Unconfirmed
+queued text is returned by `search` under the role `queued` (use `--role any`);
+notifications and errors are not indexed at all.
+
 ## Devin Local anchors
 
 Devin uses `[N#]` database row IDs. Pass the numeric part to `evidence --line` or

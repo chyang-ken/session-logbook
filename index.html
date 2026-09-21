@@ -1975,6 +1975,40 @@
   .card-older-note { margin: 2px 0; overflow-wrap: anywhere; }
   .card-older-note-id { font-family: var(--font-mono); font-size: 9px; color: var(--text-4); margin-right: 4px; }
   .card.collapsed .card-older-notes, .card.collapsed .card-records { display: none; }
+  /* The same note, in the reader. Per design-system §5.5 a component that appears on more
+     than one surface looks the same on all of them, so this reuses the card's geometry and
+     the same sage tint; only the outer margins adapt to the header. */
+  .conv-note { margin-top: 6px; }
+  .conv-note-text {
+    margin: 4px 0; padding: 8px 10px;
+    background: rgba(var(--sage-rgb), 0.08);
+    border-radius: 4px;
+    font-size: 12px; color: var(--text-2);
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .conv-note-text::before {
+    content: 'NOTE · ';
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; color: var(--sage);
+    margin-right: 4px;
+  }
+  .conv-older-notes {
+    margin: 4px 0; padding: 8px 10px;
+    background: rgba(var(--sage-rgb), 0.05);
+    border-radius: 4px;
+    font-size: 12px; color: var(--text-2);
+    white-space: pre-wrap;
+  }
+  .conv-older-notes::before {
+    content: 'EARLIER NOTES · ';
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; color: var(--sage);
+    margin-right: 4px;
+  }
+  .conv-older-note { margin: 2px 0; overflow-wrap: anywhere; }
+  .conv-older-note-id { font-family: var(--font-mono); font-size: 9px; color: var(--text-4); margin-right: 4px; }
   .search-match-record {
     font-family: var(--font-mono);
     font-size: 9px; font-weight: 600;
@@ -2092,6 +2126,18 @@
     flex-shrink: 0;
   }
   /* Simplification: system-event subtypes are no longer distinguished by left-bar color (the side bar is gone)—identified by sysev-icon + role label. */
+  /* The one qualifier a system event may carry: "this never reached the model". It is the
+     exception the §1.2 rule reserves colour for, so it borrows the error red rather than a
+     new token, and stays a small inline label so the row is still one quiet line. */
+  .conv-system-event .sysev-note {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .conv-system-event.conv-queued-input .sysev-text { color: var(--text-2); }
+  .conv-system-event.conv-api-error .sysev-text { color: var(--rust); }
 
   /* Long-text soft fold: .conv-foldable is collapsed by default (shows only fold-summary); adding .open
      switches it to fold-full. .fold-hint is the middle-hint style for "⋯ N chars hidden ⋯".
@@ -4051,6 +4097,32 @@ async function editSessionTitle(data, meta) {
   }
 }
 
+// The note belongs to the conversation, so the reader edits exactly what the card edits and
+// both surfaces update together. The backend lands the write on the conversation's current
+// record whichever member id is addressed, so this stays correct on an earlier record too.
+async function editSessionNote(data, meta) {
+  const targets = sessionMetadataTargets(data, meta);
+  const current = String(targets.find(item => typeof item.note === 'string' && item.note)?.note ?? '');
+  const nextValue = await window.openNoteModal(current);
+  if (nextValue === null) return;
+  const previous = targets.map(item => ({item, note: item.note}));
+  for (const item of targets) item.note = nextValue;
+  redrawSessionMetadata(data, meta);
+  try {
+    const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(data.id)}/note`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({note: nextValue}),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    toast(nextValue.trim() ? 'Note saved' : 'Note cleared');
+  } catch (err) {
+    for (const old of previous) old.item.note = old.note;
+    redrawSessionMetadata(data, meta);
+    toast('Note failed: ' + err.message);
+  }
+}
+
 async function setSessionHumanConfirmation(data, meta, confirmed) {
   const targets = sessionMetadataTargets(data, meta);
   const previous = targets.map(item => ({item, human_confirmed: item.human_confirmed}));
@@ -4154,6 +4226,20 @@ function renderConv(data, meta) {
     ? `<span class="conv-identity-label" title="${escapeHtml(titleSourceId)}">Title set on an earlier record</span>`
     : '';
   const localMetadataHtml = `<div class="conv-identity">${humanIdentityHtml}${titleSourceHtml}<button type="button" id="conv-title-edit">${titleOverride ? 'Edit personal title' : 'Add personal title'}</button></div>`;
+  // The note a person left on this conversation. It was only ever on the list card, which
+  // meant the one place you actually re-read the work was the one place your own note about
+  // it was invisible. `data` answers first so the standalone page, which has no card, shows
+  // the same thing the modal does. Older records' notes are listed beside it, each labelled
+  // with the record it was written on and never merged into the current one.
+  const noteText = String(stateMeta?.note ?? data.note ?? '');
+  const olderNotes = (stateMeta?.older_notes ?? data.older_notes ?? []).filter(n => n && n.note);
+  const olderNotesHtml = olderNotes.length
+    ? `<div class="conv-older-notes">${olderNotes.map(n =>
+        `<div class="conv-older-note"><span class="conv-older-note-id" title="${escapeHtml(n.record_id || '')}">${escapeHtml(shortId(n.record_id))}</span>${escapeHtml(n.note)}</div>`
+      ).join('')}</div>`
+    : '';
+  const noteHtml = `<div class="conv-note">${noteText
+      ? `<div class="conv-note-text">${escapeHtml(noteText)}</div>` : ''}${olderNotesHtml}<div class="conv-identity"><button type="button" id="conv-note-edit">${noteText ? 'Edit note' : 'Add note'}</button></div></div>`;
   // Source pill: modal identity tag, on the same line as conv-title
   const sourceVal = (meta?.source || data.source || 'claude');
   const SRC_PILL = {
@@ -4245,6 +4331,7 @@ function renderConv(data, meta) {
         <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} ${data.source === 'devin' ? 'database nodes' : 'raw lines'}</div>
         ${abandonedHtml}
         ${localMetadataHtml}
+        ${noteHtml}
         ${codexForkHtml}
         ${codexSpawnHtml}
         ${rewindHtml}
@@ -4306,6 +4393,9 @@ function renderConv(data, meta) {
   });
   head.querySelector('#conv-title-edit')?.addEventListener('click', () => {
     editSessionTitle(data, meta);
+  });
+  head.querySelector('#conv-note-edit')?.addEventListener('click', () => {
+    editSessionNote(data, meta);
   });
   head.querySelector('#conv-human')?.addEventListener('click', () => {
     setSessionHumanConfirmation(data, meta, !humanConfirmed);
@@ -4924,10 +5014,40 @@ function renderConvTurn(turn) {
   // task notification is a background task report, bash output is !command output, teammate is a teammate agent's report.
   // Single-line compact render (consistent with tool turn style), not counted as user input.
   if (turn.type === 'system_notification') {
+    // A notification the client only queued never reached the model. Say so on the row:
+    // a reader deciding why the agent missed something needs that difference.
+    const undelivered = turn.delivered === false;
     return `
       <div class="conv-turn conv-system-event conv-system-notification">
         <span class="sysev-icon">🛎️</span>
         <span class="sysev-role">notif</span>
+        <span class="sysev-text">${escapeHtml(turn.text || '')}${undelivered
+          ? ' <span class="sysev-note">delivery not confirmed</span>' : ''}</span>
+        <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
+      </div>`;
+  }
+  // Text the person typed while the agent was busy, with nothing in the file showing it
+  // was ever handed over. It is theirs, so it is shown in full -- but as an event, never
+  // as a user turn, because presenting it as a delivered message would be a claim the
+  // evidence does not support.
+  if (turn.type === 'queued_input') {
+    return `
+      <div class="conv-turn conv-system-event conv-queued-input">
+        <span class="sysev-icon">⏳</span>
+        <span class="sysev-role">queued</span>
+        <span class="sysev-text"><span class="sysev-note">Queued input — delivery not confirmed</span>
+${escapeHtml(turn.text || '')}</span>
+        <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
+      </div>`;
+  }
+  // A request that failed and was retried. The text already carries the count and the span
+  // for a run; the error's own wording is kept rather than relabelled, because "connection
+  // error" would be wrong for the server-side overload that produces most of these.
+  if (turn.type === 'api_error') {
+    return `
+      <div class="conv-turn conv-system-event conv-api-error">
+        <span class="sysev-icon">⚠</span>
+        <span class="sysev-role">error</span>
         <span class="sysev-text">${escapeHtml(turn.text || '')}</span>
         <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
       </div>`;

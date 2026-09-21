@@ -121,7 +121,16 @@ resolved once, in `antigravity.py`, so no surface can show a branch the conversa
    the current record's only; the current record's note is the conversation's note and older
    ones come back as `older_notes`; the title falls back to the newest older override and
    reports its source; `human_confirmed` is a union; a cached `brief` is never merged.
-7. **No auth.** Binds `127.0.0.1` only.
+7. **A record that is not human speech is never drawn, counted or indexed as one.** Claude
+   files carry three kinds that no person said: a queue entry with no delivered copy, a
+   background-task notice, and an `api_error` retry run. Each renders as a quiet
+   `.conv-system-event` row at its true position, and none of them reaches
+   `user_turn_count`, `recent_msgs`, the first-user-message, `j`/`k` navigation, or a `[U#]`
+   anchor. Unconfirmed queued text is searchable under the distinct role `queued`;
+   notifications and errors are not indexed at all. Classification lives in
+   `sources/claude_events.py` and keys only on markers the client wrote. See
+   [`docs/decisions/2026-09-20-claude-event-records.md`](docs/decisions/2026-09-20-claude-event-records.md).
+8. **No auth.** Binds `127.0.0.1` only.
 
 ## 3. API
 
@@ -147,6 +156,13 @@ resolves to exactly that record; a conversation id resolves to the conversation'
 record and the response says so (`resolved_from_conversation_id`). Writes land on the
 current record; un-star also clears every starred member. `id` in a write response is the
 record actually written, `addressed_id` is what the caller asked for.
+
+`note` and `older_notes` come back from `/conversation` for **every** member of a
+conversation, including a superseded one. The note belongs to the conversation and a write
+lands on the current record whichever member is addressed, so a deep link to an earlier
+record has to show the same note the card shows — otherwise it reads as though the note had
+been lost, behind an editor that silently writes somewhere else. `title_override` and
+`human_confirmed` stay per-record on an earlier record, as before.
 
 ## 4. Frontend routes
 
@@ -215,7 +231,9 @@ launcher gets its own `backups/` next to its temp state file rather than no back
 | Location | Responsibility |
 |---|---|
 | `server.py` `extract_metadata` / `_scan_title_and_compactions` | card preview (first user + tailed user/assistant) + turn counts + custom title + the two pieces of identity evidence: `head_session_id` (a fork keeps the source's id in the file head) and `compaction_parent_uuids` (a compaction boundary whose parent record is not above it in this file) |
-| `server.py` `extract_conversation` | conversation view (pairs tool_use/tool_result, filters thinking, detects skill injection) |
+| `server.py` `extract_conversation` | conversation view (pairs tool_use/tool_result, filters thinking, detects skill injection, emits the three Claude event rows) |
+| `sources/claude_events.py` | the single home for Claude records that are events, not speech: an unconfirmed queue entry, a background-task notice, an `api_error` run. Every predicate keys on an explicit client marker (record type, `commandMode`, `origin.kind`, XML wrapper) — never on what the text reads like, because machine records contain prose in every language. `confirmed_queue_entries` is the shared "was this queued text ever handed over" rule; `ApiErrorRun` folds consecutive retries into one row. See `docs/decisions/2026-09-20-claude-event-records.md` |
+| `sources/claude_text.py` `is_system_user_string` / `anchored_user_text` / `normalize_record` | what counts as human text in a Claude record. The prefix list lives here, not in `server.py`, because `user_turn_count` and the anchored transcript's `[U#]` both depend on it and a second copy is how they came to disagree |
 | `server.py` `annotate_conversations` / `conversation_index` / `conversation_for_record` / `conversation_state_targets` / `compaction_links` | conversation identity for the server: resolves cross-file compaction parents (bounded to sibling transcripts, memoized), stamps identity on cards, resolves a conversation ID to its current record for `_find_jsonl`, and picks the record a write lands on |
 | `sources/session_identity.py` `conversation_identity` / `merge_conversation_state` | the single home for conversation identity and for folding per-record personal state into the conversation's view. Change the merge policy here and nowhere else |
 | `sources/claude_desktop.py` `descriptor_memberships` | the raw, descriptor-level membership answer (prior CLI sessions + current, with rewind vs continuation), alongside the existing `annotate_sessions` rewind display fields |
@@ -229,7 +247,7 @@ launcher gets its own `backups/` next to its temp state file rather than no back
 | `sources/pi.py` | Pi JSONL selected-branch reader, metadata, search, and exports; no source writes. CLI follow returns the full branch; raw evidence retains physical line numbers. |
 | `sources/kimi.py` `is_kimi_path` / `find_wire_by_session_id` | Kimi Code (`$KIMI_CODE_HOME`, default `~/.kimi-code`) data source; scans `sessions/*/*/agents/main/wire.jsonl` only (other agents are sub-agents); `is_kimi_path` is the directory-boundary-safe predicate |
 | `sources/codex_history.py` `resolve` / `load` / `fork_lineage` / `spawn_lineage` | Codex session identity: one `session_meta.id` is one conversation, spread over one or more rollout files. `resolve` walks `history_base`, then adds any same-id page that link never reaches (a restart after an aborted turn writes one), placing it by record timestamps or reporting `unlinked_same_id_segment`. Each segment is labelled `current` / `continuation` / `inherited` / `unlinked`; `fork_lineage` reports a user fork's parent and never mistakes a sub-agent for one. `spawn_lineage` is the one place that recognizes a sub-agent rollout from its native markers: a spawned thread owns its whole record, so its `forked_from_id` is lineage rather than a missing prefix, and it is reported `complete` with `spawned_from` set (see `docs/decisions/2026-09-20-codex-subagent-completeness.md`) |
-| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex` / `render_kimi` / `render_pi` / `render_antigravity`); the single source of truth behind the `/anchored` endpoint. `digest_header` names the source, the Codex fork and spawn lineage, and, for Antigravity, how many raw lines a rewind abandoned; `line_ranges` is the one spelling for a bulk list of anchors |
+| `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex` / `render_kimi` / `render_pi` / `render_antigravity`); the single source of truth behind the `/anchored` endpoint. `digest_header` names the source, the Codex fork and spawn lineage, and, for Antigravity, how many raw lines a rewind abandoned; `line_ranges` is the one spelling for a bulk list of anchors. `[U#]` counts only real human turns — a background-task notice, bash output, a teammate report, a slash-command injection, an unconfirmed queue entry or an `api_error` retry run becomes a `⚠ EVENT` marker line keeping its own `[L#]` |
 | `session_logbook_cli.py` | read-only Agent access: resolve, search, anchored handoff, incremental follow, status, and evidence expansion |
 | `skills/session-logbook/` | the single Agent-facing Skill; thin routing layer over `session_logbook_cli.py` |
 | `index.html` `<style>` | all CSS (custom props in `:root`) |
@@ -238,8 +256,8 @@ launcher gets its own `backups/` next to its temp state file rather than no back
 | `index.html` `setItems` / `findItem` / `currentItemFor` | the **only** id resolver: `setItems` is the one place `state.items` is replaced and it rebuilds the record and conversation indexes; `findItem` answers for either kind of id with the record always tried first; `currentItemFor` gives the entry a write applies to. Never reintroduce a linear `state.items.find(x => x.id === …)` — there were twelve, each free to drift |
 | `index.html` `conversationItems` / `shareId` / `cardKey` | entries the list draws; the id a generated link uses; the localStorage collapse key |
 | `index.html` `applySearchHits` | folds `/api/search` hits onto the entry that is drawn, tagging a hit found in a superseded record |
-| `index.html` `render` / `renderCard` / `renderConv` | list, card, and conversation rendering. `renderConv` keeps `meta` (this record: size, time, source) and `stateMeta` (this conversation: star, archive, note, title) apart, and reads conversation facts from the response before the card so the modal and the standalone page behave identically |
-| `index.html` `bindConvNav` | user-message navigation (j/k + goto + scroll state machine) |
+| `index.html` `render` / `renderCard` / `renderConv` / `renderConvTurn` | list, card, and conversation rendering. `renderConv` keeps `meta` (this record: size, time, source) and `stateMeta` (this conversation: star, archive, note, title) apart, and reads conversation facts from the response before the card so the modal and the standalone page behave identically. It also draws the conversation's note and the notes left on superseded records; `editSessionNote` reuses the card's dialog and write path, so one edit updates both surfaces and rolls both back |
+| `index.html` `bindConvNav` | user-message navigation (j/k + goto + scroll state machine). Its targets are `.conv-user` only, which is why an event row can never be navigated to or counted |
 
 ## 8. Style
 

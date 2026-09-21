@@ -14,7 +14,10 @@ import sqlite3
 from sources import history_index
 from sources.claude_text import anchored_user_text, normalize_record
 
-SCHEMA = 5
+# 6: `user_turn` stopped counting the harness's user-role pseudo-messages (a background-task
+# notice, bash output, a teammate report, a slash-command injection). A cache written under 5
+# would keep feeding [U#] the old numbering, so the bump forces a rebuild.
+SCHEMA = 6
 _MEMORY = {}
 
 
