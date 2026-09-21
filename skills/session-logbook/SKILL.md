@@ -112,6 +112,9 @@ python3 scripts/session_logbook.py context '<target>' --last-turns 3
 # Start from the previous cursor; its line is deliberately repeated once
 python3 scripts/session_logbook.py follow '<target>' --cursor-line 427
 
+# Observed file/session metadata, without guessing whether the Agent is alive
+python3 scripts/session_logbook.py status '<target>'
+
 # Raw evidence around an [L#] anchor
 python3 scripts/session_logbook.py evidence '<target>' --line 427 --context 1
 
