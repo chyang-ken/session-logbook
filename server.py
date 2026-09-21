@@ -1985,7 +1985,6 @@ def scan_sessions(force=False):
     # Codex uses is_codex_path to recognize both roots (sessions + archived_sessions); otherwise
     # stale keys under the archived root would never be removed because they are not under CODEX_ROOT.
     projects_root_str = str(PROJECTS_DIR)
-    ag_root_str = str(ag_source.AG_BRAIN)
     cwd_index_removed = False
     for p in list(_cache.keys()):
         if p.startswith(projects_root_str) and p not in claude_seen:
@@ -1998,7 +1997,7 @@ def scan_sessions(force=False):
         elif devin_source.is_devin_path(p) and p not in devin_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
-        elif p.startswith(ag_root_str) and p not in ag_seen:
+        elif ag_source.is_antigravity_path(p) and p not in ag_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
         elif kimi_source.is_kimi_path(p) and p not in kimi_seen:
@@ -2373,7 +2372,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
         except (ValueError, OSError, sqlite3.Error):
             return []
     is_codex = codex_source.is_codex_path(jsonl_path)
-    is_ag = str(jsonl_path).startswith(str(ag_source.AG_BRAIN))
+    is_ag = ag_source.is_antigravity_path(jsonl_path)
     if is_codex:
         meta = codex_source._read_session_meta(jsonl_path)
         session_id = (meta or {}).get('id') or jsonl_path.stem
@@ -3481,7 +3480,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass  # Already parsed from one coherent SQLite snapshot above.
                 elif codex_source.is_codex_path(jsonl):
                     conv = codex_source.extract_conversation(jsonl)
-                elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
+                elif ag_source.is_antigravity_path(jsonl):
                     conv = ag_source.extract_conversation(jsonl)
                 elif kimi_source.is_kimi_path(jsonl):
                     conv = kimi_source.extract_conversation(jsonl)
@@ -3518,7 +3517,7 @@ class Handler(BaseHTTPRequestHandler):
                     text = devin_source.extract_transcript(jsonl)
                 elif codex_source.is_codex_path(jsonl):
                     text = codex_source.extract_transcript(jsonl)
-                elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
+                elif ag_source.is_antigravity_path(jsonl):
                     text = ag_source.extract_transcript(jsonl)
                 elif kimi_source.is_kimi_path(jsonl):
                     text = kimi_source.extract_transcript(jsonl)
@@ -3568,6 +3567,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif codex_source.is_codex_path(jsonl):
                     src = "codex"
                     body = anchored_transcript.render_codex(jsonl)
+                elif ag_source.is_antigravity_path(jsonl):
+                    src = "antigravity"
+                    body = anchored_transcript.render_antigravity(jsonl)
                 elif kimi_source.is_kimi_path(jsonl):
                     src = "kimi"
                     body = anchored_transcript.render_kimi(jsonl)
