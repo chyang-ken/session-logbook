@@ -20,6 +20,7 @@ from typing import Iterable, Optional
 import server
 from sources.activity import activity_time
 from sources import anchored_transcript, session_identity, codex_history, claude_history
+from sources import claude_events
 from sources import codex as codex_source
 from sources import devin as devin_source
 from sources import kimi as kimi_source
@@ -226,13 +227,33 @@ def iter_messages(path, source):
         for node in chain:
             yield node["row_id"], *devin_source.message_text(node)
         return
+    # Text a person typed into Claude's queue is searchable, under its own role, but only
+    # when nothing in the file shows it being handed over - otherwise the delivered record
+    # is the one hit and the queue entry would double it. Whether a delivery exists is a
+    # fact about the whole file, so these few entries come out after the ordinary stream.
+    queued, delivered = {}, {}
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         for line_number, raw in enumerate(handle, 1):
             try:
                 row = json.loads(raw)
             except ValueError:
                 continue
+            if source == "claude":
+                normalized = server.normalize_record(row)
+                handed_over = claude_events.delivered_text(normalized)
+                if handed_over is not None:
+                    delivered[handed_over] = delivered.get(handed_over, 0) + 1
+                entry = claude_events.enqueued_text(normalized)
+                if entry is not None:
+                    if claude_events.is_queued_human_text(entry):
+                        queued.setdefault(entry, []).append(line_number)
+                    continue
             yield line_number, *_message_from_row(row, source)
+    unconfirmed = set(claude_events.confirmed_queue_entries(queued, delivered))
+    for text, line_numbers in queued.items():
+        for line_number in line_numbers:
+            if line_number not in unconfirmed:
+                yield line_number, claude_events.QUEUED_INPUT_ROLE, text.strip()
 
 
 def _parse_since(value: Optional[str]) -> Optional[float]:

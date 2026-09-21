@@ -18,7 +18,10 @@ from pathlib import Path
 
 from sources import antigravity as ag_source
 from sources import anchored_transcript
-from sources.claude_text import strip_leading_reminders, normalize_record
+from sources import claude_events
+from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
+                                 is_system_user_string, normalize_record,
+                                 strip_leading_reminders)
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
 from sources import codex as codex_source
@@ -412,22 +415,12 @@ def _assistant_text(content):
     return " ".join(parts)
 
 
-# System-injection prefixes for user-role records that are not user input. The harness
-# writes these events into JSONL as user messages, but semantically they belong to the
-# system/agent side. Once recognized, classify them separately so they do not count as
-# user input.
-#   <command-*> / <local-command-*>   slash command injection + hook stdout
-#   <system-reminder>                 system prompt
-#   <task-notification>               background-task completion notice
-#   <bash-stdout> / <bash-stderr>     bash-mode output from `!command`; unlike <bash-input>
-#   <teammate-message ...>            teammate agent report with variable attributes
-_SYSTEM_USER_PREFIXES_SKIP = ("<local-command-", "<command-", "<system-reminder>")
-_SYSTEM_USER_PREFIXES_EVENT = ("<task-notification>", "<bash-stdout>", "<bash-stderr>", "<teammate-message")
-
-
-def _is_system_user_string(stripped):
-    """Whether user-role string content is a system-side injection rather than real user input. stripped should be lstrip output."""
-    return stripped.startswith(_SYSTEM_USER_PREFIXES_SKIP) or stripped.startswith(_SYSTEM_USER_PREFIXES_EVENT)
+# The prefix lists and the predicate now live in sources/claude_text.py, because the
+# anchored transcript and the history index have to apply the same rule; keeping a second
+# copy here is how [U#] came to count notifications that user_turn_count already excluded.
+_SYSTEM_USER_PREFIXES_SKIP = SYSTEM_USER_PREFIXES_SKIP
+_SYSTEM_USER_PREFIXES_EVENT = SYSTEM_USER_PREFIXES_EVENT
+_is_system_user_string = is_system_user_string
 
 
 def _user_text(content):
@@ -1118,66 +1111,10 @@ def _truncate_conv(text, max_chars):
     return text[:max_chars].rstrip() + ' …'
 
 
-def _extract_inner_xml(text, tag):
-    """Extract the first body from `<tag>...</tag>`, returning an empty string if absent.
-    Used to parse pseudo-XML system events injected by the harness: task-notification,
-    bash-output, and teammate.
-    """
-    open_tag = f'<{tag}>'
-    close_tag = f'</{tag}>'
-    i = text.find(open_tag)
-    if i < 0:
-        return ''
-    j = text.find(close_tag, i + len(open_tag))
-    if j < 0:
-        return ''
-    return text[i + len(open_tag):j]
-
-
-def _parse_system_event(stripped):
-    """Recognize user-role pseudo messages as system-event turns. stripped is lstrip output.
-    Return dict({type, text}) or None; None means it is not an event and the original skip
-    logic should apply.
-    """
-    if stripped.startswith('<task-notification>'):
-        status = _extract_inner_xml(stripped, 'status') or '?'
-        summary = _extract_inner_xml(stripped, 'summary') or '(no summary)'
-        return {'type': 'system_notification',
-                'text': f'[{status}] {summary}'}
-    if stripped.startswith('<bash-stdout>') or stripped.startswith('<bash-stderr>'):
-        out = _extract_inner_xml(stripped, 'bash-stdout')
-        err = _extract_inner_xml(stripped, 'bash-stderr')
-        parts = []
-        if out and out != '(Bash completed with no output)':
-            parts.append(out)
-        if err:
-            parts.append(f'[stderr] {err}')
-        body = '\n'.join(parts) if parts else '(no output)'
-        return {'type': 'bash_output', 'text': body}
-    if stripped.startswith('<teammate-message'):
-        # Attributes may include teammate_id / summary; body follows the closing >
-        head_end = stripped.find('>')
-        head = stripped[:head_end] if head_end > 0 else ''
-        # Extract teammate_id and summary attributes
-        def _attr(name):
-            key = f'{name}="'
-            i = head.find(key)
-            if i < 0:
-                return ''
-            i += len(key)
-            j = head.find('"', i)
-            return head[i:j] if j > i else ''
-        teammate = _attr('teammate_id') or 'teammate'
-        summary = _attr('summary')
-        body_text = stripped[head_end + 1:].rstrip()
-        # Drop the trailing </teammate-message> from the body
-        close_tag = '</teammate-message>'
-        if body_text.endswith(close_tag):
-            body_text = body_text[:-len(close_tag)].rstrip()
-        display = summary or body_text or '(empty)'
-        return {'type': 'teammate_message',
-                'text': f'[{teammate}] {display}'}
-    return None
+# The parser moved to sources/claude_events.py so the anchored transcript renders the same
+# events the reader does; these names stay for the call sites below and for tests.
+_extract_inner_xml = claude_events.extract_inner_xml
+_parse_system_event = claude_events.parse_system_user_event
 
 
 def _truncate_tool_result(text, max_chars):
@@ -1313,6 +1250,20 @@ def extract_conversation(jsonl_path, include_rewound=False):
     total_lines = 0
     project_path = None
     custom_title = None  # title set by /title; take the last one in the file
+    # Queue entries are provisional: the same text usually shows up again as a delivered
+    # record further down the file, and then the delivered record is the one turn to show.
+    # Park each entry's turn here and drop the ones a delivery later accounts for, rather
+    # than guessing from the queue bookkeeping alone.
+    queued_turns = {}  # exact enqueued string -> turn dicts awaiting confirmation, in queue order
+    delivered = {}  # exact delivered string -> how many times it was handed over
+    errors = claude_events.ApiErrorRun()
+
+    def close_error_run():
+        """Write a finished retry run's total into the slot reserved at its first record."""
+        if errors.count:
+            errors.slot['text'] = errors.summary()
+            errors.slot['retries'] = errors.count
+            errors.clear()
 
     total_lines = claude_history.summary(jsonl_path)['physical_lines']
     for _line_number, d in claude_history.records(jsonl_path, include_rewound=include_rewound):
@@ -1321,6 +1272,45 @@ def extract_conversation(jsonl_path, include_rewound=False):
 
         if project_path is None and d.get('cwd'):
             project_path = d['cwd']
+
+        handed_over = claude_events.delivered_text(d)
+        if handed_over is not None:
+            delivered[handed_over] = delivered.get(handed_over, 0) + 1
+
+        error_label = claude_events.api_error_label(d)
+        if error_label is not None:
+            # Still the same run only when nothing else was rendered in between: the slot
+            # this run reserved is still the newest turn.
+            if errors.matches(error_label) and turns and turns[-1] is errors.slot:
+                errors.extend(ts)
+            else:
+                close_error_run()
+                slot = {'type': 'api_error', 'text': error_label, 'retries': 1, 'ts': ts}
+                turns.append(slot)
+                errors.open(error_label, ts, slot)
+            continue
+
+        queued = claude_events.enqueued_text(d)
+        if queued is not None:
+            if claude_events.is_task_notification(queued):
+                turn = {'type': 'system_notification', 'delivered': False,
+                        'text': _truncate_conv(claude_events.parse_task_notification(queued), CONV_USER_MAX),
+                        'ts': ts}
+            elif claude_events.is_queued_human_text(queued):
+                turn = {'type': 'queued_input',
+                        'text': _truncate_conv(queued.strip(), CONV_USER_MAX), 'ts': ts}
+            else:
+                continue  # an injected block the reader already shows where it was delivered
+            turns.append(turn)
+            queued_turns.setdefault(queued, []).append(turn)
+            continue
+
+        notification = claude_events.notification_prompt(d)
+        if notification is not None:
+            turns.append({'type': 'system_notification', 'delivered': True,
+                          'text': _truncate_conv(claude_events.parse_task_notification(notification), CONV_USER_MAX),
+                          'ts': ts})
+            continue
 
         if t == 'custom-title':
             cleaned = _clean_custom_title(d.get('customTitle'))
@@ -1512,6 +1502,11 @@ def extract_conversation(jsonl_path, include_rewound=False):
                     # consume pending_skill_body / next_is_skill; the following real text inherits it.
                     pass
 
+    close_error_run()
+    confirmed = {id(turn) for turn in claude_events.confirmed_queue_entries(queued_turns, delivered)}
+    if confirmed:
+        turns = [turn for turn in turns if id(turn) not in confirmed]
+
     return {
         'id': jsonl_path.stem,
         'project_path': project_path or '',
@@ -1536,12 +1531,55 @@ def extract_transcript(jsonl_path: Path) -> str:
     next_is_skill = False
     project_path = None
     total_lines = 0
+    # Same three event kinds as the reader, same confirmation rule. An export that quietly
+    # dropped them would read as though the agent had seen everything the person typed.
+    queued_blocks = {}
+    delivered = {}
+    errors = claude_events.ApiErrorRun()
+
+    def close_error_run():
+        if errors.count:
+            out_blocks[errors.slot] = '## CONNECTION-ERROR\n%s\n' % errors.summary()
+            errors.clear()
 
     total_lines = claude_history.summary(jsonl_path)['physical_lines']
     for _line_number, d in claude_history.records(jsonl_path):
         t = d.get('type')
         if project_path is None and d.get('cwd'):
             project_path = d['cwd']
+
+        handed_over = claude_events.delivered_text(d)
+        if handed_over is not None:
+            delivered[handed_over] = delivered.get(handed_over, 0) + 1
+
+        error_label = claude_events.api_error_label(d)
+        if error_label is not None:
+            if errors.matches(error_label) and errors.slot == len(out_blocks) - 1:
+                errors.extend(d.get('timestamp', ''))
+            else:
+                close_error_run()
+                out_blocks.append('## CONNECTION-ERROR\n%s\n' % error_label)
+                errors.open(error_label, d.get('timestamp', ''), len(out_blocks) - 1)
+            continue
+
+        queued = claude_events.enqueued_text(d)
+        if queued is not None:
+            if claude_events.is_task_notification(queued):
+                block = ('## NOTIFICATION (queued, delivery not confirmed)\n%s\n'
+                         % claude_events.parse_task_notification(queued))
+            elif claude_events.is_queued_human_text(queued):
+                block = ('## QUEUED-INPUT (delivery not confirmed)\n%s\n' % queued.strip())
+            else:
+                continue
+            out_blocks.append(block)
+            queued_blocks.setdefault(queued, []).append(len(out_blocks) - 1)
+            continue
+
+        notification = claude_events.notification_prompt(d)
+        if notification is not None:
+            out_blocks.append('## NOTIFICATION\n%s\n'
+                              % claude_events.parse_task_notification(notification))
+            continue
 
         if t == 'assistant':
             content = d.get('message', {}).get('content', [])
@@ -1643,6 +1681,11 @@ def extract_transcript(jsonl_path: Path) -> str:
                         next_is_skill = False
                 else:
                     next_is_skill = False
+
+    close_error_run()
+    dropped = set(claude_events.confirmed_queue_entries(queued_blocks, delivered))
+    if dropped:
+        out_blocks = [block for i, block in enumerate(out_blocks) if i not in dropped]
 
     header = (f'# Session {jsonl_path.stem}\n'
               f'Project: {project_path or "(unknown)"}\n'
@@ -2416,6 +2459,15 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     # history only, in line with the reader and with the other branching sources.
     skip_lines = ag_source.abandoned_line_numbers(jsonl_path) if is_ag else frozenset()
 
+    # Text the person typed into the queue is findable even when nothing proves the agent
+    # ever received it - losing your own words because the agent missed them is the worse
+    # failure. Its snippet is held back until the whole file has been read, because a
+    # delivered copy further down means the delivered record is the one to show. Background
+    # notifications and connection errors are not indexed: nobody searches for them, and
+    # they would drown real matches in sessions that retried a hundred times.
+    queued_hits = {}  # exact enqueued string -> pending snippets, in queue order
+    queued_delivered = {}
+
     try:
         with contextlib.ExitStack() as stack:
             f = lines if lines is not None else enumerate(stack.enter_context(
@@ -2435,6 +2487,14 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
 
                 t = d.get("type")
                 text = ""
+                handed_over = claude_events.delivered_text(d)
+                if handed_over is not None:
+                    queued_delivered[handed_over] = queued_delivered.get(handed_over, 0) + 1
+                queued = claude_events.enqueued_text(d)
+                if queued is not None:
+                    if claude_events.is_queued_human_text(queued):
+                        _record_queued_hit(queued, terms, term_found, queued_hits)
+                    continue
                 if t == "user":
                     text = _user_text(d.get("message", {}).get("content"))
                 elif t == "assistant":
@@ -2486,12 +2546,48 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
         print(f"[warn] search read failed {jsonl_path}: {e}", file=sys.stderr)
         return []
 
+    confirmed = {id(snippet) for snippet in claude_events.confirmed_queue_entries(queued_hits, queued_delivered)}
+    for parked in queued_hits.values():
+        for snippet in parked:
+            if id(snippet) not in confirmed and len(snippets) < SEARCH_MAX_SNIPPETS:
+                snippets.append(snippet)
+
     # AND semantics: unless the ID matched, every term must appear in text
     if id_hit:
         return snippets or [{"text": f"Session ID: {session_id}", "role": "", "term": ""}]
     if len(term_found) < len(terms):
         return []
     return snippets
+
+
+def _snippet_around(text, term):
+    """The SEARCH_SNIPPET_CONTEXT window around a term, with ellipses where it was cut."""
+    idx = text.lower().find(term)
+    if idx < 0:
+        return None
+    start = max(0, idx - SEARCH_SNIPPET_CONTEXT)
+    end = min(len(text), idx + len(term) + SEARCH_SNIPPET_CONTEXT)
+    body = re.sub(r"\s+", " ", text[start:end].strip())
+    return ("…" if start > 0 else "") + body + ("…" if end < len(text) else "")
+
+
+def _record_queued_hit(queued, terms, term_found, queued_hits):
+    """Park a snippet for queued text, and count its terms towards the AND match now.
+
+    Counting immediately is safe either way: if a delivered copy turns up later it carries
+    the same words, so the session matches on the same terms whichever record is shown.
+    The snippet itself waits, because only the end of the file settles which record that is.
+    """
+    text = queued.strip()
+    lowered = text.lower()
+    for term in terms:
+        if term in lowered:
+            term_found.add(term)
+            body = _snippet_around(text, term)
+            if body is not None:
+                queued_hits.setdefault(queued, []).append({
+                    "text": body, "role": claude_events.QUEUED_INPUT_ROLE, "term": term})
+            break
 
 
 def _raw_forms(term):

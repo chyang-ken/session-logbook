@@ -28,6 +28,7 @@ from pathlib import Path
 import json
 import re
 from datetime import datetime, timezone
+from sources import claude_events
 from sources.claude_text import strip_leading_reminders, anchored_user_text
 
 
@@ -208,9 +209,24 @@ def render_pi(path) -> str:
 
 
 def render_claude(path, records=None) -> str:
-    """Claude Code session jsonl → anchored-transcript string."""
+    """Claude Code session jsonl → anchored-transcript string.
+
+    Records that are neither human speech nor model output - a queue entry, a background
+    task notice, a connection failure - are emitted as ⚠ EVENT marker lines carrying their
+    own [L#]. They never take a [U#]: an agent reading this transcript must be able to
+    trust that every [U#] is something the person actually said and the model actually saw.
+    """
     uturn = 0
     o_lines = []
+    queued_lines = {}
+    delivered = {}
+    errors = claude_events.ApiErrorRun()
+
+    def close_error_run():
+        if errors.count:
+            o_lines[errors.slot] = errors.prefix + errors.summary()
+            errors.clear()
+
     from sources import claude_history
     for ln, o in (claude_history.records(path) if records is None else records):
         t = o.get('type')
@@ -218,6 +234,41 @@ def render_claude(path, records=None) -> str:
         side = ' (subagent)' if o.get('isSidechain') else ''
         if o.get('isMeta'):
             continue
+
+        handed_over = claude_events.delivered_text(o)
+        if handed_over is not None:
+            delivered[handed_over] = delivered.get(handed_over, 0) + 1
+
+        error_label = claude_events.api_error_label(o)
+        if error_label is not None:
+            prefix = f"[L{ln}]   ⚠ EVENT{side} API_ERROR: "
+            if errors.matches(error_label) and errors.slot == len(o_lines) - 1:
+                errors.extend(o.get('timestamp') or '')
+            else:
+                close_error_run()
+                o_lines.append(prefix + error_label)
+                errors.open(error_label, o.get('timestamp') or '', len(o_lines) - 1, prefix)
+            continue
+
+        queued = claude_events.enqueued_text(o)
+        if queued is not None:
+            if claude_events.is_task_notification(queued):
+                text = ('TASK_NOTIFICATION (queued, delivery not confirmed): '
+                        + claude_events.parse_task_notification(queued))
+            elif claude_events.is_queued_human_text(queued):
+                text = 'QUEUED_INPUT (delivery not confirmed): ' + trunc(queued.strip(), 2000)
+            else:
+                continue
+            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} {text}")
+            queued_lines.setdefault(queued, []).append(len(o_lines) - 1)
+            continue
+
+        notification = claude_events.notification_prompt(o)
+        if notification is not None:
+            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} TASK_NOTIFICATION: "
+                           + claude_events.parse_task_notification(notification))
+            continue
+
         if t == 'user':
             msg = o.get('message') or {}
             content = msg.get('content')
@@ -231,6 +282,15 @@ def render_claude(path, records=None) -> str:
             else:
                 txt = anchored_user_text(o)
                 if not txt.strip():
+                    # Pseudo-messages the harness files under the user role keep their
+                    # content but lose their [U#]: a delivered task notice is still worth
+                    # reading, and still is not something the person said.
+                    raw = strip_leading_reminders(content) if isinstance(content, str) else ''
+                    event = claude_events.parse_system_user_event(raw.lstrip()) if raw else None
+                    if event is not None:
+                        kind = {'system_notification': 'TASK_NOTIFICATION',
+                                'bash_output': 'BASH_OUTPUT'}.get(event['type'], 'TEAMMATE_MESSAGE')
+                        o_lines.append(f"[L{ln}]   ⚠ EVENT{side} {kind}: {trunc(event['text'], 300)}")
                     continue
                 uturn = o.get('_logbook_user_turn', uturn + 1)
                 o_lines.append("")
@@ -257,6 +317,10 @@ def render_claude(path, records=None) -> str:
             tx = (o.get('content') or o.get('text') or '')
             if isinstance(tx, str) and tx.strip():
                 o_lines.append(f"[L{ln}] [SYSTEM]: {trunc(tx.strip(), 300)}")
+    close_error_run()
+    dropped = set(claude_events.confirmed_queue_entries(queued_lines, delivered))
+    if dropped:
+        o_lines = [line for i, line in enumerate(o_lines) if i not in dropped]
     return "\n".join(o_lines)
 
 

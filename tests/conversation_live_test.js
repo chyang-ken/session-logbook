@@ -119,6 +119,12 @@ let _convStandalone=false, _convRaw=false, $convNav=null;
 `, renderContext);
 vm.runInContext(section('// ---------- Conversation identity ----------', '// Column width bounds'), renderContext);
 vm.runInContext(section('function renderConv(', '// User-msg navigation:'), renderContext);
+// The turn renderer lives further down the file; load it too, so the event rows this
+// harness asserts on are produced by the real code rather than a stub.
+vm.runInContext(section('const FOLD_LIMITS = {', 'function renderQaQuestion('), renderContext);
+vm.runInContext(`const renderConvTool = t => '<div class="conv-tool"></div>';
+const renderMarkdown = x => String(x ?? '');
+const renderFoldableText = (text, limit) => String(text ?? '');`, renderContext);
 vm.runInContext(`
 const chain=[{id:'old',relation:null,is_current:false},
              {id:'current',relation:'rewind',is_current:true}];
@@ -172,6 +178,42 @@ for (const fields of [{rewind_abandoned_rows:0},{rewind_abandoned_rows:null},{}]
   renderConv({...base,...fields},null);
   assert.ok(!head.innerHTML.includes('abandoned by a rewind'),
     'a missing or zero abandoned-row count must stay silent');
+}
+// The three Claude event kinds are rendered in place, as system events, in both modes.
+// The bar they must clear: never the user class, because the whole point is that none of
+// them is something the person said and had received.
+const eventTurns=[
+  {type:'user',text:'Real human turn',ts:'t0'},
+  {type:'queued_input',text:'Typed while it was busy',ts:'t1'},
+  {type:'system_notification',text:'[completed] Agent "Sweep" finished',delivered:false,ts:'t2'},
+  {type:'system_notification',text:'[completed] Agent "Other" finished',delivered:true,ts:'t3'},
+  {type:'api_error',text:'529 Overloaded \\u2014 retried 4 times over 3m00s',retries:4,ts:'t4'},
+];
+for (const standalone of [false,true]) {
+  _convStandalone=standalone;
+  setItems(standalone?[]:[{id:'current',size:100}]);
+  renderConv({...base,turns:eventTurns},standalone?null:findItem('current'));
+  const where=standalone?'full page':'modal';
+  for (const text of ['conv-queued-input','Queued input','delivery not confirmed',
+                      'Typed while it was busy','conv-api-error','retried 4 times over 3m00s',
+                      'Agent "Sweep" finished','Agent "Other" finished']) {
+    assert.ok(body.innerHTML.includes(text), where+' missing '+text);
+  }
+  // Each event row carries the shared system-event class and none carries the user class.
+  // The trailing space matters: conv-turn-head would otherwise match as a row of its own.
+  const rows=body.innerHTML.split('<div class="conv-turn ').slice(1);
+  assert.equal(rows.length,5,where+' turn count');
+  for (const row of rows.slice(1)) {
+    assert.ok(row.includes('conv-system-event'),where+' event row lost its system class');
+    assert.ok(!row.includes('conv-user'),where+' event row was styled as a user message');
+  }
+  assert.ok(rows[0].includes('conv-user'),where+' lost the real user turn');
+  // One "delivery not confirmed" mark: the queued input's, plus the queued notification's.
+  assert.equal(body.innerHTML.split('delivery not confirmed').length-1,2,
+    where+' mislabelled a delivered record as unconfirmed');
+  // The reader's own message counter, the j/k range and the goto ceiling all read "1".
+  assert.ok(head.innerHTML.includes('1 msgs'),where+' counted an event as a message');
+  assert.ok(head.innerHTML.includes('max="1"'),where+' let goto reach an event row');
 }
 console.log('PASS: real renderer exposes conversation navigation in modal and full page');
 `, renderContext);

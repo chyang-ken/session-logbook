@@ -2092,6 +2092,18 @@
     flex-shrink: 0;
   }
   /* Simplification: system-event subtypes are no longer distinguished by left-bar color (the side bar is gone)—identified by sysev-icon + role label. */
+  /* The one qualifier a system event may carry: "this never reached the model". It is the
+     exception the §1.2 rule reserves colour for, so it borrows the error red rather than a
+     new token, and stays a small inline label so the row is still one quiet line. */
+  .conv-system-event .sysev-note {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .conv-system-event.conv-queued-input .sysev-text { color: var(--text-2); }
+  .conv-system-event.conv-api-error .sysev-text { color: var(--rust); }
 
   /* Long-text soft fold: .conv-foldable is collapsed by default (shows only fold-summary); adding .open
      switches it to fold-full. .fold-hint is the middle-hint style for "⋯ N chars hidden ⋯".
@@ -4918,10 +4930,40 @@ function renderConvTurn(turn) {
   // task notification is a background task report, bash output is !command output, teammate is a teammate agent's report.
   // Single-line compact render (consistent with tool turn style), not counted as user input.
   if (turn.type === 'system_notification') {
+    // A notification the client only queued never reached the model. Say so on the row:
+    // a reader deciding why the agent missed something needs that difference.
+    const undelivered = turn.delivered === false;
     return `
       <div class="conv-turn conv-system-event conv-system-notification">
         <span class="sysev-icon">🛎️</span>
         <span class="sysev-role">notif</span>
+        <span class="sysev-text">${escapeHtml(turn.text || '')}${undelivered
+          ? ' <span class="sysev-note">delivery not confirmed</span>' : ''}</span>
+        <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
+      </div>`;
+  }
+  // Text the person typed while the agent was busy, with nothing in the file showing it
+  // was ever handed over. It is theirs, so it is shown in full -- but as an event, never
+  // as a user turn, because presenting it as a delivered message would be a claim the
+  // evidence does not support.
+  if (turn.type === 'queued_input') {
+    return `
+      <div class="conv-turn conv-system-event conv-queued-input">
+        <span class="sysev-icon">⏳</span>
+        <span class="sysev-role">queued</span>
+        <span class="sysev-text"><span class="sysev-note">Queued input — delivery not confirmed</span>
+${escapeHtml(turn.text || '')}</span>
+        <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
+      </div>`;
+  }
+  // A request that failed and was retried. The text already carries the count and the span
+  // for a run; the error's own wording is kept rather than relabelled, because "connection
+  // error" would be wrong for the server-side overload that produces most of these.
+  if (turn.type === 'api_error') {
+    return `
+      <div class="conv-turn conv-system-event conv-api-error">
+        <span class="sysev-icon">⚠</span>
+        <span class="sysev-role">error</span>
         <span class="sysev-text">${escapeHtml(turn.text || '')}</span>
         <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
       </div>`;

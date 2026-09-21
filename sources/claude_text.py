@@ -4,6 +4,26 @@ import re
 
 _LEADING_REMINDERS = re.compile(r"^(?:\s*<system-reminder>.*?</system-reminder>\s*)+", re.DOTALL)
 
+# System-injection prefixes for user-role records that are not user input. The harness
+# writes these events into JSONL as user messages, but semantically they belong to the
+# system/agent side. Once recognized, classify them separately so they do not count as
+# user input.
+#   <command-*> / <local-command-*>   slash command injection + hook stdout
+#   <system-reminder>                 system prompt
+#   <task-notification>               background-task completion notice
+#   <bash-stdout> / <bash-stderr>     bash-mode output from `!command`; unlike <bash-input>
+#   <teammate-message ...>            teammate agent report with variable attributes
+# These live here rather than in server.py because the anchored transcript, the history
+# index and the HTTP layer all have to agree on what counts as a human turn; two copies
+# of this list is how [U#] came to disagree with user_turn_count.
+SYSTEM_USER_PREFIXES_SKIP = ("<local-command-", "<command-", "<system-reminder>")
+SYSTEM_USER_PREFIXES_EVENT = ("<task-notification>", "<bash-stdout>", "<bash-stderr>", "<teammate-message")
+
+
+def is_system_user_string(stripped):
+    """Whether user-role string content is a system-side injection rather than real user input. stripped should be lstrip output."""
+    return stripped.startswith(SYSTEM_USER_PREFIXES_SKIP) or stripped.startswith(SYSTEM_USER_PREFIXES_EVENT)
+
 
 def strip_leading_reminders(text):
     """Remove complete leading wrappers only; preserve ordinary and unclosed text."""
@@ -33,7 +53,13 @@ def normalize_record(row):
 
 
 def anchored_user_text(row):
-    """Text used to count/render a Claude user anchor, excluding tool results."""
+    """Text used to count/render a Claude user anchor, excluding tool results.
+
+    System-side pseudo-messages the harness files under the user role - a background-task
+    notification, bash-mode output, a teammate report, a slash-command injection - are not
+    human turns and return '' here. Callers render them as events instead, so [U#] counts
+    the same turns the dashboard's user_turn_count does.
+    """
     row = normalize_record(row)
     if row.get('type') != 'user' or row.get('isMeta'):
         return ''
@@ -41,9 +67,11 @@ def anchored_user_text(row):
     if isinstance(content, list):
         if any(isinstance(block, dict) and block.get('type') == 'tool_result' for block in content):
             return ''
-        return ' '.join(
+        text = ' '.join(
             strip_leading_reminders(block.get('text', ''))
             if isinstance(block, dict) and block.get('type') == 'text' else
             '[image]' if isinstance(block, dict) and block.get('type') == 'image' else ''
             for block in content).strip()
-    return strip_leading_reminders(content or '')
+    else:
+        text = strip_leading_reminders(content or '')
+    return '' if is_system_user_string(text.lstrip()) else text

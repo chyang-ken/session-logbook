@@ -204,7 +204,7 @@ class SearchContractTests(unittest.TestCase):
             ("launch.json", [], "tool input is not message text"),
             ("toolonlyneedle", [], "tool output is not message text"),
             ("interruptneedle criteria", [CLAUDE_A], "delivered human interruption is searchable"),
-            ("unsentqueueonly", [], "queue entry alone is not a delivered message"),
+            ("unsentqueueonly", [CLAUDE_A], "a queue entry nothing confirmed delivered is still findable"),
             ("codextoolonly", [], "Codex tool output is not message text"),
             ("sessionid", [CLAUDE_A], "key-like text inside a message still matches"),
             ("parentuuid", [], "JSON keys never match"),
@@ -240,6 +240,13 @@ class SearchContractTests(unittest.TestCase):
         result = self.search("repeat marker")[0]
         self.assertEqual(len(result["snippets"]), server.SEARCH_MAX_SNIPPETS)
         self.assertTrue(all(s["role"] == "you" for s in result["snippets"]))
+        # An unconfirmed queue entry is findable, but its snippet must not claim the role
+        # a delivered message has: "you said this" and "you typed this" are not the same.
+        queued = self.search("unsentqueueonly")[0]["snippets"]
+        self.assertEqual([s["role"] for s in queued], ["queued"])
+        self.assertIn("unsentqueueonly", queued[0]["text"])
+        # The delivered interruption keeps the ordinary role; it really did arrive.
+        self.assertEqual(self.search("interruptneedle")[0]["snippets"][0]["role"], "you")
         title = self.search("billing retry")[0]["snippets"][0]
         self.assertEqual(title["text"], "Session title: Billing recovery")
         paged = self.search("inherited goal")[0]["snippets"][0]

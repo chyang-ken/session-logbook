@@ -121,12 +121,27 @@ class ConversationIdentityFrontendStaticTests(unittest.TestCase):
         self.assertIn("card-older-note-id", html)
         self.assertIn("EARLIER NOTES · ", html)
 
+    def test_event_rows_are_never_styled_or_labelled_as_user_messages(self):
+        html = _index_html()
+        for kind in ("queued_input", "api_error"):
+            self.assertIn("turn.type === '%s'" % kind, html)
+        block = html[html.index("if (turn.type === 'queued_input')"):
+                     html.index("function renderQaQuestion(")]
+        self.assertIn("conv-system-event", block)
+        self.assertNotIn("conv-user", block)
+        self.assertIn("Queued input", block)
+        # j/k navigation and the message counter both key on the user class / type only.
+        self.assertIn("const userTurns = [...body.querySelectorAll('.conv-user')];", html)
+        self.assertIn("data.turns.filter(t => t.type === 'user').length", html)
+        # Search buckets the new rows with the assistant side, via the shared class.
+        self.assertIn("'conv-system-event',", html)
+
     def test_ui_adds_no_new_colour_variables(self):
         """design-system.md §1: prove the existing tokens cannot cover it before adding one."""
         html = _index_html()
         root = html[html.index(":root {"):html.index("}", html.index(":root {"))]
         declared = set(re.findall(r"(--[a-z0-9-]+)\s*:", root))
-        expected_new = {"--card-records", "--conv-rewind-relation"}
+        expected_new = {"--card-records", "--conv-rewind-relation", "--sysev-note"}
         self.assertFalse(declared & expected_new)
         for block in ("card-records", "card-lineage", "card-older-notes", "search-match-record"):
             rules = re.findall(r"\.%s[^{]*\{([^}]*)\}" % block, html)
