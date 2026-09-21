@@ -1,7 +1,7 @@
 """Claude records that carry a fact but not a sentence anybody said.
 
-Three record shapes reach a Claude transcript without being human speech or model
-output. The reader used to drop all three, which quietly cost the reader evidence
+Four record shapes reach a Claude transcript without being human speech or model
+output. The reader used to drop the first three, which quietly cost the reader evidence
 about why a session stalled, and - for the queue - risked the opposite mistake:
 showing text the person typed as if the agent had received it.
 
@@ -23,6 +23,10 @@ showing text the person typed as if the agent had received it.
    repeats the record with ``retryAttempt`` incrementing towards ``maxRetries``, so a
    single outage writes a run of near-identical adjacent records.
 
+4. ``[Request interrupted by user]`` / ``[Request interrupted by user for tool use]`` is
+   the ``user`` record the client writes when the person presses Esc. The model receives
+   it, but nobody said it: it reports that a turn was cut short.
+
 What is deliberately *not* here: a rule that guesses humanity from language, tone or
 script. The 2026-09-20 format audit found Chinese prose in machine records and English
 prose in human ones. Every predicate below keys on an explicit structural marker the
@@ -31,7 +35,7 @@ client wrote - a record type, an ``origin.kind``, a ``commandMode``, an XML wrap
 import re
 
 from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
-                                 is_system_user_string)
+                                 interrupt_marker_text, is_system_user_string)
 
 __all__ = [
     'enqueued_text', 'delivered_text', 'notification_prompt', 'api_error_label',
@@ -165,6 +169,9 @@ def parse_system_user_event(stripped):
 
     ``stripped`` is lstrip output. ``None`` means the caller's ordinary handling applies.
     """
+    interrupted = interrupt_marker_text(stripped)
+    if interrupted:
+        return {'type': 'system_notification', 'kind': 'interrupt', 'text': interrupted}
     if is_task_notification(stripped):
         return {'type': 'system_notification', 'text': parse_task_notification(stripped)}
     if stripped.startswith('<bash-stdout>') or stripped.startswith('<bash-stderr>'):

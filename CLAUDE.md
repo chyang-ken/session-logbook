@@ -130,6 +130,13 @@ resolved once, in `antigravity.py`, so no surface can show a branch the conversa
    notifications and errors are not indexed at all. Classification lives in
    `sources/claude_events.py` and keys only on markers the client wrote. See
    [`docs/decisions/2026-09-20-claude-event-records.md`](docs/decisions/2026-09-20-claude-event-records.md).
+   **One rule decides what a human turn is**: `sources/claude_text.anchored_user_text`.
+   The reader's `user` turns, `user_turn_count`, the history index's `user_turn` and `[U#]`
+   all ask it, so they count the same records. Not a turn: anything the client marks
+   `isMeta`, the interrupt marker it writes on Esc, a record holding only tool results. A
+   turn: an image with no typed words, and typed text that shares a record with a tool
+   result. Never answer "is this a person?" anywhere else. See
+   [`docs/decisions/2026-09-20-claude-human-turn-rule.md`](docs/decisions/2026-09-20-claude-human-turn-rule.md).
 8. **No auth.** Binds `127.0.0.1` only.
 
 ## 3. API
@@ -233,7 +240,7 @@ launcher gets its own `backups/` next to its temp state file rather than no back
 | `server.py` `extract_metadata` / `_scan_title_and_compactions` | card preview (first user + tailed user/assistant) + turn counts + custom title + the two pieces of identity evidence: `head_session_id` (a fork keeps the source's id in the file head) and `compaction_parent_uuids` (a compaction boundary whose parent record is not above it in this file) |
 | `server.py` `extract_conversation` | conversation view (pairs tool_use/tool_result, filters thinking, detects skill injection, emits the three Claude event rows) |
 | `sources/claude_events.py` | the single home for Claude records that are events, not speech: an unconfirmed queue entry, a background-task notice, an `api_error` run. Every predicate keys on an explicit client marker (record type, `commandMode`, `origin.kind`, XML wrapper) — never on what the text reads like, because machine records contain prose in every language. `confirmed_queue_entries` is the shared "was this queued text ever handed over" rule; `ApiErrorRun` folds consecutive retries into one row. See `docs/decisions/2026-09-20-claude-event-records.md` |
-| `sources/claude_text.py` `is_system_user_string` / `anchored_user_text` / `normalize_record` | what counts as human text in a Claude record. The prefix list lives here, not in `server.py`, because `user_turn_count` and the anchored transcript's `[U#]` both depend on it and a second copy is how they came to disagree |
+| `sources/claude_text.py` `is_system_user_string` / `anchored_user_text` / `normalize_record` | what counts as human text in a Claude record. `anchored_user_text` is the one rule for "is this a human turn": the reader (`server._claude_text_kind`), the card count (`server._selection_user_turn`), the history index's `user_turn` and the anchored `[U#]` all call it. The prefix list and the interrupt-marker pattern live here, not in `server.py`, because a second copy is how those counters came to disagree. A change to what it returns moves cached values: bump `claude_history.SCHEMA` and `CACHE_SCHEMA_VERSION` |
 | `server.py` `annotate_conversations` / `conversation_index` / `conversation_for_record` / `conversation_state_targets` / `compaction_links` | conversation identity for the server: resolves cross-file compaction parents (bounded to sibling transcripts, memoized), stamps identity on cards, resolves a conversation ID to its current record for `_find_jsonl`, and picks the record a write lands on |
 | `sources/session_identity.py` `conversation_identity` / `merge_conversation_state` | the single home for conversation identity and for folding per-record personal state into the conversation's view. Change the merge policy here and nowhere else |
 | `sources/claude_desktop.py` `descriptor_memberships` | the raw, descriptor-level membership answer (prior CLI sessions + current, with rewind vs continuation), alongside the existing `annotate_sessions` rewind display fields |

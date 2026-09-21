@@ -17,7 +17,9 @@ from sources.claude_text import anchored_user_text, normalize_record
 # 6: `user_turn` stopped counting the harness's user-role pseudo-messages (a background-task
 # notice, bash output, a teammate report, a slash-command injection). A cache written under 5
 # would keep feeding [U#] the old numbering, so the bump forces a rebuild.
-SCHEMA = 6
+# 7: `user_turn` stopped counting the interrupt marker the client writes on Esc, and started
+# counting typed text that shares a record with a tool result. Same reason to rebuild.
+SCHEMA = 7
 _MEMORY = {}
 
 
