@@ -245,11 +245,23 @@ def load_config(root: Path, path: Optional[str]) -> dict:
 
 
 def wait_healthy(url: str, timeout_s: Optional[float] = None) -> bool:
-    """Poll until the service answers 200, or the limit runs out. Returns on the first answer."""
+    """Poll until the service answers 200, or the limit runs out. Returns on the first answer.
+
+    Each attempt is given the whole remaining budget rather than a fixed slice. A short
+    per-attempt timeout silently caps how slow a *healthy* answer may be: with a 3 s slice
+    this refused a service whose `/api/stats` needed 18 s over a library of ~4800 sessions,
+    every attempt was cut off mid-answer, and raising `health_timeout_s` changed nothing
+    because it only bought more attempts that were each cut off the same way.
+
+    Retrying a slow answer is also worse than waiting for it -- the request is what makes
+    the service scan, so a retry throws away the scan in flight and starts another. A
+    service that is not listening yet fails instantly with a refused connection, so waiting
+    this way does not slow the restart case down.
+    """
     deadline = time.time() + (HEALTH_TIMEOUT_S if timeout_s is None else timeout_s)
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=3) as r:
+            with urllib.request.urlopen(url, timeout=max(1.0, deadline - time.time())) as r:
                 if r.status == 200:
                     return True
         except Exception:
