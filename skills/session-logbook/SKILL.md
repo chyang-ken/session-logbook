@@ -75,6 +75,11 @@ python3 scripts/session_logbook.py <command> ...
 - Keep a raw evidence reference as **source path + physical line**, never a line number
   alone. Expand it with `evidence '<exact-source-path>' --line N --context 1`;
   resolving the Session ID again may select a newer file with different line numbers.
+- Persist `[L#]`, never `[U#]`. A `[L#]` is a physical line and never moves. A `[U#]` is a
+  position in the human-turn sequence, and that sequence shifts whenever Logbook refines
+  what counts as a human turn — a record it once counted and no longer does moves every
+  later `[U#]` down. Cite and hand off `[L#]`; treat `[U#]` as a reading aid for one
+  transcript you are holding right now.
 - Use `locate` or `status` for identity and observed metadata; do not request a full
   transcript merely to obtain a path. For new context use `context` once; while following
   known context, reuse the saved source and independent cursors instead of starting over.
