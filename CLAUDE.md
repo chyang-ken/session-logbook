@@ -172,12 +172,13 @@ transcripts remain read-only. Semantic judgments belong to the consuming Agent.
 | `observe <target>` | Return runtime facts and conversation with independent cursors (Devin excluded) |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
 | `search <query>` | Search real User/Assistant messages with source/project/date/role filters |
+| `recent` | List recently active Sessions when no target is known yet: `--since 6h`, `--by user`, source/project filters, title, and the dashboard's selection hints (single-turn Sessions and sub-agents are opt-in). Like `/api/session-choices`, it offers each conversation's **current** record only |
 
 Every `<target>` accepts a record ID or a conversation ID. A record ID resolves to exactly
 that record, always. A conversation ID resolves to that conversation's current record, and
 `locate` / `status` report it as `resolved_from_conversation_id`, while `context` / `follow` /
 `evidence` print a `# RESOLVED_FROM_CONVERSATION:` header line. Nothing is ever retargeted
-silently. `locate` / `status` / `search` also report `conversation_id` and, on `status`, the
+silently. `locate` / `status` / `search` / `recent` also report `conversation_id` and, on `status`, the
 per-record `conversation_runtime_observations` (runtime events are unioned at read time and
 never re-keyed).
 
