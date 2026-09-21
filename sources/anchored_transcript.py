@@ -72,7 +72,7 @@ def digest_header(jsonl_path, source="claude", source_files=None) -> str:
         "# └──────────────────────────────────────────────────────────────────",
     ]
     if source == 'codex':
-        from sources import codex_history
+        from sources import codex, codex_history
         files = codex_history.references(jsonl_path) if source_files is None else source_files
         lines = [line.replace('SOURCE (full, authoritative)', 'ENTRY SOURCE (one physical segment)')
                  .replace('line <n> in the SOURCE jsonl above', 'line <n> in the accompanying SOURCE file')
@@ -80,6 +80,12 @@ def digest_header(jsonl_path, source="claude", source_files=None) -> str:
         lines += ['# EFFECTIVE HISTORY SOURCES:']
         lines += [f"# {f['relation']}: {f['path']} L{f['first_line']}-L{f['last_line']} (session {f['session_id']})" for f in files]
         lines += ['# A source file path is not the stable Session ID; inherited sources belong to their own session.']
+        forked = codex_history.fork_lineage(codex._read_session_meta(jsonl_path))
+        if forked:
+            at = forked['ordinal_exclusive']
+            lines += ['# FORKED FROM SESSION: ' + forked['session_id'] +
+                      (' at ordinal ' + str(at) if at is not None else ' (fork point not recorded)'),
+                      '# This session branched off that one. Records before the fork point belong to it.']
     if source == 'claude' and Path(jsonl_path).is_file():
         from sources import claude_history
         info = claude_history.describe(jsonl_path)
@@ -348,12 +354,18 @@ def render_codex(path, records=None) -> str:
     history = codex_history.load(path) if records is None else None
     rows = history['records'] if history is not None else records
     multi = len({r['path'] for r in rows}) > 1
+    # Records inherited from another session (a user fork's pre-fork prefix) are labelled on
+    # every source line, so a reader never takes a parent thread's turns for this session's.
+    owners = {segment['path']: segment for segment in history['segments']} if history is not None else {}
     if history is not None and not history['complete']:
         o_lines.append('# CONTEXT_INCOMPLETE: ' + json.dumps(history['issues']))
     for entry in rows:
         ln, o = entry['line'], entry['record']
         if multi:
-            o_lines.append(f"[L{ln}] [SOURCE {entry['path']}]")
+            owner = owners.get(entry['path']) or {}
+            label = (f" INHERITED from session {owner['session_id']}"
+                     if owner.get('relation') == 'inherited' else '')
+            o_lines.append(f"[L{ln}] [SOURCE {entry['path']}{label}]")
         t = o.get('type')
         p = o.get('payload') or {}
         ts = (o.get('timestamp') or '')[:19]

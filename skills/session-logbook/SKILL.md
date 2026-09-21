@@ -149,6 +149,14 @@ It returns only line 427 onward, and names what the reader must retire:
 
 `--delta` with cursor 0, and every non-Claude source, behaves exactly like plain `follow`.
 
+A cursor belongs to one physical record, and a rewind or resume can make a conversation's
+current record a different file from the one the cursor was read in. So when the target is a
+**conversation** id with several records, pass the `CURSOR_SOURCE_PATH` you saved alongside the
+cursor as `--cursor-source-path`. Without it the command cannot tell which record the line
+number came from: it returns the full selected branch and says
+`# DELTA_NOT_APPLIED: …` instead of counting the line against a transcript it may not belong
+to. Targeting the record id directly needs nothing extra.
+
 ## Claude Desktop copied history and explicit target changes
 
 `locate`, `status`, and `observe` report `source_files`, compaction anchors, and

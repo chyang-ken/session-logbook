@@ -370,6 +370,10 @@ def search_sessions(
             continue
         results.append({
             "id": item.get("id"),
+            # Each hit keeps its own record id and line anchors; the conversation id only
+            # says which conversation that evidence belongs to.
+            "conversation_id": (server.conversation_for_record(item.get("id")) or {}
+                                ).get("conversation_id", item.get("id")),
             "slug": item.get("slug"),
             "source": item["source"],
             "project_path": item.get("project_path"),
@@ -399,6 +403,37 @@ def search_sessions(
     deduped = list(winners.values())
     deduped.sort(key=activity_time, reverse=True)
     return deduped[:limit]
+
+
+def conversation_facts(item: dict, target: Optional[str] = None) -> dict:
+    """Report the conversation a resolved record belongs to, and how we got here.
+
+    Identity is additive. The record id in every other field stays exactly what it was, so
+    an Agent that stored a Session ID keeps reading the same transcript. When the caller
+    passed a conversation id instead, ``resolved_from_conversation_id`` says so explicitly:
+    nothing here retargets a supervision cursor behind the caller's back.
+    """
+    record_id = item.get("id")
+    facts = server.conversation_for_record(record_id)
+    if facts:
+        facts = dict(facts)
+        facts["conversation_evidence"] = "scan_cache"
+    else:
+        # The CLI reads the dashboard's warm scan cache rather than scanning the library
+        # itself. When that cache is missing or was written by an older build, the library
+        # is unknown, and the only honest answer is that this record is its own
+        # conversation as far as we can see -- never a guess at a wider one.
+        facts = {"conversation_id": record_id, "conversation_current_id": record_id,
+                 "conversation_records": [{"id": record_id, "relation": None,
+                                           "is_current": True}],
+                 "conversation_evidence": "record_only",
+                 "conversation_evidence_reason":
+                     "scan cache absent or written by an older schema; start the dashboard "
+                     "once to refresh it, then this record's conversation is reported in full"}
+    if target and target != record_id and server.conversation_index().get(target) == record_id:
+        facts["resolved_from_conversation_id"] = target
+        facts["resolution_note"] = (f"conversation {target} -> current record {record_id}")
+    return facts
 
 
 def resolve_target(
@@ -490,7 +525,7 @@ def _observed_terminal(item: dict) -> str:
 
 
 def _codex_context(path, after_line=0, cursor_source_path=None, historical_terminal=False,
-                   records=None, issues=None):
+                   records=None, issues=None, relations=None):
     from sources import codex_history
     if records is None and (cursor_source_path or str(after_line).startswith('cx1:')):
         source, line = cursor_source_path, after_line
@@ -513,7 +548,9 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
             selected = history_index.window(segment, line)
             for later in plan['segments'][matches[0] + 1:]:
                 selected.extend(history_index.window(later))
-            return _codex_context(path, line, source, historical_terminal, records=selected, issues=plan['issues'])
+            return _codex_context(path, line, source, historical_terminal, records=selected,
+                                  issues=plan['issues'],
+                                  relations={s['path']: s.get('relation') for s in plan['segments']})
     history = codex_history.load(path) if records is None else None
     rows = history['records'] if history is not None else records
     issues = history['issues'] if history is not None else (issues or [])
@@ -543,12 +580,18 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
     source_segments = {}
     for row in cursor_rows:
         source_segments.setdefault(row['path'], []).append(row)
+    # Carry the relation resolve() assigned; rebuilding it from the manifest alone cannot tell
+    # a page linked by history_base from an unlinked same-id page.
+    if relations is None:
+        relations = {s['path']: s.get('relation') for s in (history or {}).get('segments', [])}
     manifest = {'segments': [
         {'path': source, 'session_id': (codex_source._read_session_meta(Path(source)) or {}).get('id'),
-         'records': entries} for source, entries in source_segments.items()]}
+         'relation': relations.get(source), 'records': entries}
+        for source, entries in source_segments.items()]}
     header = [anchored_transcript.digest_header(Path(path).resolve(), 'codex',
               source_files=codex_history.references(path, manifest)),
               '# SESSION_ID: ' + str(meta.get('id')), '# PROJECT: ' + str(meta.get('project_path') or ''),
+              '# FORKED_FROM: ' + json.dumps(codex_history.fork_lineage(codex_source._read_session_meta(path))),
               '# CONTEXT_COMPLETE: ' + str(not issues).lower(),
               '# CONTEXT_ISSUES: ' + json.dumps(issues),
               '# RETURNED_CONTENT: ' + ('yes' if body.strip() else 'no'),
@@ -659,7 +702,7 @@ def _line_ranges(lines) -> str:
 
 
 def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False,
-                   cursor_source_path=None, delta: bool = False) -> str:
+                   cursor_source_path=None, target=None, delta: bool = False) -> str:
     item = session_metadata(path)
     if item["source"] == "codex":
         return _codex_context(path, after_line, cursor_source_path, historical_terminal)
@@ -676,9 +719,19 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     claude_selection = claude_history.rewind_status(path) if item['source'] == 'claude' else {}
     full_claude_branch = (item['source'] == 'claude' and
                           claude_selection.get('reason') != 'missing_leaf_pointer')
+    facts = conversation_facts(item, target)
     # Opt-in for readers that keep their own cursor: return only the cursor onward and
     # name the earlier anchors a rewind removed, instead of the whole branch to diff.
-    delta_mode = bool(delta) and full_claude_branch and after_line > 0
+    delta_requested = bool(delta) and full_claude_branch and after_line > 0
+    # A conversation id names the conversation's current record, which is not necessarily
+    # the record the caller read last, and a bare line number carries no file identity.
+    # Applying it to a different transcript would silently skip lines this reader never saw,
+    # so return the full selected branch instead and say why. Naming the cursor's own record
+    # with --cursor-source-path maps it explicitly, and delta applies again.
+    cursor_unattributed = bool(delta_requested and not cursor_source_path
+                               and facts.get("resolved_from_conversation_id")
+                               and len(facts.get("conversation_records") or []) > 1)
+    delta_mode = delta_requested and not cursor_unattributed
     removed = claude_history.hidden_lines(path, after_line) if delta_mode else None
     if full_claude_branch and not delta_mode:
         after_line = 0
@@ -699,8 +752,16 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     if item["source"] not in {"pi", "claude"}:
         body = _filter_from_cursor_line(body, after_line)
     header = anchored_transcript.digest_header(path.resolve(), item["source"])
+    records = " ".join(
+        f"{record['id']}{'*' if record.get('is_current') else ''}"
+        f"{'(' + record['relation'] + ')' if record.get('relation') else ''}"
+        for record in facts.get("conversation_records") or [])
     observation = "\n".join([
         f"# SESSION_ID: {item.get('id')}",
+        f"# CONVERSATION_ID: {facts.get('conversation_id')}",
+        f"# CONVERSATION_RECORDS: {records}  (* = current; this transcript is SESSION_ID only)",
+        *([f"# RESOLVED_FROM_CONVERSATION: {facts['resolution_note']}"]
+          if facts.get("resolution_note") else []),
         f"# PROJECT: {item.get('project_path') or ''}",
         f"# INPUT_CURSOR: {input_cursor if str(input_cursor).startswith('cx1:') else 'L' + str(input_cursor)}",
         f"# SOURCE_CHANGED: {str(changed).lower()}",
@@ -718,6 +779,12 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
            'every saved record is kept, so removed entries cannot be determined',
            '# REMOVED_BEFORE_CURSOR: unknown']
           if delta_mode and removed is None else []),
+        *(['# DELTA_NOT_APPLIED: the target was given as a conversation id, the conversation '
+           f"has several records and the current one is {facts.get('conversation_current_id')}, "
+           'so a bare cursor cannot be attributed to this transcript; the full selected branch '
+           'is returned instead. Re-run with --cursor-source-path naming the record the cursor '
+           'came from to get the delta.']
+          if cursor_unattributed else []),
         *(['# FOLLOW_MODE: full selected branch (Pi can change branches)'] if item["source"] == "pi" else []),
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
@@ -763,9 +830,10 @@ def read_evidence(path: Path, line: int, context: int = 1, max_chars: int = 12_0
 def status_for(path: Path) -> dict:
     from sources import runtime_events
     item = session_metadata(path)
+    facts = conversation_facts(item)
     if item["source"] == "devin":
         _, chain = devin_source.read_session(path)
-        return {**item, "total_nodes": len(chain), "anchor_kind": "N",
+        return {**item, **facts, "total_nodes": len(chain), "anchor_kind": "N",
                 "next_cursor": f"N{chain[-1]['row_id'] if chain else 0}",
                 "follow_mode": "full-snapshot", "liveness": "unknown",
                 "explicit_terminal": "unknown"}
@@ -776,7 +844,9 @@ def status_for(path: Path) -> dict:
         "source": item["source"],
         "project_path": item.get("project_path"),
         "jsonl_path": item["jsonl_path"],
-        **({'source_files': codex_history.references(path)} if item['source'] == 'codex' else
+        **({'source_files': codex_history.references(path),
+            'forked_from': codex_history.fork_lineage(codex_source._read_session_meta(path))}
+           if item['source'] == 'codex' else
            claude_history.describe(path) if item['source'] == 'claude' else {}),
         "mtime_iso": item.get("mtime_iso"),
         "size": item.get("size"),
@@ -787,7 +857,15 @@ def status_for(path: Path) -> dict:
         "is_subagent": item["is_subagent"],
         "parent_session_id": item["parent_session_id"],
         "liveness": "unknown",
+        **facts,
         "runtime_observations": runtime_events.read(item["source"], item.get("id")),
+        # Runtime events are written by the clients themselves, under ids Logbook does not
+        # mint. They are unioned at read time and never re-keyed, so each superseded record
+        # still reports its own observations under its own id.
+        **({"conversation_runtime_observations":
+            {record["id"]: runtime_events.read(item["source"], record["id"])
+             for record in facts["conversation_records"] if record["id"] != item.get("id")}}
+           if len(facts.get("conversation_records") or []) > 1 else {}),
     }
 
 
@@ -883,11 +961,14 @@ def main(argv=None) -> int:
             return 0
 
         path = _resolve_from_args(args)
+        target = getattr(args, "target", None)
         if args.command == "locate":
             metadata = session_metadata(path)
+            metadata.update(conversation_facts(metadata, target))
             if metadata['source'] == 'codex':
                 history = codex_history.load(path)
                 metadata.update(source_files=codex_history.references(path, history),
+                                forked_from=history.get('forked_from'),
                                 context_complete=history['complete'], history_issues=history['issues'])
             if metadata['source'] == 'claude':
                 metadata.update(claude_history.describe(path))
@@ -895,6 +976,7 @@ def main(argv=None) -> int:
         elif args.command in {"context", "follow"}:
             print(render_context(path, after_line=args.after_line,
                                  cursor_source_path=args.cursor_source_path,
+                                 target=target,
                                  delta=getattr(args, "delta", False)))
         elif args.command == "status":
             _print_json(status_for(path))
@@ -949,6 +1031,9 @@ def main(argv=None) -> int:
                     result['previous_session_id'] = claude_history.session_id(args.cursor_source_path)
             _print_json(result)
         elif args.command == "evidence":
+            facts = conversation_facts(session_metadata(path), target)
+            if facts.get("resolution_note"):
+                print(f"# RESOLVED_FROM_CONVERSATION: {facts['resolution_note']}")
             print(read_evidence(
                 path,
                 line=args.line,

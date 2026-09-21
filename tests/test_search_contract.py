@@ -34,6 +34,7 @@ KIMI_B = "session_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 DEVIN = "devin:devin-alpha"
 AG_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 AG_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+AG_REWOUND = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
 PI = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
@@ -215,6 +216,8 @@ class SearchContractTests(unittest.TestCase):
             ("small web dashboard", [KIMI_A], "Kimi"),
             ("run the tests", [KIMI_B], "Kimi second session"),
             ("hello world", [AG_B], "Antigravity"),
+            ("liveneedle", [AG_REWOUND], "Antigravity live branch after an in-file rewind"),
+            ("abandonedneedle", [], "rows an Antigravity rewind abandoned are not searchable"),
             ("orchard", [PI, CODEX_PAGED], "Pi and Codex both mention it"),
             ("devin widget audit", [DEVIN], "Devin"),
             ("widget payment", [CLAUDE_B], "AND across messages of one session only"),
