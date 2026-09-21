@@ -9,6 +9,10 @@ a restart after an aborted first turn — a same-id page that carries no history
 all. A user fork is the opposite case: a new id whose history_base points into another
 session's file, so its inherited prefix belongs to that other session and is labelled
 as such rather than presented as the fork's own.
+
+A sub-agent is a third case and not a branch at all: Codex spawns it as a thread of its
+own, with its own id, its own ordinals from 0, and its whole record in its own file. Its
+lineage names the thread that started it; it never points into another file.
 """
 import hashlib
 import json
@@ -102,6 +106,38 @@ def segment_alias(path, meta):
     return None
 
 
+def spawn_lineage(meta):
+    """Describe a sub-agent rollout: a thread Codex started on behalf of another thread.
+
+    Codex marks a spawned thread in the thread's own session_meta — source.subagent, and on
+    newer clients parent_thread_id — and puts the root thread in session_id. Such a thread
+    owns its whole record: it keeps its own id, its ordinals start at 0, and whatever context
+    it was handed at spawn is copied into its own file (as the parent's session_meta followed
+    by the parent's records, or as a compaction snapshot). It therefore never carries a
+    history_base or a forked_from_ordinal_exclusive, and its forked_from_id — when a client
+    writes one at all — repeats the parent or root id instead of marking a branch point.
+
+    So the lineage of a spawned thread is a pointer to the thread that started it, never a
+    boundary into another file. This is the one place that recognizes the native markers;
+    fork_lineage() and resolve() both read it rather than re-deriving them.
+    """
+    if not isinstance(meta, dict):
+        return None
+    origin = meta.get('source')
+    if not (meta.get('parent_thread_id') or (isinstance(origin, dict) and origin.get('subagent'))):
+        return None
+
+    def named(value):
+        return value if isinstance(value, str) and value and value != meta.get('id') else None
+
+    # parent_thread_id is the direct spawner; the oldest guardian rollouts predate it and
+    # record only forked_from_id. session_id names the root thread of the whole spawn tree.
+    return {'parent_session_id': (named(meta.get('parent_thread_id')) or
+                                  named(meta.get('forked_from_id')) or
+                                  named(meta.get('session_id'))),
+            'root_session_id': named(meta.get('session_id'))}
+
+
 def fork_lineage(meta):
     """Describe a deliberate user fork recorded in a rollout's own session_meta.
 
@@ -115,8 +151,7 @@ def fork_lineage(meta):
     parent = meta.get('forked_from_id')
     if not isinstance(parent, str) or not parent or parent == meta.get('id'):
         return None
-    origin = meta.get('source')
-    if meta.get('parent_thread_id') or (isinstance(origin, dict) and origin.get('subagent')):
+    if spawn_lineage(meta):
         return None
     ordinal = meta.get('forked_from_ordinal_exclusive')
     return {'session_id': parent, 'ordinal_exclusive': ordinal if type(ordinal) is int else None}
@@ -253,7 +288,15 @@ def resolve(path):
             errors.append({'path': str(p), 'reason': 'invalid_history_base'})
             break
         if not base:
-            if meta.get('forked_from_id') or (ordinals and type(ordinals[0]) is int and ordinals[0] != 0):
+            # Two independent signs that records before this file's first one are missing.
+            # A forked_from_id claims an inherited prefix — but only on a rollout that is not
+            # a spawned sub-agent thread, where the same field merely repeats the parent id
+            # and nothing external is inherited (see spawn_lineage). A first ordinal other
+            # than 0 means earlier records existed in this ordinal space, and that holds for
+            # a sub-agent as much as for anyone, so it is checked for every rollout.
+            claims_prefix = bool(meta.get('forked_from_id')) and not spawn_lineage(meta)
+            starts_late = bool(ordinals) and type(ordinals[0]) is int and ordinals[0] != 0
+            if claims_prefix or starts_late:
                 errors.append({'path': str(p), 'reason': 'missing_history_base',
                                'first_ordinal': ordinals[0] if ordinals else None})
             break
@@ -355,7 +398,8 @@ def resolve(path):
                            'inherited' if segment['session_id'] != sid else
                            'current' if segment['path'] == current else 'continuation')
     return {'records': records, 'segments': segments, 'issues': issues,
-            'complete': not issues, 'forked_from': fork_lineage(target_meta)}
+            'complete': not issues, 'forked_from': fork_lineage(target_meta),
+            'spawned_from': spawn_lineage(target_meta)}
 
 
 def load(path):
@@ -384,9 +428,10 @@ def load(path):
     if not segments and not plan['complete']:
         return resolve(path)
     from sources import codex
+    meta = codex._read_session_meta(path)
     return {'records': records, 'segments': segments, 'issues': plan['issues'],
             'complete': plan['complete'],
-            'forked_from': fork_lineage(codex._read_session_meta(path))}
+            'forked_from': fork_lineage(meta), 'spawned_from': spawn_lineage(meta)}
 
 
 def fingerprint(path):
