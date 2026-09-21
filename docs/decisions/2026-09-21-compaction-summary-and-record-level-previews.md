@@ -182,4 +182,5 @@ from `staging` at `579b8e9` against this change, field by field:
 
 ## Commit
 
-Filled in once merged.
+`1da4071` — Stop counting the client's compaction summary as a human turn; make previews and search
+ask the record.
