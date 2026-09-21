@@ -141,6 +141,13 @@ const cases=[
    ['This is an earlier record','Open the current one','/?session=current','First record']],
   // A fork is a separate conversation that only reports where it came from.
   [{forked_from_record_id:'source-rec'},['Forked from','/?session=source-rec','separate conversation']],
+  // A Codex sub-agent names the session that started it, as lineage and not as a warning:
+  // its own file is its whole record, so nothing about it is incomplete.
+  [{spawned_from:{parent_session_id:'parent-sess',root_session_id:'parent-sess'}},
+   ['Sub-agent session started by','/?session=parent-sess','this is its full transcript']],
+  // Codex did not always record the spawner; the relationship is still stated plainly.
+  [{spawned_from:{parent_session_id:null,root_session_id:null}},
+   ['Sub-agent session started by','a session Codex did not record']],
   // The in-file rewind axis is untouched by conversation identity.
   [{rewind:{status:'selected',hidden_message_count:2}},
    ['View earlier saved records','include_rewound=1']],
@@ -184,7 +191,7 @@ for (const standalone of [false,true]) {
   setItems(standalone?[]:[{id:'current',size:100}]);
   renderConv({...base},standalone?null:findItem('current'));
   for (const text of ['Records in this conversation','This is an earlier record','Forked from',
-                      'abandoned by a rewind']) {
+                      'Sub-agent session started by','abandoned by a rewind']) {
     assert.ok(!head.innerHTML.includes(text), (standalone?'full page':'modal')+' gained '+text);
   }
 }

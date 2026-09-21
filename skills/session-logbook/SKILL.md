@@ -1,7 +1,7 @@
 ---
 name: session-logbook
 description: >
-  Use local Claude Code, Codex, Kimi Code, Devin Local, and Pi session records when the user wants an Agent to absorb
+  Use local Claude Code, Codex, Kimi Code, Antigravity, Devin Local, and Pi session records when the user wants an Agent to absorb
   another Session, follow new work, inspect evidence, locate a past Session, or mine patterns
   across Session history. Read-only: never modify, move, resume, message, or spawn Sessions.
 ---
@@ -109,8 +109,8 @@ python3 scripts/session_logbook.py recent --since 6h --by user
 python3 scripts/session_logbook.py search 'payment retry' --role user --project my-app
 ```
 
-Useful `search` and `recent` filters are `--source claude|codex|kimi|devin|pi`, `--project <substring>`,
-`--since 7d`, `--since 6h` or an ISO date, and `--include-subagents`.
+Useful `search` and `recent` filters are `--source claude|codex|kimi|antigravity|devin|pi`,
+`--project <substring>`, `--since 7d`, `--since 6h` or an ISO date, and `--include-subagents`.
 
 ## Devin Local anchors
 
@@ -119,6 +119,26 @@ Devin uses `[N#]` database row IDs. Pass the numeric part to `evidence --line` o
 selected chain because edits and compaction can replace earlier messages. Compare
 the new snapshot with the previous one, including removed or changed nodes.
 Source references identify a database session and are not physical transcript files.
+
+## Antigravity in-file rewinds
+
+An Antigravity rewind never leaves the transcript file. The client re-opens an earlier step
+and keeps appending, so an abandoned branch and the branch that replaced it sit in one file.
+Logbook reads the live history only, and says what it left out:
+
+- The digest header states `Abandoned by rewind: N raw lines`, with their anchors when N > 0.
+  Those rows are not in the transcript body, but they are still in the file: read one with
+  `evidence '<path>' --line N`.
+- `status` reports `rewind_abandoned_rows`, `rewind_abandoned_lines`, and each rewind's line
+  and step. `total_lines` stays the raw file length, so the two together say how much of the
+  file the reading covers.
+- `follow` adds `# REMOVED_BEFORE_CURSOR: L1-L3` (or `none`): the lines at or before your
+  cursor that a rewind appended since your last read has taken back. Retire anything you
+  derived from them. Unlike Claude, this is always determinable, so it is never `unknown`.
+
+Antigravity `follow` is cursor-based by default, so `--delta` is not needed and does
+nothing here: anchors stay the file's own ascending physical lines, and the removal list is
+what makes an append-only cursor safe across a rewind.
 
 ## Output discipline
 

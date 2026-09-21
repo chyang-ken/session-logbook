@@ -44,6 +44,25 @@ AG_ROOT = Path.home() / ".gemini" / "antigravity"
 AG_BRAIN = AG_ROOT / "brain"
 AG_SUMMARIES = AG_ROOT / "agyhub_summaries_proto.pb"  # plaintext protobuf: id→title index
 
+
+def _under_root(path, root) -> bool:
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def is_antigravity_path(path) -> bool:
+    """Whether path belongs to the Antigravity data source (anything under the brain root).
+
+    The centralized predicate, matching is_codex_path / is_kimi_path. Callers used to write
+    `str(path).startswith(str(AG_BRAIN))`, which has no directory boundary: a sibling such as
+    `<root>/brain-backup/…` matches the prefix and would be misread as an Antigravity
+    transcript. Reading AG_BRAIN at call time also keeps tests that rebind the root working.
+    """
+    return _under_root(path, AG_BRAIN)
+
 # Aligned with the top-of-file constants in server.py
 RECENT_USER_N = 3
 RECENT_ASSISTANT_N = 3
@@ -447,10 +466,26 @@ def live_records(records):
     live = [pair for pair, keep in zip(records, plan['live']) if keep]
     report = {
         'abandoned_rows': plan['abandoned_rows'],
+        # The abandoned rows' own physical lines, so a reader can name them as evidence
+        # instead of only counting them.
+        'abandoned_lines': [number for (number, _), keep in zip(records, plan['live'])
+                            if not keep],
         'rewinds': [{'line': records[item['index']][0], 'step': item['step'],
                      'abandoned_rows': item['abandoned_rows']} for item in plan['rewinds']],
     }
     return live, report
+
+
+def live_history(jsonl_path):
+    """Parse a transcript once: (live [(line, row)], rewind report, raw line count).
+
+    The public entry point for anything that presents Antigravity content outside this
+    module. Keeping it here means the anchored renderer and the Agent CLI never restate
+    the row classification or the rewind rule; they format what this returns.
+    """
+    records, total = _iter_records(Path(jsonl_path))
+    live, report = live_records(records)
+    return live, report, total
 
 
 def live_lines(rows):
@@ -462,13 +497,10 @@ def live_lines(rows):
 def abandoned_line_numbers(jsonl_path) -> set:
     """Physical line numbers that a later in-file rewind abandoned; empty when none were."""
     try:
-        records, _ = _iter_records(Path(jsonl_path))
+        _live, report, _total = live_history(jsonl_path)
     except Exception:
         return set()
-    plan = rewind_plan([row for _, row in records])
-    if not plan['rewinds']:
-        return set()
-    return {number for (number, _), keep in zip(records, plan['live']) if not keep}
+    return set(report['abandoned_lines'])
 
 
 def _truncate(text: str, n: int) -> str:
@@ -489,12 +521,93 @@ def search_text_from_line(d: dict) -> str:
     return ""
 
 
+_MESSAGE_ROLES = {'USER_INPUT': 'user', 'PLANNER_RESPONSE': 'assistant'}
+
+
+def iter_messages(jsonl_path):
+    """Yield (physical line, role, text) for real messages in the live history.
+
+    The Agent CLI's search reads this rather than the raw file, so an abandoned branch can
+    no more answer a CLI search than it can answer the dashboard's.
+    """
+    live, _report, _total = live_history(jsonl_path)
+    for number, row in live:
+        role = _MESSAGE_ROLES.get(row.get('type'))
+        text = search_text_from_line(row)
+        if role and text:
+            yield number, role, text
+
+
+def collect_turns(jsonl_path):
+    """Normalized live-history rows for a renderer, in physical file order.
+
+    Mirrors sources/pi.collect_turns: every Antigravity-specific decision stays in this
+    adapter (which rows are live, the <USER_REQUEST> wrapper, what counts as a tool result,
+    which tool call a result belongs to), and the caller only formats. Rows keep their own
+    physical `line`, so an anchor still resolves in the raw file after the abandoned rows
+    are dropped from the reading.
+
+    Yielded dicts carry 'line', 'ts', 'type' and that type's fields:
+      user / think / assistant  -> 'text'
+      tool                      -> 'name', 'summary'
+      result                    -> 'name' (the call it pairs with), 'text', 'is_error'
+      compacted                 -> nothing more (Antigravity's CHECKPOINT row)
+
+    Tool calls ride on a PLANNER_RESPONSE row and their results arrive on later rows, so a
+    call and its result are emitted at their own lines rather than adjacent: physical order
+    is what keeps `[L#]` ascending for cursor-based readers.
+    """
+    pending = []   # names of tool calls awaiting their result (FIFO, as the reader pairs them)
+    live, _report, _total = live_history(jsonl_path)
+    for number, row in live:
+        kind = row.get('type')
+        ts = (row.get('created_at') or '')[:19]
+        if kind == 'CHECKPOINT':
+            # Antigravity's context compaction. The reader drops it as noise; a navigable
+            # transcript keeps it, because it tells a reader earlier content is gone.
+            yield {'line': number, 'ts': ts, 'type': 'compacted'}
+        elif kind in _SKIP_TYPES:
+            continue
+        elif kind == 'USER_INPUT':
+            text = _clean_user_input(row.get('content', ''))
+            # A settings-change or metadata-only row cleans to nothing and is not a turn;
+            # skipping it keeps the [U#] count equal to the reader's user turns.
+            if text.strip():
+                yield {'line': number, 'ts': ts, 'type': 'user', 'text': text}
+        elif kind == 'PLANNER_RESPONSE':
+            think = (row.get('thinking') or '').strip()
+            if think:
+                yield {'line': number, 'ts': ts, 'type': 'think', 'text': think}
+            content = (row.get('content') or '').strip()
+            if content:
+                yield {'line': number, 'ts': ts, 'type': 'assistant', 'text': content}
+            for call in (row.get('tool_calls') or []):
+                if not isinstance(call, dict):
+                    continue
+                name = call.get('name', '?')
+                pending.append(name)
+                yield {'line': number, 'ts': ts, 'type': 'tool', 'name': name,
+                       'summary': _tool_summary(name, call.get('args'))}
+        else:
+            # Same fallback as extract_conversation: anything that is not skip/user/planner
+            # is a tool result. A whitelist that missed a new type would drift the FIFO.
+            name = pending.pop(0) if pending else (
+                'error' if kind == 'ERROR_MESSAGE' else str(kind).lower())
+            yield {'line': number, 'ts': ts, 'type': 'result', 'name': name,
+                   'text': row.get('error') or _strip_result_header(row.get('content', '')),
+                   'is_error': _is_error(row)}
+
+
 # ---------- Main interface ----------
-def scan_sessions(root: Path = AG_BRAIN) -> Iterator[Path]:
+def scan_sessions(root: Optional[Path] = None) -> Iterator[Path]:
     """Yield each conversation's transcript.jsonl path.
 
     Directory layout: brain/<conversation_id>/.system_generated/logs/transcript.jsonl
+
+    The default root is read at call time, not bound at import: a test that repoints
+    AG_BRAIN at a fixture directory would otherwise still scan the real one.
     """
+    root = AG_BRAIN if root is None else Path(root)
     if not root.exists():
         return
     for conv_dir in root.iterdir():

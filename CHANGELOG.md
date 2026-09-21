@@ -7,10 +7,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- Keep the whole of a message during an Agent CLI `follow`. The cursor filter read `[L#]` anywhere in a rendered line as that line's anchor, so a User or Assistant message that quotes an anchor (pasting an anchored transcript into a conversation does exactly that) moved the cursor and silently dropped the rest of that message. Only a line's leading anchor counts now; this also affected Kimi Code follows.
 - Order sessions and show recency by conversation time rather than file rewrites; rebuild cached metadata for existing sessions.
 - Preserve genuine Claude user text appended after desktop handoff reminders in search, previews, the reader, and exports; refresh cached metadata for existing sessions.
 
 ### Added
+- Read Antigravity sessions from the `/anchored` download and the Agent CLI (`locate`, `context`, `follow`, `status`, `evidence`, `search`, `recent`). The export used to render a header with no body and call itself a Claude Code session, and the CLI refused the source outright. Both now read the live history of an in-file rewind, state how many raw lines that rewind abandoned, and keep those lines reachable with `evidence`; `follow` is cursor-based and names the abandoned lines at or before your cursor with the same `REMOVED_BEFORE_CURSOR` field the Claude delta follow uses.
 - Add an opt-in `follow --delta` for Claude Sessions: it returns only the cursor onward and lists the earlier anchors a rewind removed (`REMOVED_BEFORE_CURSOR`), so cursor-holding readers no longer re-read and diff the whole branch. Against a conversation id with several records it needs `--cursor-source-path` to know which record the cursor came from, and otherwise returns the full branch with `DELTA_NOT_APPLIED`. Default `follow` is unchanged.
 - Add a `recent` Agent CLI command that lists recently active Sessions without a known target, with title, source, project, latest user time, conversation id and the dashboard's selection hints; single-turn Sessions and sub-agents are opt-in. Each conversation is offered as its current record only, so a transcript a rewind superseded is never listed as a live peer. `--since` also accepts hours such as `6h`.
 - Read Pi sessions from local JSONL: selected-branch search, reader, exports, and Agent CLI, with original-line evidence and existing local metadata controls.

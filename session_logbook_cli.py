@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only command-line access to local Claude Code, Codex, Kimi Code, Devin Local, and Pi sessions.
+"""Read-only command-line access to local Claude Code, Codex, Kimi Code, Antigravity, Devin Local, and Pi sessions.
 
 This is the stable Agent-facing surface for Session Logbook. It reuses the
 dashboard's source adapters and anchored renderer, but does not require the web
@@ -20,6 +20,7 @@ from typing import Iterable, Optional
 import server
 from sources.activity import activity_time
 from sources import anchored_transcript, session_identity, codex_history, claude_history
+from sources import antigravity as ag_source
 from sources import claude_events
 from sources import codex as codex_source
 from sources import devin as devin_source
@@ -27,8 +28,13 @@ from sources import kimi as kimi_source
 from sources import pi as pi_source
 
 
-SUPPORTED_SOURCES = ("claude", "codex", "kimi", "devin", "pi")
-ANCHOR_RE = re.compile(r"\[L(\d+)\]")
+SUPPORTED_SOURCES = ("claude", "codex", "kimi", "antigravity", "devin", "pi")
+# A rendered line's own anchor is always at its start, on its own or behind the user-turn
+# banner. Matching `[L#]` anywhere instead would let message text decide where a cursor
+# lands: User and Assistant messages are preserved in full, so one that quotes an anchor
+# (pasting an anchored transcript into a conversation does exactly that, and real local
+# history contains it) would silently drop the rest of that message from a follow.
+ANCHOR_RE = re.compile(r"^(?:━+ )?(?:\[U\d+\] )?\[L(\d+)\]")
 
 
 class SessionLookupError(Exception):
@@ -64,6 +70,8 @@ def detect_source(path: Path) -> Optional[str]:
         return "kimi"
     if pi_source.is_pi_path(path):
         return "pi"
+    if ag_source.is_antigravity_path(path):
+        return "antigravity"
     if _under(path, server.PROJECTS_DIR):
         return "claude"
 
@@ -84,6 +92,14 @@ def detect_source(path: Path) -> Optional[str]:
                     return "codex"
                 if kind == "metadata" and row.get("protocol_version"):
                     return "kimi"
+                # Antigravity rows are the only ones carrying a step slot beside an
+                # upper-case row type; this recognizes a transcript copied out of the
+                # brain root, where the path predicate alone cannot.
+                step = row.get("step_index")
+                if (isinstance(step, int) and not isinstance(step, bool)
+                        and row.get("source") in {"USER_EXPLICIT", "MODEL", "SYSTEM"}
+                        and isinstance(kind, str) and kind.isupper()):
+                    return "antigravity"
                 if kind in {"user", "assistant", "system", "custom-title"}:
                     return "claude"
     except OSError:
@@ -128,6 +144,8 @@ def session_metadata(path: Path) -> dict:
         meta = kimi_source.extract_metadata(path)
     elif source == "pi":
         meta = pi_source.extract_metadata(path)
+    elif source == "antigravity":
+        meta = ag_source.extract_metadata(path)
     else:
         meta = server.extract_metadata(path)
     if not meta:
@@ -161,6 +179,9 @@ def iter_session_paths(
 
     if source in (None, "pi"):
         yield from pi_source.scan_sessions()
+
+    if source in (None, "antigravity"):
+        yield from ag_source.scan_sessions()
 
     if source in (None, "devin"):
         try:
@@ -221,6 +242,10 @@ def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
 def iter_messages(path, source):
     if source == "pi":
         yield from pi_source.iter_messages(path)
+        return
+    if source == "antigravity":
+        # Live history only: a rewound branch must not answer a search.
+        yield from ag_source.iter_messages(path)
         return
     if source == "devin":
         _, chain = devin_source.read_session(path)
@@ -811,22 +836,6 @@ def _observe_codex(path, args):
     return result
 
 
-def _line_ranges(lines) -> str:
-    """Render sorted physical lines as compact anchors: L5-L9, L14."""
-    spans, start, prev = [], None, None
-    for line in lines:
-        if start is None:
-            start = prev = line
-        elif line == prev + 1:
-            prev = line
-        else:
-            spans.append((start, prev))
-            start = prev = line
-    if start is not None:
-        spans.append((start, prev))
-    return ", ".join(f"L{a}" if a == b else f"L{a}-L{b}" for a, b in spans) or "none"
-
-
 def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False,
                    cursor_source_path=None, target=None, delta: bool = False) -> str:
     item = session_metadata(path)
@@ -867,10 +876,21 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         raise SessionLookupError(
             f"cursor L{after_line} is beyond current end L{total_lines}; restart from line 0"
         )
+    # An Antigravity rewind is appended to the same file and retroactively abandons rows a
+    # follower may already hold. The cursor still works, because rendered anchors stay the
+    # file's own ascending physical lines; what the reader additionally needs is the list of
+    # lines at or before its cursor that left the conversation, reported in the same
+    # REMOVED_BEFORE_CURSOR vocabulary Claude's delta follow uses. Antigravity's live-history
+    # rule is always decidable, so this is never `unknown`.
+    ag_removed = (sorted(number for number in ag_source.abandoned_line_numbers(path)
+                         if number <= after_line)
+                  if item["source"] == "antigravity" and after_line > 0 else None)
     if item["source"] == "kimi":
         body = anchored_transcript.render_kimi(path)
     elif item["source"] == "pi":
         body = anchored_transcript.render_pi(path)
+    elif item["source"] == "antigravity":
+        body = anchored_transcript.render_antigravity(path)
     else:
         body = anchored_transcript.render_claude(path, claude_history.records(path, after_line))
     # Pi can switch branches inside one file. Return the complete selected branch
@@ -899,7 +919,7 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
            '# FOLLOW_MODE: full saved history; selected branch unverified, reconcile previous context']
           if full_claude_branch and not delta_mode else []),
         *(['# FOLLOW_MODE: delta from cursor; selected branch verified',
-           f'# REMOVED_BEFORE_CURSOR: {_line_ranges(removed)}']
+           f'# REMOVED_BEFORE_CURSOR: {anchored_transcript.line_ranges(removed)}']
           if delta_mode and removed is not None else []),
         *([f"# FOLLOW_MODE: delta from cursor; selected branch unverified ({claude_selection.get('reason')}), "
            'every saved record is kept, so removed entries cannot be determined',
@@ -912,6 +932,10 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
            'came from to get the delta.']
           if cursor_unattributed else []),
         *(['# FOLLOW_MODE: full selected branch (Pi can change branches)'] if item["source"] == "pi" else []),
+        *(['# FOLLOW_MODE: live history after in-file rewinds; abandoned rows are not rendered']
+          if item["source"] == "antigravity" else []),
+        *([f"# REMOVED_BEFORE_CURSOR: {anchored_transcript.line_ranges(ag_removed)}"]
+          if ag_removed is not None else []),
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
         f"# CURSOR_SOURCE_PATH: {path.resolve()}",
@@ -922,6 +946,9 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         ("# Compare the full selected branch with the previous snapshot, including removed entries."
          if item["source"] == "pi" or full_claude_branch else
          "# The cursor line is returned again on follow; ignore it when its [L#] was already seen."),
+        *(['# Retire anything derived from REMOVED_BEFORE_CURSOR anchors: a rewind appended after '
+           'your last read can abandon lines you already received.']
+          if ag_removed else []),
         "# A quiet file is not proof that its Agent is still running or has finished.",
     ])
     return header + "\n" + observation + "\n\n" + (body or "[NO NEW RENDERED CONTENT]")
@@ -953,6 +980,21 @@ def read_evidence(path: Path, line: int, context: int = 1, max_chars: int = 12_0
     return "\n".join(selected)
 
 
+def _antigravity_rewind_facts(path: Path) -> dict:
+    """What an in-file rewind removed from this transcript, named by physical line.
+
+    `total_lines` beside it stays the raw file length, so the two together say how much of
+    the file the reading covers, and the abandoned lines remain readable with `evidence`.
+    """
+    _live, report, _total = ag_source.live_history(path)
+    return {
+        'history_semantics': 'live_history_after_in_file_rewind',
+        'rewind_abandoned_rows': report['abandoned_rows'],
+        'rewind_abandoned_lines': anchored_transcript.line_ranges(report['abandoned_lines']),
+        'rewinds': report['rewinds'],
+    }
+
+
 def status_for(path: Path) -> dict:
     from sources import runtime_events
     item = session_metadata(path)
@@ -971,9 +1013,11 @@ def status_for(path: Path) -> dict:
         "project_path": item.get("project_path"),
         "jsonl_path": item["jsonl_path"],
         **({'source_files': codex_history.references(path),
-            'forked_from': codex_history.fork_lineage(codex_source._read_session_meta(path))}
+            'forked_from': codex_history.fork_lineage(codex_source._read_session_meta(path)),
+            'spawned_from': codex_history.spawn_lineage(codex_source._read_session_meta(path))}
            if item['source'] == 'codex' else
-           claude_history.describe(path) if item['source'] == 'claude' else {}),
+           claude_history.describe(path) if item['source'] == 'claude' else
+           _antigravity_rewind_facts(path) if item['source'] == 'antigravity' else {}),
         "mtime_iso": item.get("mtime_iso"),
         "size": item.get("size"),
         "total_lines": total_lines,
@@ -1118,6 +1162,7 @@ def main(argv=None) -> int:
                 history = codex_history.load(path)
                 metadata.update(source_files=codex_history.references(path, history),
                                 forked_from=history.get('forked_from'),
+                                spawned_from=history.get('spawned_from'),
                                 context_complete=history['complete'], history_issues=history['issues'])
             if metadata['source'] == 'claude':
                 metadata.update(claude_history.describe(path))
