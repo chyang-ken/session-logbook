@@ -2,11 +2,24 @@
 
 Physical provenance is retained for every record. Ordinals are coordinates within
 an explicitly selected ancestry, not globally unique deduplication keys.
+
+A Codex conversation is keyed by session_meta.id; the *file* is what multiplies. One id
+can span several rollout files: page rollovers linked by history_base, and — observed on
+a restart after an aborted first turn — a same-id page that carries no history_base at
+all. A user fork is the opposite case: a new id whose history_base points into another
+session's file, so its inherited prefix belongs to that other session and is labelled
+as such rather than presented as the fork's own.
 """
 import hashlib
 import json
 import re
+from datetime import datetime
 from pathlib import Path
+
+# Rollout filenames observed so far always contain their session_meta.id, which makes the
+# name a cheap candidate filter for same-id siblings. It is only a filter: identity is
+# always confirmed by reading session_meta, never decided by the filename.
+_SAFE_GLOB_ID = re.compile(r'[A-Za-z0-9._-]+')
 
 
 def read_segment(path, stop=None, start=0, first_line=1):
@@ -89,6 +102,57 @@ def segment_alias(path, meta):
     return None
 
 
+def fork_lineage(meta):
+    """Describe a deliberate user fork recorded in a rollout's own session_meta.
+
+    forked_from_id is overloaded: in the observed corpus most occurrences belong to
+    sub-agents, which also carry parent_thread_id or source.subagent. Only a rollout with
+    no sub-agent marker and an id of its own is reported as a fork, so "the user branched"
+    is never inferred from forked_from_id alone.
+    """
+    if not isinstance(meta, dict):
+        return None
+    parent = meta.get('forked_from_id')
+    if not isinstance(parent, str) or not parent or parent == meta.get('id'):
+        return None
+    origin = meta.get('source')
+    if meta.get('parent_thread_id') or (isinstance(origin, dict) and origin.get('subagent')):
+        return None
+    ordinal = meta.get('forked_from_ordinal_exclusive')
+    return {'session_id': parent, 'ordinal_exclusive': ordinal if type(ordinal) is int else None}
+
+
+def _epoch(stamp):
+    """Parse a record timestamp; return None when it is absent or not a usable instant."""
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _time_span(rows):
+    """Return (first, last) instants covered by these records, or None when unknown."""
+    stamps = [_epoch(r['record'].get('timestamp')) for r in rows]
+    stamps = [s for s in stamps if s is not None]
+    return (min(stamps), max(stamps)) if stamps else None
+
+
+def _opening_instant(path):
+    """When a rollout's first record was written, read without loading the file.
+
+    A rollout is an append-only log, so this bounds the whole file from below and lets a
+    later page be skipped without parsing megabytes of records to learn it is later.
+    """
+    try:
+        with Path(path).open('rb') as stream:
+            row = json.loads(stream.readline())
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return _epoch(row.get('timestamp')) if isinstance(row, dict) else None
+
+
 _IDENTITY_CACHE = {}
 
 
@@ -123,6 +187,22 @@ def resolve(path):
             snapshots[key] = read_segment(p, stop)
         return snapshots[key]
 
+    def same_id_rollouts(sid):
+        """Every rollout that claims this session id, whether history_base links it or not."""
+        if metadata_index is not None:
+            return set(metadata_index.get(sid, ()))
+        pattern = ('rollout-*' + sid + '*.jsonl' if _SAFE_GLOB_ID.fullmatch(sid)
+                   else 'rollout-*.jsonl')
+        found = set()
+        for root in (codex.CODEX_ROOT, codex.CODEX_ARCHIVED_ROOT):
+            if not root.exists():
+                continue
+            for candidate in root.rglob(pattern):
+                owner, _alias = _identity(candidate)
+                if owner == sid:
+                    found.add(candidate.resolve())
+        return found
+
     def boundaries(sid, byte, logical_owner=None):
         nonlocal metadata_index
         if metadata_index is None:
@@ -147,7 +227,8 @@ def resolve(path):
         return boundary_indexes[key]
 
     layers = []
-    p, stop = Path(path).resolve(), None
+    target, target_meta = Path(path).resolve(), None
+    p, stop = target, None
     while True:
         if p in visited:
             layers.append(([], [{'path': str(p), 'reason': 'history_cycle'}]))
@@ -155,6 +236,8 @@ def resolve(path):
         visited.add(p)
         rows, errors = read(p, stop)
         meta = _meta(rows)
+        if target_meta is None:
+            target_meta = meta
         selected = [r for r in rows if stop is None or r['end'] <= stop]
         errors = [e for e in errors if stop is None or e.get('start', 0) < stop]
         if not meta:
@@ -217,7 +300,62 @@ def resolve(path):
         if rows:
             meta = _meta(rows)
             segments.append({'path': rows[0]['path'], 'session_id': meta.get('id'), 'records': rows})
-    return {'records': records, 'segments': segments, 'issues': issues, 'complete': not issues}
+
+    # A same-id rollout that history_base never reaches is still a page of this session.
+    # Observed shape: restarting after an aborted first turn writes a new page alias with no
+    # history_base, so the aborted page — holding a real user message — is linked only by the
+    # filename. Place it when record timestamps prove where it belongs; otherwise say so.
+    # Never drop it: the previous behaviour reported complete with those messages missing.
+    sid = (target_meta or {}).get('id')
+    if isinstance(sid, str) and sid:
+        known = {Path(segment['path']).resolve() for segment in segments}
+        # Archiving moves a rollout between roots with its name and bytes unchanged, so an
+        # equal filename elsewhere is the same page rather than a second one.
+        known_names = {p.name for p in known}
+        selected_span = _time_span(records)
+        candidates, unplaceable = [], []
+        for candidate in sorted(same_id_rollouts(sid)):
+            if candidate in known or candidate.name in known_names:
+                continue
+            # A page written entirely after everything selected here is a later page of this
+            # session, not missing history: reading an earlier entry point means "the history
+            # up to this point", the same way a replaced tail is excluded. Decide that from
+            # the opening record alone so a large later page is never loaded. Every rollout
+            # in the observed corpus carries that timestamp; one without it falls through and
+            # is reported below rather than guessed at.
+            opening = _opening_instant(candidate)
+            if selected_span is not None and opening is not None and opening > selected_span[1]:
+                continue
+            rows, errors = read(candidate)
+            span = _time_span(rows)
+            if not rows or span is None or selected_span is None:
+                unplaceable.append((span, candidate, rows, errors))
+            else:
+                candidates.append((span, candidate, rows, errors))
+        # Ordinals restart at 0 in an unlinked page, so they cannot order it; only a record-time
+        # range ending before everything already selected can. Walk from the latest candidate
+        # backwards so each one has to fit in front of what is already placed.
+        start = selected_span[0] if selected_span else None
+        for span, candidate, rows, errors in sorted(candidates, key=lambda o: o[0], reverse=True):
+            if start is None or span[1] >= start:
+                unplaceable.append((span, candidate, rows, errors))
+                continue
+            records = rows + records
+            issues = errors + issues
+            segments.insert(0, {'path': rows[0]['path'], 'session_id': sid,
+                                'records': rows, 'relation': 'unlinked'})
+            start = span[0]
+        for _span, candidate, _rows, _errors in unplaceable:
+            issues.append({'path': str(candidate), 'session_id': sid,
+                           'reason': 'unlinked_same_id_segment'})
+
+    current = str(target)
+    for segment in segments:
+        segment.setdefault('relation',
+                           'inherited' if segment['session_id'] != sid else
+                           'current' if segment['path'] == current else 'continuation')
+    return {'records': records, 'segments': segments, 'issues': issues,
+            'complete': not issues, 'forked_from': fork_lineage(target_meta)}
 
 
 def load(path):
@@ -239,12 +377,16 @@ def load(path):
             rows = history_index.window(segment)
             records.extend(rows)
             if rows:
-                segments.append({'path': segment['path'], 'session_id': segment['session_id'], 'records': rows})
+                segments.append({'path': segment['path'], 'session_id': segment['session_id'],
+                                 'relation': segment.get('relation'), 'records': rows})
     except (OSError, ValueError):
         return resolve(path)
     if not segments and not plan['complete']:
         return resolve(path)
-    return {'records': records, 'segments': segments, 'issues': plan['issues'], 'complete': plan['complete']}
+    from sources import codex
+    return {'records': records, 'segments': segments, 'issues': plan['issues'],
+            'complete': plan['complete'],
+            'forked_from': fork_lineage(codex._read_session_meta(path))}
 
 
 def fingerprint(path):
@@ -286,8 +428,10 @@ def references(path, history=None):
     sid = (codex._read_session_meta(path) or {}).get('id')
     return [{
         'path': segment['path'], 'session_id': segment['session_id'],
-        'relation': 'inherited' if segment['session_id'] != sid else
-                    'current' if segment['path'] == current else 'continuation',
+        # resolve() labels each segment; an ad-hoc manifest assembled by a caller does not.
+        'relation': segment.get('relation') or (
+                    'inherited' if segment['session_id'] != sid else
+                    'current' if segment['path'] == current else 'continuation'),
         'first_line': segment['records'][0]['line'],
         'last_line': segment['records'][-1]['line'],
     } for segment in history['segments']]

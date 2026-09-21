@@ -27,6 +27,9 @@ python3 scripts/session_logbook.py <command> ...
   Single-turn Sessions are hidden as *suspected* automated runs, not proven ones; add
   `--include-suspected` to see them. `--by user` ranks by the latest user message; sources
   that keep no per-message time report `last_user_at_iso: null` and rank by activity.
+  A rewind or a resume mints a new record for the same conversation, so each row is a
+  conversation's **current** record; `conversation_id` names the conversation, and `id`
+  stays the record id every other command takes.
 - **Unknown Session:** run `search`, show a small candidate set when ambiguous, then use the
   selected ID with `context`. Do not load candidate transcripts during discovery.
 - **Follow or monitor:** first record `NEXT_CURSOR` from `context`; later run

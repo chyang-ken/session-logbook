@@ -14,6 +14,8 @@ from sources import codex, codex_history, anchored_transcript
 
 SID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 PARENT = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+OTHER = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+ALIAS = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
 
 
 def msg(text):
@@ -38,7 +40,15 @@ class HistoryTests(unittest.TestCase):
         self.stack.enter_context(patch.object(server, '_cache', {}))
         self.stack.enter_context(patch.dict(os.environ, {'SESSION_LOGBOOK_EVENTS': str(self.root/'events.db')}))
 
-    def segment(self, label, rows, base=None, sid=SID, fork=False):
+    def segment(self, label, rows, base=None, sid=SID, fork=False,
+                alias=None, stamps=None, ordinals=True, meta_extra=None):
+        """Write one rollout file.
+
+        alias names the file as a physical page (…-<sid>_<alias>.jsonl), stamps gives every
+        record a record-level timestamp starting at that ISO prefix, ordinals=False imitates
+        the `history_mode: legacy` files the newest CLI writes with no ordinal fields, and
+        meta_extra sets further session_meta fields.
+        """
         ordinal = 0
         meta = {'id': sid, 'cwd': '/example', 'timestamp': '2026-01-0' + str(len(list(self.root.glob('*.jsonl'))) + 1) + 'T00:00:00Z'}
         if base:
@@ -50,9 +60,20 @@ class HistoryTests(unittest.TestCase):
                                     'end_byte_offset': selected[-1]['end']}
             if fork:
                 meta.update(forked_from_id=prior_id, forked_from_ordinal_exclusive=ordinal)
-        p = self.root / f'rollout-{label}-{sid}.jsonl'
+        if alias:
+            meta.update(session_id=sid, history_mode='paginated')
+        meta.update(meta_extra or {})
+        name = f'rollout-{label}-{sid}' + (f'_{alias}' if alias else '') + '.jsonl'
+        p = self.root / name
         records = [{'type': 'session_meta', 'payload': meta}, *rows]
-        p.write_text(''.join(json.dumps(dict(row, ordinal=ordinal+i)) + '\n' for i, row in enumerate(records)))
+
+        def write(index, row):
+            row = dict(row, ordinal=ordinal + index) if ordinals else dict(row)
+            if stamps:
+                row['timestamp'] = f'{stamps}{index:02d}.000Z'
+            return json.dumps(row) + '\n'
+
+        p.write_text(''.join(write(i, row) for i, row in enumerate(records)))
         return p
 
     def cli(self, *args):
@@ -419,6 +440,135 @@ class HistoryTests(unittest.TestCase):
         snippets=server.search_sessions('Old unread')[0]['snippets']
         self.assertEqual(snippets[0]['source_path'],str(old))
         self.assertEqual(snippets[0]['line'],4)
+
+    # ---- Session identity: one id is one conversation, and a fork is a different one ----
+
+    def test_paginated_thread_shows_one_card_at_its_newest_page(self):
+        """Every rollout file sharing a session_meta.id is one session, one card, one state."""
+        first = self.segment('page1', [msg('First page')], stamps='2026-05-01T00:00:')
+        second = self.segment('page2', [msg('Second page')], base=(first, 2),
+                              alias=ALIAS, stamps='2026-05-01T01:00:')
+        metas = [codex.extract_metadata(p) for p in (first, second)]
+        self.assertEqual({m['id'] for m in metas}, {SID})
+        cards = server._dedup_by_id(sorted(metas, key=server.activity_time, reverse=True))
+        self.assertEqual([c['jsonl_path'] for c in cards], [str(second)])
+        self.assertEqual(max((first, second), key=codex.rollout_rank), second)
+
+    def test_user_fork_reports_its_parent_instead_of_owning_the_inherited_turns(self):
+        parent = self.segment('parent', [msg('Parent turn')], sid=PARENT)
+        child = self.segment('child', [msg('Fork own turn')], base=(parent, 2), fork=True)
+        history = codex_history.resolve(child)
+        self.assertEqual(history['forked_from'], {'session_id': PARENT, 'ordinal_exclusive': 2})
+        self.assertEqual([s['relation'] for s in history['segments']], ['inherited', 'current'])
+        body = anchored_transcript.render_codex(child)
+        self.assertIn(f'[SOURCE {parent} INHERITED from session {PARENT}]', body)
+        self.assertIn(f'[SOURCE {child}]', body)
+        self.assertIn(f'# FORKED FROM SESSION: {PARENT} at ordinal 2',
+                      anchored_transcript.digest_header(child, 'codex'))
+        conversation = codex.extract_conversation(child)
+        self.assertEqual(conversation['forked_from'], {'session_id': PARENT, 'ordinal_exclusive': 2})
+        self.assertEqual(conversation['id'], SID)
+        code, text, err = self.cli('locate', SID)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(text)['forked_from']['session_id'], PARENT)
+
+    def test_page_rollover_and_subagent_are_never_reported_as_user_forks(self):
+        """forked_from_id is overloaded: most occurrences are sub-agents, not user branches."""
+        first = self.segment('page1', [msg('First page')])
+        rolled = self.segment('page2', [msg('Second page')], base=(first, 2), alias=ALIAS)
+        self.assertIsNone(codex_history.resolve(rolled)['forked_from'])
+        self.assertEqual([s['relation'] for s in codex_history.resolve(rolled)['segments']],
+                         ['continuation', 'current'])
+        spawned = self.segment('spawned', [msg('Sub-agent work')], sid=OTHER, meta_extra={
+            'forked_from_id': SID, 'parent_thread_id': SID, 'source': {'subagent': {'other': 'guardian'}}})
+        self.assertIsNone(codex_history.fork_lineage(codex._read_session_meta(spawned)))
+
+    def test_unlinked_same_id_page_is_placed_by_record_time_rather_than_dropped(self):
+        """A restart after an aborted turn writes a same-id page with no history_base link."""
+        aborted = self.segment('aborted', [msg('Aborted first attempt'), event('turn_aborted', 't0')],
+                               stamps='2026-06-01T00:00:')
+        restart = self.segment('restart', [msg('Retyped request')], alias=ALIAS,
+                               stamps='2026-06-01T00:02:')
+        history = codex_history.resolve(restart)
+        self.assertTrue(history['complete'], history['issues'])
+        self.assertEqual([s['relation'] for s in history['segments']], ['unlinked', 'current'])
+        self.assertEqual([s['path'] for s in history['segments']], [str(aborted), str(restart)])
+        self.assertEqual([t['text'] for t in codex.extract_conversation(restart)['turns']],
+                         ['Aborted first attempt', 'Retyped request'])
+        self.assertEqual([f['relation'] for f in codex_history.references(restart, history)],
+                         ['unlinked', 'current'])
+        code, text, err = self.cli('context', SID)
+        self.assertEqual(code, 0, err)
+        self.assertIn('Aborted first attempt', text)
+        self.assertIn(f'# unlinked: {aborted} L1-L3', text)
+        code, text, err = self.cli('status', SID)
+        self.assertEqual(code, 0, err)
+        self.assertEqual([f['relation'] for f in json.loads(text)['source_files']],
+                         ['unlinked', 'current'])
+
+    def test_unplaceable_same_id_page_is_reported_incomplete_not_silently_dropped(self):
+        overlapping = self.segment('overlap', [msg('Page of unknown order')], stamps='2026-07-01T00:00:')
+        current = self.segment('current', [msg('Selected page')], alias=ALIAS, stamps='2026-07-01T00:00:')
+        history = codex_history.resolve(current)
+        self.assertFalse(history['complete'])
+        self.assertEqual([i['reason'] for i in history['issues']], ['unlinked_same_id_segment'])
+        self.assertEqual(history['issues'][0]['path'], str(overlapping))
+        body = anchored_transcript.render_codex(current)
+        self.assertIn('unlinked_same_id_segment', body)
+        self.assertNotIn('Page of unknown order', body)
+        code, text, err = self.cli('observe', SID)
+        self.assertEqual(code, 1)
+        self.assertIn('unlinked_same_id_segment', err)
+
+    def test_a_later_same_id_page_is_not_a_gap_in_an_earlier_entry_point(self):
+        first = self.segment('page1', [msg('Early turn')], stamps='2026-08-01T00:00:')
+        later = self.segment('page2', [msg('Later turn')], base=(first, 2),
+                             alias=ALIAS, stamps='2026-08-01T00:30:')
+        # Deciding that from the opening record must not load the later page, which can be
+        # tens of megabytes.
+        real = codex_history.read_segment
+
+        def guarded(target, *args, **kwargs):
+            if Path(target).resolve() == later.resolve():
+                raise AssertionError('a later page must not be loaded')
+            return real(target, *args, **kwargs)
+
+        with patch.object(codex_history, 'read_segment', guarded):
+            earlier_view = codex_history.resolve(first)
+        self.assertTrue(earlier_view['complete'], earlier_view['issues'])
+        self.assertEqual([s['relation'] for s in earlier_view['segments']], ['current'])
+        newest_view = codex_history.resolve(later)
+        self.assertTrue(newest_view['complete'], newest_view['issues'])
+        self.assertEqual([s['relation'] for s in newest_view['segments']], ['continuation', 'current'])
+
+    def test_an_archived_copy_of_a_page_is_the_same_page_not_a_second_one(self):
+        """Archiving moves a rollout between roots with its name and bytes unchanged."""
+        first = self.segment('page1', [msg('First page')], stamps='2026-10-01T00:00:')
+        second = self.segment('page2', [msg('Second page')], base=(first, 2),
+                              alias=ALIAS, stamps='2026-10-01T01:00:')
+        archive = self.root / 'archive'
+        archive.mkdir(exist_ok=True)
+        (archive / first.name).write_bytes(first.read_bytes())
+        history = codex_history.resolve(second)
+        self.assertTrue(history['complete'], history['issues'])
+        self.assertEqual([s['path'] for s in history['segments']], [str(first), str(second)])
+
+    def test_records_without_ordinals_resolve_and_keep_time_order(self):
+        """`history_mode: legacy` rollouts carry no ordinal fields; nothing may assume them."""
+        legacy = {'history_mode': 'legacy'}
+        early = self.segment('legacy1', [msg('Legacy first')], ordinals=False,
+                             stamps='2026-09-01T00:00:', meta_extra=legacy)
+        late = self.segment('legacy2', [msg('Legacy second')], ordinals=False, alias=ALIAS,
+                            stamps='2026-09-01T00:10:', meta_extra=dict(legacy, session_id=SID))
+        self.assertNotIn('"ordinal"', late.read_text())
+        history = codex_history.resolve(late)
+        self.assertTrue(history['complete'], history['issues'])
+        self.assertEqual([s['path'] for s in history['segments']], [str(early), str(late)])
+        self.assertEqual([t['text'] for t in codex.extract_conversation(late)['turns']],
+                         ['Legacy first', 'Legacy second'])
+        self.assertEqual(codex.extract_metadata(late)['user_turn_count'], 1)
+        text = anchored_transcript.render_codex(late)
+        self.assertLess(text.index('Legacy first'), text.index('Legacy second'))
 
     def test_brief_cache_invalidates_when_only_inherited_context_changes(self):
         old,middle,latest=self.chain()

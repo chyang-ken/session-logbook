@@ -66,9 +66,11 @@ DATA (read-only)
   ~/.pi/agent/sessions/*/*.jsonl         (Pi; PI_CODING_AGENT_DIR / PI_CODING_AGENT_SESSION_DIR supported)
     └─► server.py: scan_sessions()       [incremental, by mtime]
         └─► _cache {jsonl_path: meta}
-            └─► enriched_sessions()      [meta + state + scope]
+            └─► enriched_sessions()      [meta + state + scope + conversation identity]
                 └─► GET /api/sessions
-                    └─► frontend: filter → timeline (default) or project groups → render
+                    └─► frontend: setItems() indexes by record id AND conversation id
+                        └─► one entry per conversation → filter → timeline (default)
+                            or project groups → render
 
 STATE (writable)
   POST /api/sessions/:id/{star,archive,note,title,human}
@@ -81,6 +83,10 @@ UI (browser-only)
     'session-logbook-ui' = { q, sectionOpen/Closed, groupOpen/Closed,
                   cardCollapsed, cardExpanded, recentDays, colLeftPct,
                   hideOneshot, sourceFilter, viewMode }
+    cardCollapsed / cardExpanded hold CONVERSATION ids (`cardKey()`), so a collapse
+    choice survives a rewind minting a new record id. Entries an older build wrote are
+    record ids; they are still read as a fallback and replaced on the next write, and
+    `pruneCardCollapsed()` keeps both kinds alive. Never crash on an old shape.
 ```
 
 Each agent's on-disk format is adapted to a common shape by a module under `sources/`
@@ -100,33 +106,52 @@ Each agent's on-disk format is adapted to a common shape by a module under `sour
 4. **Suspected automation is intentionally simple.** A single-turn Session is suspected
    unless local `human_confirmed` metadata says otherwise. Confirmed sub-agents remain excluded
    by their source adapter; do not merge the two concepts.
-5. **No auth.** Binds `127.0.0.1` only.
+5. **Record ID vs conversation ID.** A record is one transcript file and keeps its `id`,
+   path and `[L#]` anchors forever; a conversation is the ordered set of records a rewind,
+   resume or cross-file compaction produced. `conversation_id` / `conversation_current_id` /
+   `conversation_records` are **additive**: no id is ever renamed or retargeted, and
+   contradictory evidence dissolves a group back into single records. See
+   [`docs/decisions/2026-09-20-conversation-identity.md`](docs/decisions/2026-09-20-conversation-identity.md).
+6. **`state.json` stays keyed by record and is never re-keyed.** The conversation-level view
+   is produced at read time by `session_identity.merge_conversation_state` -- one function,
+   one place to change the policy. Starred is a union (earliest `starred_at`); archived is
+   the current record's only; the current record's note is the conversation's note and older
+   ones come back as `older_notes`; the title falls back to the newest older override and
+   reports its source; `human_confirmed` is a union; a cached `brief` is never merged.
+7. **No auth.** Binds `127.0.0.1` only.
 
 ## 3. API
 
 | Endpoint | In | Out |
 |---|---|---|
-| `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, title_override, display_title, human_confirmed, scope, archived, archived_at, starred, starred_at, note}]` |
-| `GET /api/session-choices?source=claude` | optional source | Recent primary and single-turn candidates (up to 100 each); shared relationship and selection hints, title and recent user preview. No authorization changes. |
-| `GET /api/search?q=…` | multi-word = AND; session title and ID match too | `[{id, snippets:[{text, role, term}]}]` |
-| `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` |
-| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>` | `{id, project_path, custom_title, title_override, display_title, human_confirmed, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh) |
+| `GET /api/sessions` | — | `[{id, project_path, jsonl_path, mtime, mtime_iso, size, recent_msgs, last_stop_reason, user_turn_count, custom_title, title_override, title_override_source_id, display_title, human_confirmed, scope, archived, archived_at, starred, starred_at, note, older_notes, conversation_id, conversation_current_id, conversation_records, forked_from_record_id?, forked_from_conversation_id?, spawned_from_conversation_id?}]`; the conversation-level state view lands on the current record only (see §2.6) |
+| `GET /api/session-choices?source=claude` | optional source | Recent primary and single-turn candidates (up to 100 each); shared relationship and selection hints, title and recent user preview. Superseded records are not offered. No authorization changes. |
+| `GET /api/search?q=…` | multi-word = AND; session title and ID match too | `[{id, conversation_id, conversation_current_id, snippets:[{text, role, term}]}]`; snippets stay per record so anchors remain traceable. Rows an Antigravity in-file rewind abandoned are not searched, matching what the reader shows |
+| `GET /api/stats` | — | `{total, starred, recent, dusty, archived}` counted per **conversation**, so the bar and the list agree |
+| `GET /api/sessions/:id/conversation` | optional `?fingerprint=<seen>`; `:id` may be a conversation id | `{id, project_path, custom_title, title_override, display_title, human_confirmed, note, older_notes, conversation_id, conversation_records, resolved_from_conversation_id?, total_lines, fingerprint, turns:[…]}`; when the file's `fingerprint` (mtime + size) still equals `<seen>`, answers `{id, unchanged: true, fingerprint}` without re-parsing (standalone live refresh). Antigravity adds `rewind_abandoned_rows` + `rewinds` — an in-file rewind is read as live history only, and this is how many raw lines it removed; the reader shows that count |
 | `GET /api/sessions/:id/anchored` | — | Plain-text transcript with `[L#]` original-line anchors (for agents to read / download) |
 | `GET /api/recent-files` / `GET /api/find-files` | Files panel | recent-changed / `fd` name search |
-| `POST /api/sessions/:id/star` | `{starred: bool}` | `{id, …entry}` |
-| `POST /api/sessions/:id/archive` | `{archived: bool, note?}` | `{id, …entry}` |
-| `POST /api/sessions/:id/note` | `{note: string}` | `{id, …entry}` |
-| `POST /api/sessions/:id/title` | `{title_override: string}` | `{id, …entry}`; empty clears the personal title |
-| `POST /api/sessions/:id/human` | `{human_confirmed: bool}` | `{id, …entry}`; false clears the correction |
+| `POST /api/sessions/:id/star` | `{starred: bool}` | `{id, …entry, addressed_id, conversation_members}` |
+| `POST /api/sessions/:id/archive` | `{archived: bool, note?}` | `{id, …entry, addressed_id, conversation_members}` |
+| `POST /api/sessions/:id/note` | `{note: string}` | `{id, …entry, addressed_id, conversation_members}` |
+| `POST /api/sessions/:id/title` | `{title_override: string}` | `{id, …entry, addressed_id, conversation_members}`; empty clears the personal title |
+| `POST /api/sessions/:id/human` | `{human_confirmed: bool}` | `{id, …entry, addressed_id, conversation_members}`; false clears the correction |
 
 A POST body missing `starred` / `archived` defaults to `True`.
+
+Every `:id` above accepts a **record id** or a **conversation id**. A record id always
+resolves to exactly that record; a conversation id resolves to the conversation's current
+record and the response says so (`resolved_from_conversation_id`). Writes land on the
+current record; un-star also clears every starred member. `id` in a write response is the
+record actually written, `addressed_id` is what the caller asked for.
 
 ## 4. Frontend routes
 
 | URL | Mode | Notes |
 |---|---|---|
-| `/` | dashboard | cross-project timeline by default; optional project view |
-| `/?session=<id>` | standalone | single-session full-screen reader; hides dashboard chrome; larger body text; follows a running session in place (`startConvLive` polls `/conversation?fingerprint=…`, redraws only on change, keeps scroll / open state) |
+| `/` | dashboard | cross-project timeline by default; optional project view; **one entry per conversation** — superseded records are reachable from the entry's record list, not drawn as peers |
+| `/?session=<record id>` | standalone | that exact record, always. When it is no longer the conversation's current record the page says so and links the current one; it never redirects. Follows a running session in place (`startConvLive` polls `/conversation?fingerprint=…`, redraws only on change, keeps scroll / open state), and when the current record changes while the page is open it announces the move and offers the new record (`noticeConversationMoved`) |
+| `/?session=<conversation id>` | standalone | the conversation's **current** record, so the link stays good across a later rewind. Links the UI generates use this form only when the entry really has several records (`shareId()`); a single-record session keeps its record id exactly as before |
 
 ## 5. Agent-facing CLI and Skill
 
@@ -140,14 +165,22 @@ transcripts remain read-only. Semantic judgments belong to the consuming Agent.
 
 | Command | Outcome |
 |---|---|
-| `locate <target>` | Resolve a Session ID, exact JSONL path, or bounded search query |
+| `locate <target>` | Resolve a Session ID, a conversation ID, an exact JSONL path, or a bounded search query |
 | `context <target>` | Emit the standard anchored transcript plus the next line cursor |
 | `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record |
 | `status <target>` | Report observed file/session metadata without guessing process liveness |
 | `observe <target>` | Return runtime facts and conversation with independent cursors (Devin excluded) |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
 | `search <query>` | Search real User/Assistant messages with source/project/date/role filters |
-| `recent` | List recently active Sessions when no target is known yet: `--since 6h`, `--by user`, source/project filters, title, and the dashboard's selection hints (single-turn Sessions and sub-agents are opt-in) |
+| `recent` | List recently active Sessions when no target is known yet: `--since 6h`, `--by user`, source/project filters, title, and the dashboard's selection hints (single-turn Sessions and sub-agents are opt-in). Like `/api/session-choices`, it offers each conversation's **current** record only |
+
+Every `<target>` accepts a record ID or a conversation ID. A record ID resolves to exactly
+that record, always. A conversation ID resolves to that conversation's current record, and
+`locate` / `status` report it as `resolved_from_conversation_id`, while `context` / `follow` /
+`evidence` print a `# RESOLVED_FROM_CONVERSATION:` header line. Nothing is ever retargeted
+silently. `locate` / `status` / `search` / `recent` also report `conversation_id` and, on `status`, the
+per-record `conversation_runtime_observations` (runtime events are unioned at read time and
+never re-keyed).
 
 The single packaged Skill is `skills/session-logbook/`. It routes Agent requests to this CLI;
 do not add separate find/read/compress Skills or duplicate source parsing in Skill instructions.
@@ -164,30 +197,39 @@ do not add separate find/read/compress Skills or duplicate source parsing in Ski
 | `SEARCH_SNIPPET_CONTEXT` / `SEARCH_MAX_SNIPPETS` | 60 / 3 | search snippet sizing |
 
 State lives at `~/.session-logbook/state.json`, with rotating backups under
-`~/.session-logbook/backups/`.
+`~/.session-logbook/backups/`. `save_state` reads the file back after writing and reports a
+mismatch on stderr, and the backup follows `STATE_FILE` when it is rebound (a smoke-test
+launcher gets its own `backups/` next to its temp state file rather than no backup at all).
 
 ## 7. Code map
 
 | Location | Responsibility |
 |---|---|
-| `server.py` `extract_metadata` | card preview (first user + tailed user/assistant) + turn counts + custom title |
+| `server.py` `extract_metadata` / `_scan_title_and_compactions` | card preview (first user + tailed user/assistant) + turn counts + custom title + the two pieces of identity evidence: `head_session_id` (a fork keeps the source's id in the file head) and `compaction_parent_uuids` (a compaction boundary whose parent record is not above it in this file) |
 | `server.py` `extract_conversation` | conversation view (pairs tool_use/tool_result, filters thinking, detects skill injection) |
+| `server.py` `annotate_conversations` / `conversation_index` / `conversation_for_record` / `conversation_state_targets` / `compaction_links` | conversation identity for the server: resolves cross-file compaction parents (bounded to sibling transcripts, memoized), stamps identity on cards, resolves a conversation ID to its current record for `_find_jsonl`, and picks the record a write lands on |
+| `sources/session_identity.py` `conversation_identity` / `merge_conversation_state` | the single home for conversation identity and for folding per-record personal state into the conversation's view. Change the merge policy here and nowhere else |
+| `sources/claude_desktop.py` `descriptor_memberships` | the raw, descriptor-level membership answer (prior CLI sessions + current, with rewind vs continuation), alongside the existing `annotate_sessions` rewind display fields |
 | `server.py` `compute_scope` / `_effective_archived` | backend scope (pure function, unit-tested); `_effective_archived` derives archived state (explicit state > Codex file location) |
 | `server.py` `load_scan_cache` / `save_scan_cache` / `CACHE_SCHEMA_VERSION` | persistent warm scan cache (`~/.session-logbook/scan-cache.json`): load on start + incremental scan. Bump the schema version on any meta-shape change, or stale caches break |
 | `server.py` `search_sessions` / `_rg_prefilter` / `_rg_matching_lines` / `_search_session` | full-text search (ripgrep file prefilter → ripgrep streams only lines containing a term, JSON keys excluded → per-session AND match; whole-file Python fallback). See `docs/decisions/2026-09-19-search-matching-lines.md` |
 | `server.py` `list_recent_files` / `find_files_by_name` | Files panel backends |
 | `sources/codex_history.py` `load` | the single entry point for a Codex session's effective history (continued pages and forks stitched across rollout files, served from the history index when available). Readers must call `load`, never `resolve`; `tests/test_history_entry_point.py` enforces this. If another client starts splitting sessions across files, give its source module the same kind of single entry point and route its readers through it, rather than generalizing Codex's format |
 | `sources/codex.py` `is_codex_path` / `CODEX_ARCHIVED_ROOT` | Codex (`~/.codex`) data source; `is_codex_path` is the centralized dual-root predicate (active `sessions` + `archived_sessions`) |
-| `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source |
+| `sources/antigravity.py` | Antigravity (`~/.gemini/antigravity`) data source; `rewind_plan` / `live_records` select the live history of an in-file rewind (a `step_index` drop counts only when that step slot is already held by a live row) and every reader here goes through them |
 | `sources/pi.py` | Pi JSONL selected-branch reader, metadata, search, and exports; no source writes. CLI follow returns the full branch; raw evidence retains physical line numbers. |
 | `sources/kimi.py` `is_kimi_path` / `find_wire_by_session_id` | Kimi Code (`$KIMI_CODE_HOME`, default `~/.kimi-code`) data source; scans `sessions/*/*/agents/main/wire.jsonl` only (other agents are sub-agents); `is_kimi_path` is the directory-boundary-safe predicate |
+| `sources/codex_history.py` `resolve` / `load` / `fork_lineage` | Codex session identity: one `session_meta.id` is one conversation, spread over one or more rollout files. `resolve` walks `history_base`, then adds any same-id page that link never reaches (a restart after an aborted turn writes one), placing it by record timestamps or reporting `unlinked_same_id_segment`. Each segment is labelled `current` / `continuation` / `inherited` / `unlinked`; `fork_lineage` reports a user fork's parent and never mistakes a sub-agent for one |
 | `sources/anchored_transcript.py` | anchored-transcript renderer (`render_claude` / `render_codex` / `render_kimi`); the single source of truth behind the `/anchored` endpoint |
 | `session_logbook_cli.py` | read-only Agent access: resolve, search, anchored handoff, incremental follow, status, and evidence expansion |
 | `skills/session-logbook/` | the single Agent-facing Skill; thin routing layer over `session_logbook_cli.py` |
 | `index.html` `<style>` | all CSS (custom props in `:root`) |
 | `index.html` `stripWorktree` / `projectKey` | path normalization + grouping keys |
 | `index.html` `computeScope` | frontend scope override |
-| `index.html` `render` / `renderCard` / `renderConv` | list, card, and conversation rendering |
+| `index.html` `setItems` / `findItem` / `currentItemFor` | the **only** id resolver: `setItems` is the one place `state.items` is replaced and it rebuilds the record and conversation indexes; `findItem` answers for either kind of id with the record always tried first; `currentItemFor` gives the entry a write applies to. Never reintroduce a linear `state.items.find(x => x.id === …)` — there were twelve, each free to drift |
+| `index.html` `conversationItems` / `shareId` / `cardKey` | entries the list draws; the id a generated link uses; the localStorage collapse key |
+| `index.html` `applySearchHits` | folds `/api/search` hits onto the entry that is drawn, tagging a hit found in a superseded record |
+| `index.html` `render` / `renderCard` / `renderConv` | list, card, and conversation rendering. `renderConv` keeps `meta` (this record: size, time, source) and `stateMeta` (this conversation: star, archive, note, title) apart, and reads conversation facts from the response before the card so the modal and the standalone page behave identically |
 | `index.html` `bindConvNav` | user-message navigation (j/k + goto + scroll state machine) |
 
 ## 8. Style
@@ -208,6 +250,14 @@ python3 scripts/check_no_cjk.py
 
 `tests/` uses Python `unittest` with synthetic fixtures. All tests must pass before merge;
 CI runs the same command on every push and PR.
+
+**Frontend behaviour is testable without a browser.** `tests/conversation_live_test.js` and
+`tests/conversation_identity_frontend_test.js` read the real functions out of `index.html`
+with `vm` and run them against stubs, so they test what ships rather than a copy. The
+first one renders every reader case **twice — once as the modal, once as the full page** —
+because a feature that works in only one of the two has shipped here before. Their Python
+wrappers skip when Node is absent; `tests/test_conversation_identity_frontend.py` also
+carries static guards that hold with no Node at all.
 
 **Search is the primary capability; changing it has two extra gates.**
 

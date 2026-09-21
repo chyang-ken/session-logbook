@@ -7,7 +7,9 @@ const section = (start, end) => html.slice(html.indexOf(start), html.indexOf(end
 const context = vm.createContext({assert, console, URLSearchParams});
 vm.runInContext(`
 let selected = '', calls = [], renders = [], timers = new Map(), timerId = 0;
-let state = {items: [{id:'a', starred:true}, {id:'b'}]}, _inflightMutations = 0;
+let state = {items: []}, _inflightMutations = 0;
+let toasts = [];
+const toast = (msg, opts) => toasts.push({msg, opts});
 let _convStandalone = false, _convNav = null, _lastInteractionAt = 0;
 const ICONS = {close:''};
 const classes = new Set();
@@ -19,6 +21,7 @@ const $conv = {
   innerHTML: ''
 };
 const document = {visibilityState:'visible'};
+const location = {href:'/'};
 const window = {getSelection:()=>({toString:()=>selected})};
 const ensureConvOverlay = ()=>{};
 const escapeHtml = x=>x;
@@ -29,8 +32,10 @@ const fetch = url=>new Promise((resolve,reject)=>calls.push({url,resolve,reject}
 const renderConv = (data,meta)=>{renders.push({data,meta});body={...body,scrollTop:0};};
 const reply = (n,data)=>calls[n].resolve({ok:true,json:async()=>data});
 `, context);
+vm.runInContext(section('// ---------- Conversation identity ----------', '// Column width bounds'), context);
 vm.runInContext(section('function openConversation(', '// ---------- Recent files modal'), context);
 vm.runInContext(section('let _convLiveId =', '// Tab refocus:'), context);
+vm.runInContext(`setItems([{id:'a', starred:true}, {id:'b'}]);`, context);
 const run = s=>vm.runInContext(s,context);
 const flush = async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
 (async()=>{
@@ -65,7 +70,27 @@ const flush = async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
   run("openConversation('a',{standalone:true,includeRewound:true}); assert.match(calls[11].url,/include_rewound=1/); reply(11,{id:'a',fingerprint:'h1'});"); await flush();
   poll=run('convLivePoll()'); run("assert.match(calls[12].url,/include_rewound=1/); reply(12,{id:'a',unchanged:true,fingerprint:'h1'});"); await poll;
   run("stopConvLive();");
-  console.log('PASS: overlay updates, scroll/metadata, selection, stale requests, close, search, hidden, retry, standalone');
+
+  // A rewind while the page is open: the record being followed stops being the current one.
+  // The reader must say so and offer the new record, and must not navigate on its own.
+  run("toasts=[]; openConversation('a'); reply(13,{id:'a',fingerprint:'c1',conversation_current_id:'a',conversation_records:[{id:'a',relation:null,is_current:true}]});");
+  await flush();
+  run("assert.equal(_convLiveWasCurrent,true); assert.equal(toasts.length,0);");
+  poll=run('convLivePoll()');
+  run("reply(14,{id:'a',fingerprint:'c2',conversation_current_id:'a2',conversation_records:[{id:'a',relation:null,is_current:false},{id:'a2',relation:'rewind',is_current:true}]});");
+  await poll;
+  run("assert.equal(toasts.length,1,'the move is announced once');");
+  run("assert.match(toasts[0].msg,/continued in a new record/);");
+  run("assert.equal(toasts[0].opts.action.label,'Open it');");
+  run("assert.equal(_convLiveId,'a','the reader stays on the record the URL named');");
+  run("assert.equal(_convLiveWasCurrent,false);");
+  poll=run('convLivePoll()');
+  run("reply(15,{id:'a',fingerprint:'c3',conversation_current_id:'a2',conversation_records:[{id:'a',relation:null,is_current:false},{id:'a2',relation:'rewind',is_current:true}]});");
+  await poll;
+  run("assert.equal(toasts.length,1,'and not announced again on every later poll');");
+  run("stopConvLive(); assert.equal(_convLiveWasCurrent,false);");
+
+  console.log('PASS: overlay updates, scroll/metadata, selection, stale requests, close, search, hidden, retry, standalone, conversation moved');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 
 // Execute the real renderer in both entry modes. Only DOM plumbing is stubbed;
@@ -89,27 +114,64 @@ const activityISO=x=>x.activity_at_iso || '';
 const bindConvNav=()=>null, bindConvFind=()=>{};
 const closeConversation=()=>{};
 const document={title:''};
+const state={items:[]};
 let _convStandalone=false, _convRaw=false, $convNav=null;
 `, renderContext);
+vm.runInContext(section('// ---------- Conversation identity ----------', '// Column width bounds'), renderContext);
 vm.runInContext(section('function renderConv(', '// User-msg navigation:'), renderContext);
 vm.runInContext(`
+const chain=[{id:'old',relation:null,is_current:false},
+             {id:'current',relation:'rewind',is_current:true}];
 const base={id:'current',source:'claude',turns:[],total_lines:1};
+// Every case is rendered twice: once as the modal (a card exists) and once as the full page
+// (no card at all). A feature that only works in one of the two is the exact bug this catches.
 const cases=[
-  [{rewind_history:[{session_id:'old',title:'Previous conversation',rewound_at:123}]},
-   ['View records before rewind','/?session=old']],
-  [{id:'old',rewind_current_session_id:'current'},
-   ['Record before rewind','Open current conversation','/?session=current']],
+  // The current record of a multi-record conversation lists its records and links each one.
+  [{conversation_id:'conv',conversation_current_id:'current',conversation_records:chain},
+   ['Records in this conversation (2)','Rewound from the previous record','/?session=old',
+    'reading this one']],
+  // An earlier record opens as itself and offers the current one; it never redirects.
+  [{id:'old',conversation_id:'conv',conversation_current_id:'current',conversation_records:chain},
+   ['This is an earlier record','Open the current one','/?session=current','First record']],
+  // A fork is a separate conversation that only reports where it came from.
+  [{forked_from_record_id:'source-rec'},['Forked from','/?session=source-rec','separate conversation']],
+  // The in-file rewind axis is untouched by conversation identity.
   [{rewind:{status:'selected',hidden_message_count:2}},
    ['View earlier saved records','include_rewound=1']],
-  [{include_rewound:true},['All saved records','Back to current conversation']]
+  [{include_rewound:true},['All saved records','Back to current conversation']],
+  // A personal title inherited from a superseded record says where it came from.
+  [{conversation_id:'conv',conversation_current_id:'current',conversation_records:chain,
+    title_override:'My name for it',title_override_source_id:'old'},
+   ['Title set on an earlier record']],
+  // Rows an in-file rewind abandoned are counted out loud, never silently missing.
+  [{rewind_abandoned_rows:3},['3 records were abandoned by a rewind and are not shown.']],
+  [{rewind_abandoned_rows:1},['1 record was abandoned by a rewind and is not shown.']],
 ];
 for (const [fields,expected] of cases) {
   for (const standalone of [false,true]) {
     _convStandalone=standalone;
-    renderConv({...base,...fields},standalone?null:{id:fields.id||base.id,size:100});
+    const recordId=fields.id||base.id;
+    setItems(standalone?[]:[{id:recordId,size:100,...fields}]);
+    renderConv({...base,...fields},standalone?null:findItem(recordId));
     for(const text of expected) assert.ok(head.innerHTML.includes(text),
       (standalone?'full page':'modal')+' missing '+text);
   }
 }
-console.log('PASS: real renderer exposes rewind navigation in modal and full page');
+// An ordinary single-record session draws no conversation chrome at all.
+for (const standalone of [false,true]) {
+  _convStandalone=standalone;
+  setItems(standalone?[]:[{id:'current',size:100}]);
+  renderConv({...base},standalone?null:findItem('current'));
+  for (const text of ['Records in this conversation','This is an earlier record','Forked from',
+                      'abandoned by a rewind']) {
+    assert.ok(!head.innerHTML.includes(text), (standalone?'full page':'modal')+' gained '+text);
+  }
+}
+// A zero count, or the field a backend without it never sends, must render nothing.
+for (const fields of [{rewind_abandoned_rows:0},{rewind_abandoned_rows:null},{}]) {
+  renderConv({...base,...fields},null);
+  assert.ok(!head.innerHTML.includes('abandoned by a rewind'),
+    'a missing or zero abandoned-row count must stay silent');
+}
+console.log('PASS: real renderer exposes conversation navigation in modal and full page');
 `, renderContext);
