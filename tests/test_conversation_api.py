@@ -205,6 +205,10 @@ class ApiFixture(unittest.TestCase):
             mock.patch.object(server, "_state_loaded", True),
             mock.patch.object(claude_desktop, "DESKTOP_ROOT", self.descriptors),
             mock.patch.object(server.codex_source, "scan_sessions", return_value=[]),
+            # The CLI walks the Codex roots itself instead of calling scan_sessions, so the
+            # roots have to be rebound too or a CLI test would read the real local library.
+            mock.patch.object(server.codex_source, "CODEX_ROOT", self.root / "no-codex"),
+            mock.patch.object(server.codex_source, "CODEX_ARCHIVED_ROOT", self.root / "no-codex-archive"),
             mock.patch.object(server.ag_source, "scan_sessions", return_value=[]),
             mock.patch.object(server.pi_source, "scan_sessions", return_value=[]),
             mock.patch.object(server.kimi_source, "scan_sessions", return_value=[]),
@@ -431,6 +435,25 @@ class CliTests(ApiFixture):
         hits = {hit["id"]: hit for hit in cli.search_sessions("question", source="claude")}
         self.assertEqual(hits[R1]["conversation_id"], CONVERSATION)
         self.assertEqual(hits[LONE]["conversation_id"], LONE)
+
+    def test_recent_discovery_offers_only_current_records(self):
+        # R1 and R2 were superseded by the rewind: still readable by id, never offered as
+        # peers to attach to. Same rule as /api/session-choices.
+        rows = {row["id"]: row for row in
+                cli.recent_sessions(since="2026-08-01", include_suspected=True)}
+        self.assertEqual(sorted(rows), sorted([R3, LONE]))
+        self.assertEqual(rows[R3]["conversation_id"], CONVERSATION)
+        self.assertEqual(rows[LONE]["conversation_id"], LONE)
+
+    def test_recent_reads_state_left_on_a_superseded_record(self):
+        # The confirmation and the title were set before the rewind. Hiding R1 must not
+        # hide what the user told us about the conversation.
+        self.state[R1] = {"human_confirmed": True, "title_override": "Named before the rewind"}
+        rows = {row["id"]: row for row in cli.recent_sessions(since="2026-08-01")}
+        self.assertEqual(sorted(rows), [R3])
+        self.assertEqual((rows[R3]["selection_group"], rows[R3]["selection_reason"]),
+                         ("primary", "human_confirmed"))
+        self.assertEqual(rows[R3]["title"], "Named before the rewind")
 
 
 if __name__ == "__main__":
