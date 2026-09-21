@@ -62,6 +62,79 @@ def line_ranges(lines) -> str:
     return ", ".join(f"L{a}" if a == b else f"L{a}-L{b}" for a, b in spans) or "none"
 
 
+# ───────────────────────── Turn-level addressing ─────────────────────────
+
+# The one spelling of a rendered user-turn header, in every shape the renderers below
+# produce: the ━━ banner (Claude / Codex / Kimi / Antigravity), the bare line Pi writes,
+# and the `##` heading Devin writes. `[L#]` is a physical source line, `[N#]` a Devin
+# database node. This transcript already decides what a human turn is; a caller that wants
+# only some of those turns must be able to say so in the same `[U#]` the renderer printed,
+# rather than translating it back into line numbers the renderer never asked it to know.
+USER_TURN_RE = re.compile(r"^(?:━+\s*|##\s*)?\[U(\d+)\]\s+\[[LN]\d+\]\s+USER\b")
+
+
+def turn_anchors(body):
+    """[(turn number, index of its header line)] over a rendered transcript body."""
+    found = []
+    for index, line in enumerate(body.splitlines()):
+        match = USER_TURN_RE.match(line)
+        if match:
+            found.append((int(match.group(1)), index))
+    return found
+
+
+def slice_from_turn(body, first_turn=None, last_turns=None):
+    """Cut a rendered body down to the turns asked for; return `(body, notes)`.
+
+    `notes` are header lines the caller must emit. A reader handed a cut transcript has to
+    be told it is one and what is missing: silently returning less than the whole history is
+    how a fragment gets mistaken for the record. An out-of-range or unanswerable request
+    raises instead of quietly returning everything -- a parameter that is accepted and then
+    ignored teaches a caller to trust a bound that was never applied.
+    """
+    if first_turn is None and last_turns is None:
+        return body, []
+    anchors = turn_anchors(body)
+    if not anchors:
+        raise ValueError(
+            "this transcript renders no [U#] human turn, so it cannot be sliced by turn; "
+            "read it whole, or bound it by line with the cursor options"
+        )
+    lowest, total = anchors[0][0], anchors[-1][0]
+    if last_turns is not None:
+        if last_turns < 1:
+            raise ValueError("--last-turns must be 1 or more")
+        wanted = max(lowest, total - last_turns + 1)
+    else:
+        if first_turn < 1:
+            raise ValueError("--from-turn must be U1 or later")
+        if first_turn > total:
+            raise ValueError(
+                f"turn U{first_turn} is beyond this transcript's last turn U{total}"
+            )
+        wanted = max(lowest, first_turn)
+    start = next(index for number, index in anchors if number >= wanted)
+    kept = [number for number, _ in anchors if number >= wanted]
+    notes = [
+        f"# TURN_SLICE: U{kept[0]}-U{total} ({len(kept)} of {len(anchors)} rendered turns)",
+        *([f"# OMITTED_BEFORE_SLICE: U{lowest}-U{kept[0] - 1}"] if kept[0] > lowest else
+          ["# OMITTED_BEFORE_SLICE: none; the request covered every rendered turn"]),
+        "# A [U#] numbers this transcript only. A rewind mints a new record that renumbers "
+        "from U1, so a turn number addresses a position inside this snapshot and is not a "
+        "durable cursor; follow new work with NEXT_CURSOR.",
+    ]
+    return "\n".join(body.splitlines()[start:]).lstrip("\n"), notes
+
+
+def parse_turn_ref(value):
+    """`U13` or `13` -> 13. One spelling in, whichever the caller copied out of a transcript."""
+    text = str(value).strip()
+    digits = text[1:] if text[:1] in ("U", "u") else text
+    if not digits.isdigit():
+        raise ValueError(f"not a turn reference: {value!r}; use U13 or 13")
+    return int(digits)
+
+
 # ───────────────────────── Self-describing header (download artifact only) ─────────────────────────
 
 def digest_header(jsonl_path, source="claude", source_files=None) -> str:

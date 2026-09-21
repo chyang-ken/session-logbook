@@ -679,7 +679,7 @@ def _observed_terminal(item: dict) -> str:
 
 
 def _codex_context(path, after_line=0, cursor_source_path=None, historical_terminal=False,
-                   records=None, issues=None, relations=None):
+                   records=None, issues=None, relations=None, first_turn=None, last_turns=None):
     from sources import codex_history
     if records is None and (cursor_source_path or str(after_line).startswith('cx1:')):
         source, line = cursor_source_path, after_line
@@ -704,7 +704,8 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
                 selected.extend(history_index.window(later))
             return _codex_context(path, line, source, historical_terminal, records=selected,
                                   issues=plan['issues'],
-                                  relations={s['path']: s.get('relation') for s in plan['segments']})
+                                  relations={s['path']: s.get('relation') for s in plan['segments']},
+                                  first_turn=first_turn, last_turns=last_turns)
     history = codex_history.load(path) if records is None else None
     rows = history['records'] if history is not None else records
     issues = history['issues'] if history is not None else (issues or [])
@@ -728,6 +729,7 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
                 rows = [row for row in rows if row['path'] == str(Path(path).resolve()) and row['line'] >= after_line]
             changed = migrated
     body = anchored_transcript.render_codex(path, records=rows)
+    body, turn_notes = anchored_transcript.slice_from_turn(body, first_turn, last_turns)
     cursor_rows = history['records'] if history is not None else records
     last = max((r['line'] for r in cursor_rows if r['path'] == str(Path(path).resolve())), default=0)
     meta = session_metadata(path)
@@ -753,6 +755,7 @@ def _codex_context(path, after_line=0, cursor_source_path=None, historical_termi
               '# NEXT_CURSOR: L' + str(last), '# NEXT_LINE: L' + str(last),
               '# CURSOR_SOURCE_PATH: ' + str(Path(path).resolve()),
               '# SOURCE_CURSOR: ' + str(codex_source.next_cursor(path, last)),
+              *turn_notes,
               '# REPEATED_CURSOR_LINE: ' + ('L' + str(after_line) if after_line else 'none'),
               '# HISTORICAL_TERMINAL_NOT_CURRENT_STATE: ' + _observed_terminal(meta) if historical_terminal else '# EXPLICIT_TERMINAL: ' + _observed_terminal(meta),
               '# Physical line anchors belong to the accompanying source file.',
@@ -840,12 +843,15 @@ def _observe_codex(path, args):
 
 
 def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False,
-                   cursor_source_path=None, target=None, delta: bool = False) -> str:
+                   cursor_source_path=None, target=None, delta: bool = False,
+                   first_turn=None, last_turns=None) -> str:
     item = session_metadata(path)
     if item["source"] == "codex":
-        return _codex_context(path, after_line, cursor_source_path, historical_terminal)
+        return _codex_context(path, after_line, cursor_source_path, historical_terminal,
+                              first_turn=first_turn, last_turns=last_turns)
     if item["source"] == "devin":
-        return devin_source.render_context(path, int(after_line))
+        return devin_source.render_context(path, int(after_line),
+                                           first_turn=first_turn, last_turns=last_turns)
     input_cursor = after_line
     changed = False
     after_line = int(after_line)
@@ -900,6 +906,10 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     # on follow rather than pretending an append-only cursor preserves its context.
     if item["source"] not in {"pi", "claude"}:
         body = _filter_from_cursor_line(body, after_line)
+    # Turn slicing reads the [U#] this body actually printed, so it composes with whatever
+    # the cursor already removed instead of second-guessing it, and RETURNED_CONTENT below
+    # keeps describing what the caller receives.
+    body, turn_notes = anchored_transcript.slice_from_turn(body, first_turn, last_turns)
     header = anchored_transcript.digest_header(path.resolve(), item["source"])
     records = " ".join(
         f"{record['id']}{'*' if record.get('is_current') else ''}"
@@ -939,6 +949,7 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
           if item["source"] == "antigravity" else []),
         *([f"# REMOVED_BEFORE_CURSOR: {anchored_transcript.line_ranges(ag_removed)}"]
           if ag_removed is not None else []),
+        *turn_notes,
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
         f"# CURSOR_SOURCE_PATH: {path.resolve()}",
@@ -1062,6 +1073,11 @@ def parse_args(argv=None):
     _add_target_filters(context)
     context.add_argument("--after-line", default=0)
     context.add_argument("--cursor-source-path")
+    turns = context.add_mutually_exclusive_group()
+    turns.add_argument("--from-turn", metavar="U13",
+                       help="start at this human turn, spelled as the transcript prints it (U13 or 13)")
+    turns.add_argument("--last-turns", type=int, metavar="N",
+                       help="keep only the last N human turns and everything after them")
 
     follow = sub.add_parser("follow", help="render from a previous cursor, repeating its line once")
     _add_target_filters(follow)
@@ -1171,7 +1187,14 @@ def main(argv=None) -> int:
                 metadata.update(claude_history.describe(path))
             _print_json(metadata)
         elif args.command in {"context", "follow"}:
-            print(render_context(path, after_line=args.after_line,
+            # `follow` shares this branch but takes no turn options: its cursor is a
+            # continuation point, and a turn number is not one (a rewind renumbers).
+            from_turn = getattr(args, "from_turn", None)
+            print(render_context(path,
+                                 first_turn=(anchored_transcript.parse_turn_ref(from_turn)
+                                             if from_turn else None),
+                                 last_turns=getattr(args, "last_turns", None),
+                                 after_line=args.after_line,
                                  cursor_source_path=args.cursor_source_path,
                                  target=target,
                                  delta=getattr(args, "delta", False)))
