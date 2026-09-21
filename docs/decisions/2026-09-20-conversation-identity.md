@@ -125,8 +125,19 @@ member — otherwise the union would bring the star straight back.
 * `save_state` reads the file back after writing it and reports a mismatch, and its rotating
   backup now follows `STATE_FILE` instead of being skipped whenever that path is rebound —
   which was exactly the configuration of the prescribed pre-merge smoke test.
-* `CACHE_SCHEMA_VERSION` 11 → 12: scan metadata now carries the file's head session id and
-  its unresolved compaction parents.
+* Scan metadata gained the file's head session id and its unresolved compaction parents, so
+  `CACHE_SCHEMA_VERSION` had to move. This change claimed 12 and shipped as 13: a branch
+  developed in parallel claimed 12 for a different shape change, and the integrator gave the
+  combined build a number of its own. The comment at the constant in `server.py` is the
+  running account of what each number covers; quoting a number here would go stale.
+* The frontend draws **one entry per conversation** (`conversationItems`). Superseded records
+  are listed inside that entry instead of beside it as peers; a link to a superseded record
+  still opens exactly that record and says it is no longer current rather than redirecting
+  (`noticeConversationMoved`); and `setItems` / `findItem` / `currentItemFor` became the one
+  id resolver, replacing twelve independent linear scans of `state.items`. This landed in the
+  same pull request, one commit after the server change. The older display fields
+  `rewind_current_session_id` / `rewind_history` are still produced by
+  `claude_desktop.annotate_sessions` and still served, but nothing in the UI reads them.
 
 ## Evidence
 
@@ -149,11 +160,20 @@ member — otherwise the union would bring the star straight back.
 
 ## Open items
 
-* The frontend still reads `rewind_current_session_id` and `rewind_history` and counts
-  records; the conversation fields are served and unused until the next change.
-* The CLI reads the dashboard's warm scan cache instead of scanning the library itself, so
-  until the dashboard has been started once on this build (cache schema 11 → 12) the CLI
-  reports `conversation_evidence: "record_only"` with a reason, and falls back to
-  record-level identity rather than guessing. The API is unaffected — it scans.
+* The CLI reads the dashboard's warm scan cache instead of scanning the library itself. While
+  that cache is absent or was written under an older schema, the CLI reports
+  `conversation_evidence: "record_only"` with a reason and falls back to record-level
+  identity rather than guessing a wider conversation; starting the dashboard once on the
+  current build refreshes it. The API is unaffected — it scans.
 * Compaction lineage is resolved per project directory. A conversation that continued into a
   different project directory is not linked; no such case exists locally to design against.
+
+## Accepted by design, not a gap
+
+Claude Desktop began writing descriptors only at a point in its own history, and on a
+long-lived machine they cover a clear minority of the Claude transcripts on disk. A rewind
+older than the descriptor store therefore leaves no evidence anyone can verify: inside the
+JSONL its child is indistinguishable from a resume or a fork. Those records stay separate
+single-record conversations, and that is the intended outcome rather than a limitation to
+remove later — rule 1 requires a descriptor, and rule 6 exists precisely to refuse the
+copied-prefix inference that would be the only alternative.

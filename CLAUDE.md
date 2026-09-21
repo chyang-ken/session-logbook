@@ -64,6 +64,7 @@ DATA (read-only)
   ~/.gemini/antigravity/.../*.jsonl      (Antigravity)
   ~/.kimi-code/sessions/*/*/agents/main/wire.jsonl   (Kimi Code; $KIMI_CODE_HOME overrides the root)
   ~/.pi/agent/sessions/*/*.jsonl         (Pi; PI_CODING_AGENT_DIR / PI_CODING_AGENT_SESSION_DIR supported)
+  ~/.local/share/devin/cli/sessions.db   (Devin Local, SQLite; DEVIN_DATA_DIR / XDG_DATA_HOME override)
     └─► server.py: scan_sessions()       [incremental, by mtime]
         └─► _cache {jsonl_path: meta}
             └─► enriched_sessions()      [meta + state + scope + conversation identity]
@@ -88,6 +89,14 @@ UI (browser-only)
     record ids; they are still read as a fallback and replaced on the next write, and
     `pruneCardCollapsed()` keeps both kinds alive. Never crash on an old shape.
 ```
+
+> **Searching the Claude projects directory by hand:** that directory can itself sit inside
+> a git repository (people version their `~/.claude` config), and its ignore rules routinely
+> exclude the transcripts. A plain recursive `rg` there then walks past almost everything —
+> on one maintainer machine a default walk saw 330 files where `-uu` saw 14,652. Pass the
+> file paths explicitly, as `_rg_prefilter` and `_rg_matching_lines` do (they batch real
+> paths after `--` and never hand rg a directory), or pass `-uu`. A search that quietly
+> returns nothing looks exactly like a search that found nothing.
 
 Each agent's on-disk format is adapted to a common shape by a module under `sources/`
 (`codex.py`, `antigravity.py`, `kimi.py`, `devin.py`, `pi.py`); Claude Code is read directly in `server.py`.
@@ -220,6 +229,15 @@ cursor came from; without it the command returns the full selected branch and pr
 `# DELTA_NOT_APPLIED:` rather than counting a bare line number against a transcript it may not
 have come from.
 
+**`[L#]` is the durable anchor; `[U#]` is not.** A `[L#]` is a physical line in one file and
+never moves. A `[U#]` is a position in the human-turn sequence, and that sequence is a product
+of the current human-turn rule: the 2026-09-20/21 changes stopped counting harness
+pseudo-messages, the interrupt marker and the compaction summary, so `[U#]` numbering shifted
+on Sessions containing those records and will shift again if the rule changes. Anything an
+Agent writes down, cites or hands to another Agent must be a source path plus a `[L#]`. Any
+change to what counts as a turn has to say so in the changelog and bump
+`claude_history.SCHEMA` and `CACHE_SCHEMA_VERSION`.
+
 The single packaged Skill is `skills/session-logbook/`. It routes Agent requests to this CLI;
 do not add separate find/read/compress Skills or duplicate source parsing in Skill instructions.
 
@@ -251,7 +269,7 @@ launcher gets its own `backups/` next to its temp state file rather than no back
 | `sources/session_identity.py` `conversation_identity` / `merge_conversation_state` | the single home for conversation identity and for folding per-record personal state into the conversation's view. Change the merge policy here and nowhere else |
 | `sources/claude_desktop.py` `descriptor_memberships` | the raw, descriptor-level membership answer (prior CLI sessions + current, with rewind vs continuation), alongside the existing `annotate_sessions` rewind display fields |
 | `server.py` `compute_scope` / `_effective_archived` | backend scope (pure function, unit-tested); `_effective_archived` derives archived state (explicit state > Codex file location) |
-| `server.py` `load_scan_cache` / `save_scan_cache` / `CACHE_SCHEMA_VERSION` | persistent warm scan cache (`~/.session-logbook/scan-cache.json`): load on start + incremental scan. Bump the schema version on any meta-shape change, or stale caches break |
+| `server.py` `load_scan_cache` / `save_scan_cache` / `CACHE_SCHEMA_VERSION` | persistent warm scan cache (`~/.session-logbook/scan-cache.json`): load on start + incremental scan. Bump the schema version on any meta-shape change **and on any fix that changes the values `extract_metadata` produces for already-scanned sessions** — a warm entry is only refreshed when the file's mtime changes, so an unbumped build serves the old value forever. Two rules about the number itself. (1) When two branches each bump N → N+1 for different shape changes, git merges them into one N+1 with no conflict and neither cache is right for the other build: the integrator must take N+2. That happened at 12, which is why the running build is at 13 and above; the comment at the constant records what each number covers. (2) Do not bump when the output is byte-identical — a bump forces a full cold rescan on the next start, which is the long health wait §10 explains |
 | `server.py` `search_sessions` / `_rg_prefilter` / `_rg_matching_lines` / `_search_session` | full-text search (ripgrep file prefilter → ripgrep streams only lines containing a term, JSON keys excluded → per-session AND match; whole-file Python fallback). See `docs/decisions/2026-09-19-search-matching-lines.md` |
 | `server.py` `list_recent_files` / `find_files_by_name` | Files panel backends |
 | `sources/codex_history.py` `load` | the single entry point for a Codex session's effective history (continued pages and forks stitched across rollout files, served from the history index when available). Readers must call `load`, never `resolve`; `tests/test_history_entry_point.py` enforces this. If another client starts splitting sessions across files, give its source module the same kind of single entry point and route its readers through it, rather than generalizing Codex's format |
@@ -312,9 +330,18 @@ carries static guards that hold with no Node at all.
 - A fallback that silently takes over hides fast-path bugs, because both paths return
   correct results. Tests must assert which path ran, and a deliberate break of each
   safeguard should fail them.
-- Source adapters that bind a data root as a default argument (for example
-  `antigravity.scan_sessions`) ignore patched module constants; tests must pass the
-  root explicitly, or they read the developer's real history.
+
+**A test that touches the CLI or `scan_sessions()` must repoint every source root, not the
+one it cares about.** Every root is a module-level constant read at call time today, so
+`mock.patch.object` on the constant is enough — but a root left unpatched is silently the
+developer's real library, and the test still passes. The full set:
+`server.PROJECTS_DIR` (Claude Code), `codex.CODEX_ROOT` + `codex.CODEX_ARCHIVED_ROOT` +
+`codex.SESSION_INDEX_PATH`, `antigravity.AG_ROOT` + `antigravity.AG_BRAIN`,
+`kimi.KIMI_HOME` + `kimi.KIMI_SESSIONS_ROOT`, `pi.PI_SESSIONS_ROOT`, `devin.DEVIN_ROOT`,
+and `claude_desktop.DESKTOP_ROOT` when descriptors are in play. `pi` and `devin` resolve
+their environment variables at import, so patching the constant — not the environment — is
+what works. `tests/test_search_contract.py` and `tests/test_session_logbook_cli.py` carry
+the current lists; copy from one of them rather than assembling a new one.
 
 CI's floor is Python 3.9 and its runners have no git identity. Before pushing, run the suite once
 under a 3.9 interpreter too (on macOS, `/usr/bin/python3` is 3.9), and never let a test rely on
@@ -346,6 +373,20 @@ To smoke a pre-merge build against real local session data, start it through a l
 rebinds `server.STATE_FILE`, `server.SCAN_CACHE_FILE` and `server.SCAN_CACHE_BACKUP_DIR` to a temp
 directory first; otherwise the unreleased build writes into the production `~/.session-logbook/`
 state and cache.
+
+Those three are no longer enough. Two more files live in the same state directory and are
+**not** module-level constants, so patching a `server.*` name does nothing for them: the
+history index (`~/.session-logbook/history-index.sqlite3`, resolved per call by
+`history_index.index_path()`, which holds both the Codex segment index and the Claude
+per-file rows) and the runtime-events journal
+(`~/.session-logbook/runtime-events.sqlite3`, resolved by `runtime_events.journal_path()`).
+Each reads an environment variable, so the launcher must **set them in the environment
+before the process starts**: `SESSION_LOGBOOK_HISTORY_INDEX` (a path, or the literal `off`
+to disable it) and `SESSION_LOGBOOK_EVENTS`. This matters because a pre-merge build usually
+carries a different `history_index.SCHEMA` or `claude_history.SCHEMA` from the resident
+service; sharing one file means each build finds the other's rows stale and rewrites them,
+so both keep rebuilding and neither result can be trusted. `scripts/search_compare.py` and
+`scripts/audit_claude_human_turns.py` are the two working examples.
 
 `scripts/check_no_cjk.py` enforces the English-first rule over every tracked file and runs as
 its own CI job. Run it before you commit — a local pre-commit hook is optional and easy to
@@ -405,4 +446,9 @@ can adopt the same flow by copying the former and filling in the latter.
 ## 11. Decision log
 
 Decisions backed by an experiment / comparison / measurement are recorded under
-[`docs/decisions/`](docs/decisions/) — see that directory's README for the format.
+[`docs/decisions/`](docs/decisions/). That directory's
+[README](docs/decisions/README.md) holds the format **and an index of every record**,
+grouped so a newcomer can see which one answers their question. Start there rather than
+with this file when the question is *why is it like this* — in particular, the nine records
+dated 2026-09-19 to 2026-09-21 are one body of work on session identity (what counts as one
+conversation, and what counts as one human turn) and are meant to be read together.
