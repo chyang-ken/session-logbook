@@ -584,6 +584,10 @@ def extract_conversation(jsonl_path: Path) -> Optional[dict]:
         # session and are labelled "inherited" in source_files. Report the lineage as data
         # so a reader can open the parent instead of reading the prefix as this session's.
         "forked_from": history.get("forked_from"),
+        # A sub-agent is a thread Codex started for another thread, not a branch of it. Its
+        # own file is its whole record, so report who spawned it as lineage rather than
+        # leaving a reader to guess at missing context.
+        "spawned_from": history.get("spawned_from"),
         "context_complete": history["complete"],
         "history_issues": history["issues"],
         "source": "codex",

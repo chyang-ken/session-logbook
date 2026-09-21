@@ -483,6 +483,97 @@ class HistoryTests(unittest.TestCase):
             'forked_from_id': SID, 'parent_thread_id': SID, 'source': {'subagent': {'other': 'guardian'}}})
         self.assertIsNone(codex_history.fork_lineage(codex._read_session_meta(spawned)))
 
+    # ---- Sub-agents: a spawned thread is a session of its own, not a branch with a gap ----
+
+    def subagent(self, label, rows, parent=SID, sid=OTHER, **extra):
+        """A rollout Codex wrote for a spawned thread: own id, own ordinals from 0, no base."""
+        meta = {'session_id': parent, 'parent_thread_id': parent, 'forked_from_id': parent,
+                'source': {'subagent': {'thread_spawn': {'parent_thread_id': parent}}},
+                'thread_source': 'subagent', 'history_mode': 'paginated'}
+        meta.update(extra)
+        return self.segment(label, rows, sid=sid, meta_extra=meta)
+
+    def test_subagent_thread_is_complete_and_names_the_session_that_spawned_it(self):
+        """A spawned thread inherits nothing by reference, so nothing can be missing.
+
+        Codex never writes a history_base or a forked_from_ordinal_exclusive on a sub-agent
+        rollout; its forked_from_id repeats the parent id. Reading that as a broken link made
+        every such session report incomplete while its file held the whole conversation.
+        """
+        self.segment('parent', [msg('Parent turn')], sid=SID)
+        child = self.subagent('child', [msg('Sub-agent task prompt'), msg('Sub-agent answer')])
+        history = codex_history.resolve(child)
+        self.assertTrue(history['complete'], history['issues'])
+        self.assertEqual(history['issues'], [])
+        self.assertEqual(history['spawned_from'],
+                         {'parent_session_id': SID, 'root_session_id': SID})
+        # A spawned thread is never a user fork, and its own file is its only segment.
+        self.assertIsNone(history['forked_from'])
+        self.assertEqual([s['relation'] for s in history['segments']], ['current'])
+
+        header = anchored_transcript.digest_header(child, 'codex')
+        self.assertIn(f'# SPAWNED BY SESSION: {SID}', header)
+        self.assertNotIn('# FORKED FROM SESSION', header)
+        self.assertNotIn('CONTEXT_INCOMPLETE', anchored_transcript.render_codex(child))
+
+        conversation = codex.extract_conversation(child)
+        self.assertEqual(conversation['spawned_from']['parent_session_id'], SID)
+        self.assertTrue(conversation['context_complete'])
+        self.assertEqual(conversation['history_issues'], [])
+
+        code, text, err = self.cli('locate', OTHER)
+        self.assertEqual(code, 0, err)
+        located = json.loads(text)
+        self.assertEqual(located['spawned_from']['parent_session_id'], SID)
+        self.assertTrue(located['context_complete'])
+        code, text, err = self.cli('status', OTHER)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(text)['spawned_from']['parent_session_id'], SID)
+
+    def test_oldest_guardian_rollouts_name_their_parent_through_forked_from_id(self):
+        """Pre-parent_thread_id clients recorded the spawner only in forked_from_id."""
+        self.segment('parent', [msg('Parent turn')], sid=SID)
+        guardian = self.segment('guardian', [msg('Review this')], sid=OTHER, meta_extra={
+            'session_id': OTHER, 'forked_from_id': SID,
+            'source': {'subagent': {'other': 'guardian'}}})
+        history = codex_history.resolve(guardian)
+        self.assertTrue(history['complete'], history['issues'])
+        self.assertEqual(history['spawned_from'],
+                         {'parent_session_id': SID, 'root_session_id': None})
+
+    def test_subagent_whose_records_start_late_still_reports_the_missing_prefix(self):
+        """Being a sub-agent excuses a missing history_base, never a missing ordinal range.
+
+        Ordinals are the one native signal that records before this file's first one existed.
+        It holds for a spawned thread exactly as for any other rollout.
+        """
+        child = self.subagent('late', [msg('Sub-agent turn')])
+        rows = [json.loads(line) for line in child.read_text().splitlines()]
+        for row in rows:
+            row['ordinal'] += 7
+        child.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        history = codex_history.resolve(child)
+        self.assertFalse(history['complete'])
+        self.assertEqual([i['reason'] for i in history['issues']], ['missing_history_base'])
+        self.assertEqual(history['issues'][0]['first_ordinal'], 7)
+        # The lineage is still reported: it is an answer about provenance, not about a gap.
+        self.assertEqual(history['spawned_from']['parent_session_id'], SID)
+
+    def test_a_user_fork_without_a_history_base_keeps_reporting_its_missing_prefix(self):
+        """Guard on the half that must not move: a real branch with no recoverable boundary.
+
+        An older Desktop client wrote forked_from_id with no history_base and no split
+        ordinal, so the pre-fork turns cannot be located. That stays incomplete.
+        """
+        self.segment('parent', [msg('Parent turn')], sid=SID)
+        fork = self.segment('fork', [msg('Fork turn')], sid=OTHER,
+                            meta_extra={'forked_from_id': SID})
+        history = codex_history.resolve(fork)
+        self.assertFalse(history['complete'])
+        self.assertEqual([i['reason'] for i in history['issues']], ['missing_history_base'])
+        self.assertIsNone(history['spawned_from'])
+        self.assertEqual(history['forked_from'], {'session_id': SID, 'ordinal_exclusive': None})
+
     def test_unlinked_same_id_page_is_placed_by_record_time_rather_than_dropped(self):
         """A restart after an aborted turn writes a same-id page with no history_base link."""
         aborted = self.segment('aborted', [msg('Aborted first attempt'), event('turn_aborted', 't0')],

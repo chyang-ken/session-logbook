@@ -992,7 +992,8 @@ def status_for(path: Path) -> dict:
         "project_path": item.get("project_path"),
         "jsonl_path": item["jsonl_path"],
         **({'source_files': codex_history.references(path),
-            'forked_from': codex_history.fork_lineage(codex_source._read_session_meta(path))}
+            'forked_from': codex_history.fork_lineage(codex_source._read_session_meta(path)),
+            'spawned_from': codex_history.spawn_lineage(codex_source._read_session_meta(path))}
            if item['source'] == 'codex' else
            claude_history.describe(path) if item['source'] == 'claude' else
            _antigravity_rewind_facts(path) if item['source'] == 'antigravity' else {}),
@@ -1140,6 +1141,7 @@ def main(argv=None) -> int:
                 history = codex_history.load(path)
                 metadata.update(source_files=codex_history.references(path, history),
                                 forked_from=history.get('forked_from'),
+                                spawned_from=history.get('spawned_from'),
                                 context_complete=history['complete'], history_issues=history['issues'])
             if metadata['source'] == 'claude':
                 metadata.update(claude_history.describe(path))
