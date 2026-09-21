@@ -148,4 +148,4 @@ new component.
 
 ## Commit
 
-Filled in by the implementing commit on `claude/interrupt-and-image-turns`.
+`78222f3` — Count the same human turns in the reader, the card and [U#].
