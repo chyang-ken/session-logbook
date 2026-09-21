@@ -321,6 +321,27 @@ under a 3.9 interpreter too (on macOS, `/usr/bin/python3` is 3.9), and never let
 the developer's global git config — the `Z` timezone suffix and `git tag -a` without an identity
 have both bitten here.
 
+**Checking a change against the real library has three traps; each has cost a wrong number here.**
+
+- *The library moves while you measure.* Other agents write Session files all day - a batch
+  job added 1,500 in an hour during one audit. To compare two builds, freeze the file list
+  once and give it to both runs (`scripts/audit_claude_human_turns.py --files-from LIST`);
+  the list and any per-Session output belong in the main checkout's `_private/`.
+- *Consumers that agree can be wrong together.* An audit that compares consumers with each
+  other sees only disagreement. Where one needs a reference reading, write it in the audit
+  without calling the rule under test (`_has_typed_words` in the audit script is one), and
+  measure a replaced helper against its replacement in both directions - the direction the
+  brief did not name was the larger one for `_user_text`.
+- *A deliberate break must run the broken code.* When a script mutates a source file, runs
+  the tests and restores the file within the same second, Python reuses the stale bytecode:
+  same size, same mtime. The next mutation then reports the wrong test as its catcher. Run
+  mutation checks with `python3 -B` and no `__pycache__`.
+
+What a change does to the cards is measured, not derived from the rule: dump `extract_metadata`
+for the frozen list from both trees and diff field by field. `user_turn_count` is counted over
+the last `TAIL_BUFFER` of a file and clamped to at least 2 for a larger one, so a rule change
+that "must" move the count often moves it on no Session at all.
+
 To smoke a pre-merge build against real local session data, start it through a launcher that
 rebinds `server.STATE_FILE`, `server.SCAN_CACHE_FILE` and `server.SCAN_CACHE_BACKUP_DIR` to a temp
 directory first; otherwise the unreleased build writes into the production `~/.session-logbook/`
@@ -348,6 +369,10 @@ feature branch ──PR──► staging ──deploy──► maintainer's mach
   That tag date is when the soak clock starts for that commit and everything before it. The
   restart command and health URL are machine-specific and live in git-ignored `_private/deploy.json`
   (shape documented at the top of the script).
+  From a worktree, name the resident checkout: `python3 scripts/release_flow.py --repo <checkout> deploy`
+  (`--repo` goes before the subcommand). Afterwards read the live service back yourself as well -
+  the scan-cache schema on disk, and one real Session through `/api/sessions/<id>/conversation` -
+  because the script's health check proves only that something answers.
   The read-back waits up to `HEALTH_TIMEOUT_S` (180 s), which `_private/deploy.json` can raise or
   lower with an optional `health_timeout_s`. It is that long because a deploy that bumps
   `CACHE_SCHEMA_VERSION` makes the restarted service re-read every session file before it answers;

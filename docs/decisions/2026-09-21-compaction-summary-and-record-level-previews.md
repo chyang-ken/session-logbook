@@ -175,6 +175,21 @@ from `staging` at `579b8e9` against this change, field by field:
   13 and the history index holds no schema-8 row.
 * The per-record and per-Session outputs name real Sessions and stay in `_private/`.
 
+## Assumptions that may stop holding
+
+* **The client always sets `isCompactSummary`.** True for 88 of 88 today. A client that
+  drops the flag would make every summary a human turn again in all consumers at once, and
+  a comparison between consumers cannot see that. The audit therefore prints how many
+  records open like a summary and lack the flag; anything but 0 means the rule needs a new
+  structural marker (the preceding `compact_boundary` record is the candidate).
+* **No card number moved** only because no summary sits in a file's last 300 KB in this
+  library. Another library, or a larger `TAIL_BUFFER`, will see counts drop.
+* **S stands for dashboard search** only while `server._search_session` calls
+  `human_turn_words`. If that call site changes, the audit keeps passing and search drifts;
+  `tests/test_claude_compaction_and_previews.py` is what holds that line.
+* Not checked on real data, because none exists: a summary inside a sub-agent stream, and a
+  summary that is also `isMeta` (the anchored transcript would drop it silently).
+
 ## Still open
 
 * A tool result can print a banner-shaped line (`━━ [U3] [L42] USER ━━`). Nine such lines
