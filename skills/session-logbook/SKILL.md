@@ -135,6 +135,8 @@ turns. In the anchored transcript each takes a `⚠ EVENT` marker line carrying 
   delivery qualifier.
 - `API_ERROR` — a request failed and was retried; consecutive retries collapse into one row
   with the count and the span.
+- `INTERRUPTED` — the person pressed Esc. The client files this under the user role, but
+  nobody typed it; the next `[U#]` is what they said after stopping the agent.
 
 So `[U#]` counts only real human turns, and matches the Session's turn count. Unconfirmed
 queued text is returned by `search` under the role `queued` (use `--role any`);

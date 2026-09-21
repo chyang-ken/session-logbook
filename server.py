@@ -20,7 +20,7 @@ from sources import antigravity as ag_source
 from sources import anchored_transcript
 from sources import claude_events
 from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
-                                 is_system_user_string, normalize_record,
+                                 anchored_user_text, is_system_user_string, normalize_record,
                                  strip_leading_reminders)
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
@@ -51,7 +51,9 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 # 12: conversation identity added head_session_id / compaction_parent_uuids to the metadata,
 # and the Antigravity in-file rewind changed the turn counts it produces. A cache written by
 # either one alone is wrong for the other, so the combined build takes a number of its own.
-CACHE_SCHEMA_VERSION = 13
+# 14: user_turn_count / single_turn follow the shared human-turn rule in sources/claude_text.py
+# (an interrupt marker no longer counts; an image-only message and reminder-wrapped text do).
+CACHE_SCHEMA_VERSION = 14
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -812,18 +814,8 @@ def _extract_custom_title(jsonl_path: Path):
 
 
 def _selection_user_turn(record):
-    """Match the preview's user-turn rules without counting tool/system traffic."""
-    record = normalize_record(record)
-    if record.get("type") != "user" or record.get("isMeta"):
-        return False
-    content = record.get("message", {}).get("content")
-    if isinstance(content, str):
-        return bool(content.strip()) and not _is_system_user_string(content.lstrip())
-    if isinstance(content, list):
-        return any(isinstance(b, dict) and b.get("type") == "text"
-                   and isinstance(b.get("text"), str) and b["text"].strip()
-                   and not _is_system_user_string(b["text"].lstrip()) for b in content)
-    return False
+    """Whether this record is a human turn, by the one rule the reader and [U#] also use."""
+    return bool(anchored_user_text(record))
 
 
 def extract_metadata(jsonl_path: Path):
@@ -1237,6 +1229,33 @@ def file_fingerprint(path) -> str:
     return version
 
 
+CONV_HARNESS_NOTE_MAX = 300
+
+
+def _claude_text_kind(record, skill_context):
+    """What a user-role record with readable text is, once commands and events are ruled out.
+
+    A person's message is `user` whatever preceded it - a built-in slash command such as
+    /clear announces no body, and the next thing typed used to be filed as its skill.
+    Whatever is left was written by the client (`isMeta`): the `skill` body when a command or
+    a Skill call announced one, otherwise a `harness_note` (the "[Image: source: ...]" line
+    after a pasted image, hook feedback, a message relayed from another session).
+    """
+    if anchored_user_text(record):
+        return 'user'
+    return 'skill' if skill_context else 'harness_note'
+
+
+def _claude_text_turn(record, text, skill_context, ts):
+    """The reader's turn for that record. A harness note is shown, short, as a system event:
+    it explains what the agent did next, and it is not something the person said."""
+    kind = _claude_text_kind(record, skill_context)
+    if kind == 'harness_note':
+        return {'type': 'system_notification', 'kind': kind,
+                'text': _truncate_conv(text, CONV_HARNESS_NOTE_MAX), 'ts': ts}
+    return {'type': kind, 'text': _truncate_conv(text, CONV_USER_MAX), 'ts': ts}
+
+
 def extract_conversation(jsonl_path, include_rewound=False):
     """Read the full JSONL and extract conversation content, filtering metadata/thinking/image and pairing tool_use with result."""
     turns = []
@@ -1397,13 +1416,8 @@ def extract_conversation(jsonl_path, include_rewound=False):
                         'ts': ts,
                     })
                 else:
-                    turn_type = 'skill' if next_is_skill else 'user'
+                    turns.append(_claude_text_turn(d, text, next_is_skill, ts))
                     next_is_skill = False
-                    turns.append({
-                        'type': turn_type,
-                        'text': _truncate_conv(text, CONV_USER_MAX),
-                        'ts': ts,
-                    })
             elif isinstance(msg_content, list):
                 user_texts = []
                 for block in msg_content:
@@ -1459,17 +1473,19 @@ def extract_conversation(jsonl_path, include_rewound=False):
                             '<local-command-', '<command-')):
                         next_is_skill = False
                         pending_skill_body = False
-                    elif full.startswith('[Request interrupted by user'):
-                        # User interrupted the agent: system-injected event text, not user input
+                    elif (event := _parse_system_event(full)) is not None:
+                        # The interrupt marker the client writes on Esc, and any other
+                        # pseudo-message that arrives as blocks: an event, not user input.
                         turns.append({
-                            'type': 'system_notification',
-                            'text': 'Request interrupted by user',
+                            **event,
+                            'text': _truncate_conv(event['text'], CONV_USER_MAX),
                             'ts': ts,
                         })
                         next_is_skill = False
                         pending_skill_body = False
-                    elif full == 'Continue from where you left off.':
-                        # Resume prompt injected by --resume / Continue button, not user input
+                    elif d.get('isMeta') and full == 'Continue from where you left off.':
+                        # Resume prompt injected by --resume / Continue button. Only the
+                        # client's own record counts: a person may type the same sentence.
                         turns.append({
                             'type': 'system_notification',
                             'text': 'Continue from where you left off',
@@ -1477,26 +1493,12 @@ def extract_conversation(jsonl_path, include_rewound=False):
                         })
                         next_is_skill = False
                         pending_skill_body = False
-                    elif pending_skill_body or full.startswith(
-                            'Base directory for this skill: '):
-                        # Body injected after the AI called Skill: classify as skill, not user
-                        turns.append({
-                            'type': 'skill',
-                            'text': _truncate_conv(full, CONV_USER_MAX),
-                            'ts': ts,
-                        })
-                        next_is_skill = False
-                        pending_skill_body = False
                     else:
-                        turn_type = 'skill' if next_is_skill else 'user'
+                        skill_context = (next_is_skill or pending_skill_body
+                                         or full.startswith('Base directory for this skill: '))
+                        turns.append(_claude_text_turn(d, full, skill_context, ts))
                         next_is_skill = False
                         pending_skill_body = False
-                        turns.append({
-                            'type': turn_type,
-                            'text': _truncate_conv(
-                                full, CONV_USER_MAX),
-                            'ts': ts,
-                        })
                 else:
                     # Pure tool_result messages (for example Skill launch reports) do not
                     # consume pending_skill_body / next_is_skill; the following real text inherits it.
@@ -1518,6 +1520,26 @@ def extract_conversation(jsonl_path, include_rewound=False):
         'jsonl_path': str(jsonl_path),
         **claude_history.describe(jsonl_path),
     }
+
+
+_TRANSCRIPT_EVENT_LABELS = {
+    'system_notification': 'NOTIFICATION',
+    'bash_output': 'BASH-OUTPUT',
+    'teammate_message': 'TEAMMATE',
+}
+
+
+def _transcript_event_block(event):
+    label = _TRANSCRIPT_EVENT_LABELS.get(event['type'], 'SYSTEM')
+    return f'## {label}\n{event["text"]}\n'
+
+
+def _transcript_text_block(record, text, skill_context):
+    """The export block for a user-role record, labelled by the same rule the reader uses."""
+    kind = _claude_text_kind(record, skill_context)
+    if kind == 'harness_note':
+        return '## SYSTEM\n%s\n' % _truncate_conv(text, CONV_HARNESS_NOTE_MAX)
+    return '## %s\n%s\n' % (kind.upper(), text)
 
 
 def extract_transcript(jsonl_path: Path) -> str:
@@ -1619,17 +1641,10 @@ def extract_transcript(jsonl_path: Path) -> str:
                 elif (event := _parse_system_event(text)) is not None:
                     # Keep system events as independent labeled export blocks so later LLM readers can distinguish actors
                     next_is_skill = False
-                    label_map = {
-                        'system_notification': 'NOTIFICATION',
-                        'bash_output': 'BASH-OUTPUT',
-                        'teammate_message': 'TEAMMATE',
-                    }
-                    label = label_map.get(event['type'], 'SYSTEM')
-                    out_blocks.append(f'## {label}\n{event["text"]}\n')
+                    out_blocks.append(_transcript_event_block(event))
                 else:
-                    label = 'SKILL' if next_is_skill else 'USER'
+                    out_blocks.append(_transcript_text_block(d, text, next_is_skill))
                     next_is_skill = False
-                    out_blocks.append(f'## {label}\n{text}\n')
             elif isinstance(msg_content, list):
                 user_texts = []
                 for block in msg_content:
@@ -1673,11 +1688,13 @@ def extract_transcript(jsonl_path: Path) -> str:
                         user_texts.append('[image]')
                 if user_texts:
                     full = '\n'.join(user_texts).strip()
-                    if full and not full.startswith(('<local-command-', '<command-')):
-                        label = 'SKILL' if next_is_skill else 'USER'
+                    if not full or full.startswith(('<local-command-', '<command-')):
                         next_is_skill = False
-                        out_blocks.append(f'## {label}\n{full}\n')
+                    elif (event := _parse_system_event(full)) is not None:
+                        next_is_skill = False
+                        out_blocks.append(_transcript_event_block(event))
                     else:
+                        out_blocks.append(_transcript_text_block(d, full, next_is_skill))
                         next_is_skill = False
                 else:
                     next_is_skill = False

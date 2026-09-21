@@ -19,10 +19,26 @@ _LEADING_REMINDERS = re.compile(r"^(?:\s*<system-reminder>.*?</system-reminder>\
 SYSTEM_USER_PREFIXES_SKIP = ("<local-command-", "<command-", "<system-reminder>")
 SYSTEM_USER_PREFIXES_EVENT = ("<task-notification>", "<bash-stdout>", "<bash-stderr>", "<teammate-message")
 
+# The record the client writes when the person presses Esc. It is filed under the user role
+# and the model does receive it, but nobody typed it: it reports that something happened.
+# The whole text has to be the marker - a bracketed literal on one line - so a person who
+# quotes it inside a longer message still gets their turn. The two wordings in use are
+# "[Request interrupted by user]" and "[Request interrupted by user for tool use]"; the
+# pattern leaves room for a third without a code change.
+_INTERRUPT_MARKER = re.compile(r"\[Request interrupted by user[^\]\n]*\]")
+
+
+def interrupt_marker_text(stripped):
+    """The marker's own wording without its brackets, or '' when the text is not one."""
+    found = _INTERRUPT_MARKER.fullmatch((stripped or "").strip())
+    return found.group(0)[1:-1] if found else ""
+
 
 def is_system_user_string(stripped):
     """Whether user-role string content is a system-side injection rather than real user input. stripped should be lstrip output."""
-    return stripped.startswith(SYSTEM_USER_PREFIXES_SKIP) or stripped.startswith(SYSTEM_USER_PREFIXES_EVENT)
+    return (stripped.startswith(SYSTEM_USER_PREFIXES_SKIP)
+            or stripped.startswith(SYSTEM_USER_PREFIXES_EVENT)
+            or bool(interrupt_marker_text(stripped)))
 
 
 def strip_leading_reminders(text):
@@ -52,26 +68,48 @@ def normalize_record(row):
     return dict(row, type='user', message={'role': 'user', 'content': prompt})
 
 
-def anchored_user_text(row):
-    """Text used to count/render a Claude user anchor, excluding tool results.
+def user_record_text(row, joiner=' '):
+    """Readable text of a user-role record: leading reminders stripped, images as [image].
 
-    System-side pseudo-messages the harness files under the user role - a background-task
-    notification, bash-mode output, a teammate report, a slash-command injection - are not
-    human turns and return '' here. Callers render them as events instead, so [U#] counts
-    the same turns the dashboard's user_turn_count does.
+    ``tool_result`` blocks are skipped rather than disqualifying the record. A record can
+    carry both a tool result and something the person typed, and the typed part is still
+    theirs; callers that care about the tool result read the blocks themselves.
+    """
+    content = (row.get('message') or {}).get('content')
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') == 'text':
+                parts.append(strip_leading_reminders(block.get('text') or ''))
+            elif block.get('type') == 'image':
+                parts.append('[image]')
+        return joiner.join(part for part in parts if part).strip()
+    return strip_leading_reminders(content) if isinstance(content, str) else ''
+
+
+def anchored_user_text(row):
+    """The text of a human turn, or '' when this record is not one.
+
+    This is the one rule for "did a person say this, and did the model receive it". The
+    reader's `user` turns, the card's `user_turn_count`, the history index's `user_turn`
+    and the anchored transcript's [U#] all ask it, so they cannot drift apart again.
+
+    Not a human turn, and '' here:
+    - anything the client marks ``isMeta`` - it wrote that record itself: a skill body, the
+      "[Image: source: ...]" note that follows a pasted image, hook feedback, a message
+      relayed from another session;
+    - the user-role pseudo-messages in ``is_system_user_string``: a background-task notice,
+      bash-mode output, a teammate report, a slash-command injection, an interrupt marker;
+    - a record holding nothing but tool results.
+
+    A human turn, even though it has no typed words: a message that is only an image.
     """
     row = normalize_record(row)
     if row.get('type') != 'user' or row.get('isMeta'):
         return ''
-    content = (row.get('message') or {}).get('content')
-    if isinstance(content, list):
-        if any(isinstance(block, dict) and block.get('type') == 'tool_result' for block in content):
-            return ''
-        text = ' '.join(
-            strip_leading_reminders(block.get('text', ''))
-            if isinstance(block, dict) and block.get('type') == 'text' else
-            '[image]' if isinstance(block, dict) and block.get('type') == 'image' else ''
-            for block in content).strip()
-    else:
-        text = strip_leading_reminders(content or '')
-    return '' if is_system_user_string(text.lstrip()) else text
+    text = user_record_text(row)
+    if not text.strip() or is_system_user_string(text.lstrip()):
+        return ''
+    return text

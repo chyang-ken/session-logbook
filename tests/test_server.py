@@ -1068,7 +1068,7 @@ class TestSkillToolBody(unittest.TestCase):
                 {"type": "user", "message": {"role": "user", "content": [{
                     "type": "text",
                     "text": "Base directory for this skill: /x/.claude/skills/web-access\n\n# web-access Skill\n...",
-                }]}},
+                }]}, "isMeta": True},
             ])
             conv = server.extract_conversation(path)
             users = [t for t in conv["turns"] if t["type"] == "user"]
@@ -1087,7 +1087,7 @@ class TestSkillToolBody(unittest.TestCase):
                 {"type": "user", "message": {"role": "user", "content": [{
                     "type": "text",
                     "text": "Base directory for this skill: /x/.claude/skills/web-access\n\n# body...",
-                }]}},
+                }]}, "isMeta": True},
             ])
             conv = server.extract_conversation(path)
             users = [t for t in conv["turns"] if t["type"] == "user"]
@@ -1115,7 +1115,7 @@ class TestSkillToolBody(unittest.TestCase):
             path = self._write_session(Path(td), [
                 {"type": "user", "message": {"role": "user", "content": [{
                     "type": "text", "text": "Continue from where you left off.",
-                }]}},
+                }]}, "isMeta": True},
             ])
             conv = server.extract_conversation(path)
             users = [t for t in conv["turns"] if t["type"] == "user"]
@@ -1139,7 +1139,7 @@ class TestSkillToolBody(unittest.TestCase):
                 }]}},
                 {"type": "user", "message": {"role": "user", "content": [{
                     "type": "text", "text": "any text here that is the skill body",
-                }]}},
+                }]}, "isMeta": True},
             ])
             conv = server.extract_conversation(path)
             self.assertEqual(

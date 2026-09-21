@@ -32,7 +32,7 @@ import json
 import re
 from datetime import datetime, timezone
 from sources import claude_events
-from sources.claude_text import strip_leading_reminders, anchored_user_text
+from sources.claude_text import strip_leading_reminders, anchored_user_text, user_record_text
 
 
 def trunc(s, n):
@@ -351,30 +351,31 @@ def render_claude(path, records=None) -> str:
         if t == 'user':
             msg = o.get('message') or {}
             content = msg.get('content')
-            if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content):
-                for b in content:
-                    if isinstance(b, dict) and b.get('type') == 'tool_result':
-                        is_error = bool(b.get('is_error'))
-                        status = 'ERROR' if is_error else 'OK'
-                        txt = _result_index(_result_text(b.get('content')), is_error)
-                        o_lines.append(f"[L{ln}]   ⮑ TOOL_RESULT {status}{side}: {txt}")
-            else:
-                txt = anchored_user_text(o)
-                if not txt.strip():
-                    # Pseudo-messages the harness files under the user role keep their
-                    # content but lose their [U#]: a delivered task notice is still worth
-                    # reading, and still is not something the person said.
-                    raw = strip_leading_reminders(content) if isinstance(content, str) else ''
-                    event = claude_events.parse_system_user_event(raw.lstrip()) if raw else None
-                    if event is not None:
-                        kind = {'system_notification': 'TASK_NOTIFICATION',
-                                'bash_output': 'BASH_OUTPUT'}.get(event['type'], 'TEAMMATE_MESSAGE')
-                        o_lines.append(f"[L{ln}]   ⚠ EVENT{side} {kind}: {trunc(event['text'], 300)}")
-                    continue
-                uturn = o.get('_logbook_user_turn', uturn + 1)
-                o_lines.append("")
-                o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts}{side} ━━━━━━━━━━")
-                o_lines.append(str(txt))
+            for b in (content if isinstance(content, list) else ()):
+                if isinstance(b, dict) and b.get('type') == 'tool_result':
+                    is_error = bool(b.get('is_error'))
+                    status = 'ERROR' if is_error else 'OK'
+                    txt = _result_index(_result_text(b.get('content')), is_error)
+                    o_lines.append(f"[L{ln}]   ⮑ TOOL_RESULT {status}{side}: {txt}")
+            # One rule decides a human turn, for the reader, the card count and this banner
+            # alike. A record may hold a tool result and typed text; the text keeps its [U#].
+            txt = anchored_user_text(o)
+            if not txt:
+                # Pseudo-messages the harness files under the user role keep their
+                # content but lose their [U#]: a delivered task notice or an interrupt is
+                # still worth reading, and still is not something the person said.
+                raw = user_record_text(o)
+                event = claude_events.parse_system_user_event(raw.lstrip()) if raw else None
+                if event is not None:
+                    kind = ('INTERRUPTED' if event.get('kind') == 'interrupt' else
+                            {'system_notification': 'TASK_NOTIFICATION',
+                             'bash_output': 'BASH_OUTPUT'}.get(event['type'], 'TEAMMATE_MESSAGE'))
+                    o_lines.append(f"[L{ln}]   ⚠ EVENT{side} {kind}: {trunc(event['text'], 300)}")
+                continue
+            uturn = o.get('_logbook_user_turn', uturn + 1)
+            o_lines.append("")
+            o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts}{side} ━━━━━━━━━━")
+            o_lines.append(str(txt))
         elif t == 'assistant':
             msg = o.get('message') or {}
             for b in (msg.get('content') or []):
