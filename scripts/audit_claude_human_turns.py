@@ -159,8 +159,14 @@ def audit(path):
         if key != 'RACS':
             shapes[(key, shape(rows.get(line, {})))] += 1
     summaries = {line for line, record in rows.items() if record.get('isCompactSummary')}
+    # The rule trusts the client's flag. A client that stops setting it would turn every
+    # summary back into a human turn in all four consumers at once, which no comparison
+    # between them can see - so count the records that read like one and lack the flag.
+    unflagged = sum(1 for line, record in rows.items() if line not in summaries
+                    and shape(record).endswith('compaction summary'))
     return {'shapes': shapes, 'quoted': quoted, 'turns': len(turns), 'wordless': len(wordless),
             'summaries': len(summaries), 'summary_turns': len(summaries & turns),
+            'unflagged': unflagged,
             'disagrees': bool(shapes)}
 
 
@@ -183,7 +189,7 @@ def main():
         files = sorted(str(p) for p in Path(args.root).expanduser().glob('*/*.jsonl'))
     shapes, sessions = collections.Counter(), collections.Counter()
     errors, disagreeing, quoted, turns = collections.Counter(), 0, 0, 0
-    wordless, summaries, summary_turns = 0, 0, 0
+    wordless, summaries, summary_turns, unflagged = 0, 0, 0, 0
     from multiprocessing import Pool
     with Pool(args.workers) as pool:
         for result in pool.imap_unordered(_work, files, chunksize=8):
@@ -198,12 +204,14 @@ def main():
             wordless += result['wordless']
             summaries += result['summaries']
             summary_turns += result['summary_turns']
+            unflagged += result['unflagged']
     print('sessions read: %d   unreadable: %s' % (len(files) - sum(errors.values()), dict(errors) or 0))
     print('records any consumer calls a human turn: %d' % turns)
     print('sessions where the four consumers disagree: %d' % disagreeing)
     print('human turns with no typed words (image only), so nothing for S to carry: %d' % wordless)
     print('compaction summaries: %d   of which a consumer calls a human turn: %d'
           % (summaries, summary_turns))
+    print('records that open like a compaction summary but lack the flag (expected 0): %d' % unflagged)
     print('banner-shaped lines that are quoted text, not banners: %d' % quoted)
     if shapes:
         print('\nR = reader user turn, A = anchored [U#], C = card count, S = message stream / search'
