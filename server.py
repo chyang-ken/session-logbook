@@ -20,8 +20,8 @@ from sources import antigravity as ag_source
 from sources import anchored_transcript
 from sources import claude_events
 from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
-                                 anchored_user_text, is_system_user_string, normalize_record,
-                                 strip_leading_reminders)
+                                 anchored_user_text, human_turn_words, is_system_user_string,
+                                 normalize_record, strip_leading_reminders)
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
 from sources import codex as codex_source
@@ -53,7 +53,11 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 # either one alone is wrong for the other, so the combined build takes a number of its own.
 # 14: user_turn_count / single_turn follow the shared human-turn rule in sources/claude_text.py
 # (an interrupt marker no longer counts; an image-only message and reminder-wrapped text do).
-CACHE_SCHEMA_VERSION = 14
+# 15: a compaction summary (`isCompactSummary`) is no longer a human turn, which moves
+# user_turn_count / single_turn; and the card previews (first message, recent_msgs) ask the
+# same record-level rule, so a harness note or a summary leaves them and a message with a
+# picture attached enters them.
+CACHE_SCHEMA_VERSION = 15
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -425,28 +429,11 @@ _SYSTEM_USER_PREFIXES_EVENT = SYSTEM_USER_PREFIXES_EVENT
 _is_system_user_string = is_system_user_string
 
 
-def _user_text(content):
-    """Return human text, including reminder-prefixed desktop text blocks.
-    Also skip slash-command injections and system-side pseudo-user messages such as
-    task-notification / bash output / teammate.
-    """
-    if isinstance(content, list):
-        # Recover reminder-prefixed text blocks without reclassifying ordinary
-        # skill-body arrays or tool-result records as human input.
-        blocks = [b for b in content if isinstance(b, dict)]
-        if any(b.get("type") == "tool_result" for b in blocks):
-            return ""
-        texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
-        if not any(t.lstrip().startswith("<system-reminder>") for t in texts):
-            return ""
-        content = "\n".join(strip_leading_reminders(t) for t in texts).strip()
-    if isinstance(content, str):
-        content = strip_leading_reminders(content)
-        stripped = content.lstrip()
-        if _is_system_user_string(stripped):
-            return ""
-        return content
-    return ""
+# There is deliberately no helper here that takes message *content*. Whether a person said
+# something is decided by the record (`isMeta`, `isCompactSummary`, the record type), and a
+# function handed only the content cannot see any of it: that is how hook feedback reached a
+# card preview, and how a message with a picture attached went missing from search. Previews
+# ask `anchored_user_text(record)`; search asks `human_turn_words(record)`.
 
 
 def _truncate(text: str, n: int) -> str:
@@ -459,7 +446,7 @@ def _truncate(text: str, n: int) -> str:
 
 
 def _extract_first_user_msg(f):
-    """Read forward from the file head and return the first user message with string content. f is at the start."""
+    """Read forward from the file head and return the first human turn. f is at the start."""
     for _ in range(500):  # scan at most 500 lines to avoid an oversized head
         line = f.readline()
         if not line:
@@ -468,15 +455,14 @@ def _extract_first_user_msg(f):
             d = normalize_record(json.loads(line))
         except Exception:
             continue
-        if d.get("type") == "user":
-            text = _user_text(d.get("message", {}).get("content"))
-            if text:
-                return {
-                    "role": "user",
-                    "text": _truncate(text, SNIPPET_MAX),
-                    "ts": d.get("timestamp"),
-                    "is_first": True,
-                }
+        text = anchored_user_text(d)
+        if text:
+            return {
+                "role": "user",
+                "text": _truncate(text, SNIPPET_MAX),
+                "ts": d.get("timestamp"),
+                "is_first": True,
+            }
     return None
 
 
@@ -886,9 +872,9 @@ def extract_metadata(jsonl_path: Path):
             rows = [row for _, row in claude_history.records(jsonl_path)]
             lines = [json.dumps(row) for row in rows]
             first_user_msg = next(({'role': 'user',
-                'text': _truncate(_user_text(row.get('message', {}).get('content')), SNIPPET_MAX),
+                'text': _truncate(anchored_user_text(row), SNIPPET_MAX),
                 'ts': row.get('timestamp')} for row in rows
-                if row.get('type') == 'user' and _user_text(row.get('message', {}).get('content'))), None)
+                if anchored_user_text(row)), None)
 
     # Count real user turns to detect claude -p one-shot sessions, which have only the head
     # user message. When tail covers the whole file (size <= TAIL_BUFFER), the count is exact;
@@ -949,7 +935,7 @@ def extract_metadata(jsonl_path: Path):
                     "ts": d.get("timestamp"),
                 })
         elif t == "user" and len(tail_users) < RECENT_USER_N:
-            text = _user_text(d.get("message", {}).get("content"))
+            text = anchored_user_text(d)
             if text:
                 tail_users.append({
                     "role": "user",
@@ -1395,6 +1381,17 @@ def extract_conversation(jsonl_path, include_rewound=False):
                 })
 
         elif t == 'user':
+            summary = claude_events.compact_summary_text(d)
+            if summary is not None:
+                # The client's account of the turns it compacted away. Not a `user` turn -
+                # nobody said it - and not a one-line event either: it is the only record
+                # of what the agent still knew afterwards, so the reader keeps it, folded.
+                turns.append({'type': 'compact_summary',
+                              'text': _truncate_conv(summary, CONV_USER_MAX),
+                              'ts': ts})
+                next_is_skill = False
+                pending_skill_body = False
+                continue
             msg_content = d.get('message', {}).get('content')
             if isinstance(msg_content, str):
                 text = strip_leading_reminders(msg_content).strip()
@@ -1629,6 +1626,13 @@ def extract_transcript(jsonl_path: Path) -> str:
                 out_blocks.append('## ASSISTANT\n' + '\n'.join(text_parts) + '\n')
 
         elif t == 'user':
+            summary = claude_events.compact_summary_text(d)
+            if summary is not None:
+                # The client's account of the turns it compacted away: kept whole, as the
+                # export keeps every message, and labelled as what it is rather than USER.
+                out_blocks.append('## COMPACTION SUMMARY\n%s\n' % summary)
+                next_is_skill = False
+                continue
             msg_content = d.get('message', {}).get('content')
             if isinstance(msg_content, str):
                 text = strip_leading_reminders(msg_content).strip()
@@ -2512,7 +2516,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                         _record_queued_hit(queued, terms, term_found, queued_hits)
                     continue
                 if t == "user":
-                    text = _user_text(d.get("message", {}).get("content"))
+                    text = human_turn_words(d)
                 elif t == "assistant":
                     text = _assistant_text(d.get("message", {}).get("content"))
                 elif t == "response_item":

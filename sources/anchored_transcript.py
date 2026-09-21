@@ -348,6 +348,16 @@ def render_claude(path, records=None) -> str:
                            + claude_events.parse_task_notification(notification))
             continue
 
+        summary = claude_events.compact_summary_text(o)
+        if summary is not None:
+            # The client's own account of the turns it compacted away. Kept whole, because
+            # a compaction can start a new file and then this is the only record in it of
+            # what came before; but it takes no [U#], because nobody said it.
+            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} COMPACTION_SUMMARY "
+                           f"(written by the client, {len(summary)} chars):")
+            o_lines.append(summary)
+            continue
+
         if t == 'user':
             msg = o.get('message') or {}
             content = msg.get('content')

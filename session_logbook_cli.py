@@ -22,6 +22,7 @@ from sources.activity import activity_time
 from sources import anchored_transcript, session_identity, codex_history, claude_history
 from sources import antigravity as ag_source
 from sources import claude_events
+from sources.claude_text import human_turn_words
 from sources import codex as codex_source
 from sources import devin as devin_source
 from sources import kimi as kimi_source
@@ -223,7 +224,9 @@ def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
             return None, ""
         kind = row.get("type")
         if kind == "user":
-            return "user", server._user_text((row.get("message") or {}).get("content"))
+            # The record-level rule, not a reading of the content alone: a compaction
+            # summary or a harness note is not something the person said.
+            return "user", human_turn_words(row)
         if kind == "assistant":
             return "assistant", server._assistant_text((row.get("message") or {}).get("content"))
         return None, ""

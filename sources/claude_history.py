@@ -19,7 +19,9 @@ from sources.claude_text import anchored_user_text, normalize_record
 # would keep feeding [U#] the old numbering, so the bump forces a rebuild.
 # 7: `user_turn` stopped counting the interrupt marker the client writes on Esc, and started
 # counting typed text that shares a record with a tool result. Same reason to rebuild.
-SCHEMA = 7
+# 8: `user_turn` stopped counting the summary the client writes at a compaction
+# (`isCompactSummary`), so [U#] moves down by one after every compaction in a Session.
+SCHEMA = 8
 _MEMORY = {}
 
 

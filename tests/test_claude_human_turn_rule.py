@@ -267,9 +267,9 @@ class HumanTurnRuleTests(unittest.TestCase):
     def test_a_history_cache_written_under_the_previous_schema_is_rebuilt(self):
         path = self.write([user('Start the work', 1), user(text(INTERRUPT), 2),
                            user('Carry on', 3)])
-        self.assertEqual(claude_history.SCHEMA, 7)
+        self.assertEqual(claude_history.SCHEMA, 8)
         list(claude_history.records(path))
-        with patch.object(claude_history, 'SCHEMA', 6):
+        with patch.object(claude_history, 'SCHEMA', 7):
             claude_history._MEMORY.clear()
             with patch.object(claude_history, 'anchored_user_text', lambda row: 'x'):
                 stale = [r['_logbook_user_turn'] for _, r in claude_history.records(path)]
