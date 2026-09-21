@@ -790,8 +790,24 @@ def _observe_codex(path, args):
     return result
 
 
+def _line_ranges(lines) -> str:
+    """Render sorted physical lines as compact anchors: L5-L9, L14."""
+    spans, start, prev = [], None, None
+    for line in lines:
+        if start is None:
+            start = prev = line
+        elif line == prev + 1:
+            prev = line
+        else:
+            spans.append((start, prev))
+            start = prev = line
+    if start is not None:
+        spans.append((start, prev))
+    return ", ".join(f"L{a}" if a == b else f"L{a}-L{b}" for a, b in spans) or "none"
+
+
 def render_context(path: Path, after_line: int = 0, historical_terminal: bool = False,
-                   cursor_source_path=None, target=None) -> str:
+                   cursor_source_path=None, target=None, delta: bool = False) -> str:
     item = session_metadata(path)
     if item["source"] == "codex":
         return _codex_context(path, after_line, cursor_source_path, historical_terminal)
@@ -808,7 +824,21 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     claude_selection = claude_history.rewind_status(path) if item['source'] == 'claude' else {}
     full_claude_branch = (item['source'] == 'claude' and
                           claude_selection.get('reason') != 'missing_leaf_pointer')
-    if full_claude_branch:
+    facts = conversation_facts(item, target)
+    # Opt-in for readers that keep their own cursor: return only the cursor onward and
+    # name the earlier anchors a rewind removed, instead of the whole branch to diff.
+    delta_requested = bool(delta) and full_claude_branch and after_line > 0
+    # A conversation id names the conversation's current record, which is not necessarily
+    # the record the caller read last, and a bare line number carries no file identity.
+    # Applying it to a different transcript would silently skip lines this reader never saw,
+    # so return the full selected branch instead and say why. Naming the cursor's own record
+    # with --cursor-source-path maps it explicitly, and delta applies again.
+    cursor_unattributed = bool(delta_requested and not cursor_source_path
+                               and facts.get("resolved_from_conversation_id")
+                               and len(facts.get("conversation_records") or []) > 1)
+    delta_mode = delta_requested and not cursor_unattributed
+    removed = claude_history.hidden_lines(path, after_line) if delta_mode else None
+    if full_claude_branch and not delta_mode:
         after_line = 0
     total_lines = (claude_history.summary(path)['physical_lines'] if item["source"] == "claude"
                    else _line_count(path))
@@ -827,7 +857,6 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     if item["source"] not in {"pi", "claude"}:
         body = _filter_from_cursor_line(body, after_line)
     header = anchored_transcript.digest_header(path.resolve(), item["source"])
-    facts = conversation_facts(item, target)
     records = " ".join(
         f"{record['id']}{'*' if record.get('is_current') else ''}"
         f"{'(' + record['relation'] + ')' if record.get('relation') else ''}"
@@ -847,7 +876,20 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
         *(['# FOLLOW_MODE: full selected branch; reconcile removed entries after rewind'
            if claude_selection.get('evidence') else
            '# FOLLOW_MODE: full saved history; selected branch unverified, reconcile previous context']
-          if full_claude_branch else []),
+          if full_claude_branch and not delta_mode else []),
+        *(['# FOLLOW_MODE: delta from cursor; selected branch verified',
+           f'# REMOVED_BEFORE_CURSOR: {_line_ranges(removed)}']
+          if delta_mode and removed is not None else []),
+        *([f"# FOLLOW_MODE: delta from cursor; selected branch unverified ({claude_selection.get('reason')}), "
+           'every saved record is kept, so removed entries cannot be determined',
+           '# REMOVED_BEFORE_CURSOR: unknown']
+          if delta_mode and removed is None else []),
+        *(['# DELTA_NOT_APPLIED: the target was given as a conversation id, the conversation '
+           f"has several records and the current one is {facts.get('conversation_current_id')}, "
+           'so a bare cursor cannot be attributed to this transcript; the full selected branch '
+           'is returned instead. Re-run with --cursor-source-path naming the record the cursor '
+           'came from to get the delta.']
+          if cursor_unattributed else []),
         *(['# FOLLOW_MODE: full selected branch (Pi can change branches)'] if item["source"] == "pi" else []),
         f"# REPEATED_CURSOR_LINE: {'L' + str(after_line) if after_line and item['source'] != 'pi' else 'none'}",
         f"# NEXT_CURSOR: L{total_lines}",
@@ -961,6 +1003,11 @@ def parse_args(argv=None):
     )
 
     follow.add_argument("--cursor-source-path")
+    follow.add_argument(
+        "--delta", action="store_true",
+        help="Claude only: return the cursor onward plus the earlier anchors a rewind removed, "
+             "instead of the full selected branch",
+    )
 
     status = sub.add_parser("status", help="report observed transcript state")
     _add_target_filters(status)
@@ -1057,7 +1104,8 @@ def main(argv=None) -> int:
         elif args.command in {"context", "follow"}:
             print(render_context(path, after_line=args.after_line,
                                  cursor_source_path=args.cursor_source_path,
-                                 target=target))
+                                 target=target,
+                                 delta=getattr(args, "delta", False)))
         elif args.command == "status":
             _print_json(status_for(path))
         elif args.command == "observe":

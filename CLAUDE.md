@@ -167,7 +167,7 @@ transcripts remain read-only. Semantic judgments belong to the consuming Agent.
 |---|---|
 | `locate <target>` | Resolve a Session ID, a conversation ID, an exact JSONL path, or a bounded search query |
 | `context <target>` | Emit the standard anchored transcript plus the next line cursor |
-| `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record |
+| `follow <target> --cursor-line N` | Emit from the previous cursor, repeating line N once to avoid missing a half-written record. Claude returns the full selected branch; `--delta` returns only the cursor onward plus the earlier anchors a rewind removed |
 | `status <target>` | Report observed file/session metadata without guessing process liveness |
 | `observe <target>` | Return runtime facts and conversation with independent cursors (Devin excluded) |
 | `evidence <target> --line N` | Read bounded raw JSONL source around an anchor |
@@ -181,6 +181,12 @@ that record, always. A conversation ID resolves to that conversation's current r
 silently. `locate` / `status` / `search` / `recent` also report `conversation_id` and, on `status`, the
 per-record `conversation_runtime_observations` (runtime events are unioned at read time and
 never re-keyed).
+
+A cursor belongs to one physical record. `follow --delta` against a **conversation** ID whose
+conversation has several records therefore needs `--cursor-source-path` to say which record the
+cursor came from; without it the command returns the full selected branch and prints
+`# DELTA_NOT_APPLIED:` rather than counting a bare line number against a transcript it may not
+have come from.
 
 The single packaged Skill is `skills/session-logbook/`. It routes Agent requests to this CLI;
 do not add separate find/read/compress Skills or duplicate source parsing in Skill instructions.

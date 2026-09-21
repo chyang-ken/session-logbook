@@ -63,6 +63,59 @@ class RewindIntegrationTests(unittest.TestCase):
         self.assertNotIn('Abandoned answer', text)
         self.assertIn('# NEXT_CURSOR: L4', text)
 
+    def follow(self, after_line, delta=True):
+        with patch.object(cli, 'session_metadata', return_value={
+                'id': SID, 'source': 'claude', 'project_path': '/Users/alice/my-app'}):
+            return cli.render_context(self.path, after_line=after_line, delta=delta)
+
+    def test_delta_follow_returns_only_the_cursor_onward_and_names_removed_anchors(self):
+        text = self.follow(3)
+        self.assertIn('# FOLLOW_MODE: delta from cursor; selected branch verified', text)
+        self.assertIn('# REMOVED_BEFORE_CURSOR: L2', text)
+        self.assertIn('Current answer', text)
+        self.assertNotIn('Start', text)
+        self.assertNotIn('Abandoned answer', text)
+        self.assertIn('# NEXT_CURSOR: L4', text)
+
+    def test_delta_follow_reports_a_rewind_that_happens_after_the_cursor_was_taken(self):
+        # The reader consumed L1-L4, including "Current answer" at L3. The user then rewinds
+        # to the start and takes another branch; L3 must be named as removed.
+        with self.path.open('a') as stream:
+            stream.write(json.dumps(self.message('third', 'start', 'Replacement answer', 'assistant')) + '\n')
+            stream.write(json.dumps({'type': 'last-prompt', 'leafUuid': 'third', 'sessionId': SID}) + '\n')
+        text = self.follow(4)
+        self.assertIn('# REMOVED_BEFORE_CURSOR: L2-L3', text)
+        self.assertIn('Replacement answer', text)
+        self.assertNotIn('Current answer', text)
+        self.assertIn('# NEXT_CURSOR: L6', text)
+
+    def test_delta_follow_without_rewind_reports_nothing_removed(self):
+        self.path.write_text(''.join(json.dumps(row) + '\n' for row in [
+            self.message('start', None, 'Start'),
+            self.message('reply', 'start', 'First answer', 'assistant'),
+            {'type': 'last-prompt', 'leafUuid': 'reply', 'sessionId': SID},
+            self.message('next', 'reply', 'Follow-up question'),
+        ]))
+        text = self.follow(3)
+        self.assertIn('# REMOVED_BEFORE_CURSOR: none', text)
+        self.assertIn('Follow-up question', text)
+        self.assertNotIn('First answer', text)
+
+    def test_delta_follow_says_unknown_when_the_branch_is_unverified(self):
+        with self.path.open('a') as stream:
+            stream.write(json.dumps(self.message('broken', 'missing', 'Partial history')) + '\n')
+        text = self.follow(4)
+        self.assertIn('delta from cursor; selected branch unverified (missing_parent_record)', text)
+        self.assertIn('# REMOVED_BEFORE_CURSOR: unknown', text)
+        self.assertIn('Partial history', text)
+        self.assertNotIn('Abandoned answer', text)
+
+    def test_delta_is_opt_in_and_a_zero_cursor_still_returns_everything(self):
+        self.assertIn('full selected branch', self.follow(3, delta=False))
+        first = self.follow(0)
+        self.assertNotIn('delta from cursor', first)
+        self.assertIn('Start', first)
+
     def test_follow_reconciles_when_branch_becomes_unverified(self):
         with self.path.open('a') as stream:
             stream.write(json.dumps(self.message('broken', 'missing', 'Partial history')) + '\n')
