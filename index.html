@@ -4192,6 +4192,11 @@ function renderConv(data, meta) {
   // fields above, which only ever describe Claude records — so the two never both fire.
   const codexFork = data.forked_from;
   const codexForkHtml = codexFork?.session_id ? `<div class="conv-rewind-record">Forked from <a href="/?session=${encodeURIComponent(codexFork.session_id)}" target="_blank" rel="noopener">${escapeHtml(codexFork.session_id)}</a>${Number.isInteger(codexFork.ordinal_exclusive) ? ` at record ${codexFork.ordinal_exclusive}` : ''}. Earlier turns belong to that session.</div>` : '';
+  // A Codex sub-agent is a session Codex started for another session, not a branch of it:
+  // this file is its whole record. Name the session that spawned it so the relationship is
+  // visible, and never as a warning — nothing is missing here.
+  const codexSpawn = data.spawned_from;
+  const codexSpawnHtml = codexSpawn ? `<div class="conv-rewind-record">Sub-agent session started by ${codexSpawn.parent_session_id ? `<a href="/?session=${encodeURIComponent(codexSpawn.parent_session_id)}" target="_blank" rel="noopener">${escapeHtml(codexSpawn.parent_session_id)}</a>` : 'a session Codex did not record'}. It is a session of its own and this is its full transcript.</div>` : '';
   const historicalView = !!data.include_rewound;
   const currentUrl = `/?session=${encodeURIComponent(convCurrentId || data.id)}`;
   const recordLinks = convRecords.length > 1 ? convRecords.map(r => {
@@ -4241,6 +4246,7 @@ function renderConv(data, meta) {
         ${abandonedHtml}
         ${localMetadataHtml}
         ${codexForkHtml}
+        ${codexSpawnHtml}
         ${rewindHtml}
         ${data.context_complete === false ? `<details class="conv-meta"><summary role="alert">Conversation history is incomplete — some earlier context is unavailable.</summary><pre>${escapeHtml(JSON.stringify(data.history_issues || [], null, 2))}</pre></details>` : ''}
       </div>

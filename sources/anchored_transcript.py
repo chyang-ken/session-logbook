@@ -80,12 +80,19 @@ def digest_header(jsonl_path, source="claude", source_files=None) -> str:
         lines += ['# EFFECTIVE HISTORY SOURCES:']
         lines += [f"# {f['relation']}: {f['path']} L{f['first_line']}-L{f['last_line']} (session {f['session_id']})" for f in files]
         lines += ['# A source file path is not the stable Session ID; inherited sources belong to their own session.']
-        forked = codex_history.fork_lineage(codex._read_session_meta(jsonl_path))
+        meta = codex._read_session_meta(jsonl_path)
+        forked = codex_history.fork_lineage(meta)
         if forked:
             at = forked['ordinal_exclusive']
             lines += ['# FORKED FROM SESSION: ' + forked['session_id'] +
                       (' at ordinal ' + str(at) if at is not None else ' (fork point not recorded)'),
                       '# This session branched off that one. Records before the fork point belong to it.']
+        spawned = codex_history.spawn_lineage(meta)
+        if spawned:
+            parent = spawned['parent_session_id']
+            lines += ['# SPAWNED BY SESSION: ' + (parent or 'unrecorded'),
+                      '# This is a sub-agent thread Codex started for that session. It is a session of'
+                      ' its own and this file is its whole record; nothing is inherited from elsewhere.']
     if source == 'claude' and Path(jsonl_path).is_file():
         from sources import claude_history
         info = claude_history.describe(jsonl_path)
