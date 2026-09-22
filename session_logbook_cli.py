@@ -1126,6 +1126,10 @@ def build_parser():
                          help="the record these cursors came from; all of them must name the "
                               "same one")
 
+    observe.add_argument("--delta", action="store_true",
+                         help="return verified Claude conversation changes and removed line anchors; "
+                              "otherwise retain the full-branch fallback")
+
     evidence = sub.add_parser("evidence", help="read source lines or Devin database nodes around an anchor")
     _add_target_filters(evidence)
     evidence.add_argument("--line", type=int, required=True, metavar="N",
@@ -1258,6 +1262,22 @@ def main(argv=None) -> int:
                 # Claude has no native event stream; do not transplant its old line.
                 native_cursor = 0
 
+            delta_requested = bool(args.delta and item['source'] == 'claude')
+            before_stat = path.stat() if delta_requested else None
+            removed = None
+            if delta_requested and not source_changed and conversation_cursor > 0:
+                facts = conversation_facts(item, target)
+                attributed = bool(args.cursor_source_path or not (
+                    facts.get('resolved_from_conversation_id') and
+                    len(facts.get('conversation_records') or []) > 1))
+                if attributed:
+                    removed = claude_history.hidden_lines(path, conversation_cursor)
+            delta_mode = removed is not None
+            conversation = render_context(
+                path, after_line=conversation_cursor, historical_terminal=True,
+                target=target, cursor_source_path=path if args.cursor_source_path else None,
+                delta=delta_mode)
+
             native = runtime_events.native_events(path, item["source"], native_cursor, args.limit)
             result = {
                 "source": item["source"], "session_id": item.get("id"),
@@ -1265,8 +1285,7 @@ def main(argv=None) -> int:
                 "hooks": runtime_events.read(item["source"], item.get("id"),
                                              0 if session_changed else args.event_cursor, args.limit),
                 "native": native,
-                "conversation": render_context(path, after_line=conversation_cursor,
-                                               historical_terminal=True),
+                "conversation": conversation,
                 "interpretation": "Events are observations, not proof of task success. "
                                   "Use turn identities and conversation evidence. Missing events "
                                   "do not establish liveness or completion.",
@@ -1278,6 +1297,11 @@ def main(argv=None) -> int:
                         'full_selected_branch' if result['rewind'].get('evidence')
                         else 'full_saved_history_unverified')
                     result['conversation_reconciliation_required'] = True
+                if delta_mode:
+                    result['conversation_follow_mode'] = 'delta_selected_branch'
+                    result['conversation_reconciliation_required'] = False
+                    result['conversation_delta_from'] = conversation_cursor
+                    result['conversation_removed_lines'] = removed
                 result['source_changed'] = source_changed
                 result['session_changed'] = session_changed
                 result['conversation_cursor_mapped'] = conversation_cursor
@@ -1285,6 +1309,11 @@ def main(argv=None) -> int:
                     result['cursor_reset_reason'] = 'explicit_session_change'
                     result['cursor_reset_scope'] = ['hooks', 'native', 'turn_identity']
                     result['previous_session_id'] = claude_history.session_id(args.cursor_source_path)
+            if delta_requested:
+                after_stat = path.stat()
+                if ((before_stat.st_ino, before_stat.st_size, before_stat.st_mtime_ns) !=
+                        (after_stat.st_ino, after_stat.st_size, after_stat.st_mtime_ns)):
+                    raise ValueError("history_changed_during_read; retry without advancing cursors")
             _print_json(result)
         elif args.command == "evidence":
             facts = conversation_facts(session_metadata(path), target)

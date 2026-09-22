@@ -16,6 +16,22 @@ These cursors belong to the current source files and journal. If either is repla
 restored, or deleted, discard its saved cursor and start that stream at zero. They
 are not durable identities across storage replacement.
 
+## Opt-in Claude conversation deltas
+
+`observe --delta` keeps Hook and native event cursors unchanged. With a positive,
+source-attributed conversation cursor and a verified Claude branch, it returns
+`conversation_follow_mode: delta_selected_branch`, `conversation_delta_from`, and
+`conversation_removed_lines` (physical lines at or before that cursor). The body
+repeats the cursor line and then includes only newer selected content. Consumers
+must replace that repeated anchor, retire content derived from removed anchors,
+and invalidate any pending decision based on removed content.
+
+The initial read, an unverified branch, an unattributed multi-record conversation,
+and an explicit source switch retain the full-branch reconciliation response.
+A file changed during a delta read is an error; do not advance any cursor. Plain
+`observe` retains its prior contract, and other source types are unchanged.
+This option does not migrate a supervision target or decide whether a task ended.
+
 ## Codex continuation cursors
 
 Codex Desktop can resume the same `session_meta.id` into another rollout. ID lookup
