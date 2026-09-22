@@ -80,8 +80,8 @@ class RewindIntegrationTests(unittest.TestCase):
             return text
         with patch.object(cli, 'render_context', side_effect=changed), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(['observe', str(self.path), '--cursor-line', '3',
-                                      '--delta']), 1)
+            for flags in ([], ['--delta']):
+                self.assertEqual(cli.main(['observe', str(self.path), '--cursor-line', '3'] + flags), 1)
 
     def test_native_controls_exclude_rewound_interruptions_and_peer_messages(self):
         from sources import runtime_events
