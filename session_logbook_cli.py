@@ -1263,7 +1263,7 @@ def main(argv=None) -> int:
                 native_cursor = 0
 
             delta_requested = bool(args.delta and item['source'] == 'claude')
-            before_stat = path.stat() if delta_requested else None
+            before_stat = path.stat() if item['source'] == 'claude' else None
             removed = None
             if delta_requested and not source_changed and conversation_cursor > 0:
                 facts = conversation_facts(item, target)
@@ -1309,7 +1309,7 @@ def main(argv=None) -> int:
                     result['cursor_reset_reason'] = 'explicit_session_change'
                     result['cursor_reset_scope'] = ['hooks', 'native', 'turn_identity']
                     result['previous_session_id'] = claude_history.session_id(args.cursor_source_path)
-            if delta_requested:
+            if before_stat is not None:
                 after_stat = path.stat()
                 if ((before_stat.st_ino, before_stat.st_size, before_stat.st_mtime_ns) !=
                         (after_stat.st_ino, after_stat.st_size, after_stat.st_mtime_ns)):

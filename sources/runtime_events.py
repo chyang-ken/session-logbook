@@ -76,6 +76,43 @@ def read(source, session_id, after=0, limit=50, path=None):
     return result
 
 
+def _claude_user_events(path, after, limit):
+    """Read explicit human input/interruption facts, never infer task completion."""
+    from sources import claude_history, claude_text
+    status = claude_history.rewind_status(path)
+    result = {"events": [], "next_line_cursor": after, "has_more": False,
+              "collection": "selected_history"}
+    if not status.get('evidence') and status.get('reason') != 'missing_leaf_pointer':
+        result['collection'] = 'selected_history_unverified'
+        return result
+    total = claude_history.summary(path)['total_lines']
+    if after > total:
+        raise ValueError('Claude native cursor is beyond current source; reconcile context')
+    if after == total:
+        return result
+    for line, row in claude_history.records(path, first=after + 1):
+        if row.get('isSidechain') or row.get('isMeta') or claude_text.is_compact_summary(row):
+            continue
+        origin = row.get('origin') or (row.get('attachment') or {}).get('origin') or {}
+        if origin.get('kind') not in (None, 'human'):
+            continue
+        if row.get('type') != 'user':
+            continue
+        text = claude_text.user_record_text(row)
+        kind = ('user_interrupted' if claude_text.interrupt_marker_text(text) else
+                'user_input' if claude_text.anchored_user_text(row) else None)
+        if not kind:
+            continue
+        if len(result['events']) == limit:
+            result['has_more'] = True
+            return result
+        result['events'].append({'line': line, 'timestamp': row.get('timestamp'),
+                                 'facts': {'type': kind, 'control_id': row.get('uuid') or str(line)}})
+        result['next_line_cursor'] = line
+    result['next_line_cursor'] = total
+    return result
+
+
 def native_events(path, source, after=0, limit=50):
     """Read complete physical records. Unfinished final lines are retried next time."""
     from sources import codex
@@ -86,6 +123,8 @@ def native_events(path, source, after=0, limit=50):
         after = int(after)
     if after < 0 or not 1 <= limit <= 200:
         raise ValueError("invalid native cursor or limit")
+    if source == 'claude':
+        return _claude_user_events(path, after, limit)
     names = {"codex": {"task_started", "task_complete", "turn_aborted", "error"},
              "kimi": {"turn.prompt", "turn.started", "turn.ended", "turn.cancel"}}
     result = {"events": [], "next_line_cursor": after, "has_more": False}

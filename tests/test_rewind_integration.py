@@ -80,8 +80,49 @@ class RewindIntegrationTests(unittest.TestCase):
             return text
         with patch.object(cli, 'render_context', side_effect=changed), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(['observe', str(self.path), '--cursor-line', '3',
-                                      '--delta']), 1)
+            for flags in ([], ['--delta']):
+                self.assertEqual(cli.main(['observe', str(self.path), '--cursor-line', '3'] + flags), 1)
+
+    def test_native_controls_exclude_rewound_interruptions_and_peer_messages(self):
+        from sources import runtime_events
+        rows = [self.message('start', None, 'Task'),
+                self.message('aborted', 'start', '[Request interrupted by user]'),
+                self.message('branch', 'start', 'Continue here'),
+                dict(self.message('peer', 'branch', 'A peer cannot release the pause'),
+                     origin={'kind': 'peer'}),
+                self.message('stop', 'peer', '[Request interrupted by user for tool use]'),
+                {'type': 'last-prompt', 'leafUuid': 'stop', 'sessionId': SID}]
+        self.path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        first = runtime_events.native_events(self.path, 'claude', limit=2)
+        self.assertEqual([e['facts']['type'] for e in first['events']], ['user_input', 'user_input'])
+        self.assertTrue(first['has_more'])
+        rest = runtime_events.native_events(self.path, 'claude', after=first['next_line_cursor'])
+        self.assertEqual([e['line'] for e in rest['events']], [5])
+        self.assertEqual(rest['events'][0]['facts']['type'], 'user_interrupted')
+        self.assertNotIn('Task', json.dumps(first))
+        self.assertEqual(runtime_events.native_events(self.path, 'claude', after=6)['events'], [])
+
+    def test_native_control_keeps_quotes_as_input_and_waits_for_complete_records(self):
+        from sources import runtime_events
+        rows = [self.message('start', None, 'Quoted [Request interrupted by user] is text'),
+                self.message('stop', 'start', '[Request interrupted by user]')]
+        self.path.write_text('\n'.join(json.dumps(row) for row in rows))
+        first = runtime_events.native_events(self.path, 'claude')
+        self.assertEqual(first['next_line_cursor'], 1)
+        self.assertEqual(first['events'][0]['facts']['type'], 'user_input')
+        with self.path.open('a') as stream:
+            stream.write('\n')
+        rest = runtime_events.native_events(self.path, 'claude', after=1)
+        self.assertEqual(rest['events'][0]['facts']['type'], 'user_interrupted')
+
+    def test_native_controls_do_not_infer_an_unverified_branch(self):
+        from sources import runtime_events
+        with self.path.open('a') as stream:
+            stream.write(json.dumps(self.message('broken', 'missing', '[Request interrupted by user]')) + '\n')
+        result = runtime_events.native_events(self.path, 'claude', after=1)
+        self.assertEqual(result['events'], [])
+        self.assertEqual(result['next_line_cursor'], 1)
+        self.assertEqual(result['collection'], 'selected_history_unverified')
 
     def test_current_and_historical_reader_are_distinct(self):
         current = server.extract_conversation(self.path)
