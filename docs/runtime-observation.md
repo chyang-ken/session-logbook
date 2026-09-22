@@ -32,6 +32,22 @@ A file changed during a delta read is an error; do not advance any cursor. Plain
 `observe` retains its prior contract, and other source types are unchanged.
 This option does not migrate a supervision target or decide whether a task ended.
 
+## Claude user controls
+
+Claude's native stream now exposes only two selected-history facts: `user_input`
+and `user_interrupted`, with a physical line, original timestamp and control ID.
+It reuses the reader's human-turn and exact interruption-marker rules; peer
+messages, sidechains, compaction summaries and rewound records do not count as
+human input. Events have no message body and never assert task completion.
+An unverified selected branch returns no controls and
+`collection: selected_history_unverified`; this is uncertainty, not an empty
+verified history. Native cursors advance only over complete records.
+
+A supervisor can silence an explicit user interruption until a later native
+human input. Late Stop/tool Hooks cannot release that pause. After new input,
+compare its timestamp with Hook `observed_at` before using a prior Stop: an old
+completion cannot complete a new user turn. Keep all three cursors independent.
+
 ## Codex continuation cursors
 
 Codex Desktop can resume the same `session_meta.id` into another rollout. ID lookup

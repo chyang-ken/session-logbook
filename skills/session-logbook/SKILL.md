@@ -273,8 +273,11 @@ back to zero silently or treat an old branch's terminal state as the new session
 `cursor_reset_reason: explicit_session_change` and resets the Hook, native-event,
 and turn-identity namespaces. Its conversation cursor is mapped independently.
 Drain Hook pages via `has_more`, then retain the returned target ID, path and all
-three cursors. Claude currently has no native lifecycle stream; Hooks remain
-observations, not completion proof. No watchlist or supervisor state is changed.
+three cursors. Claude's native stream exposes selected-history `user_input` and `user_interrupted`
+controls, not task completion. Peer messages and rewound records are excluded;
+`selected_history_unverified` means unknown. A later human input can release an
+interruption, but late Stop/tool Hooks cannot. Compare native timestamps with Hook
+`observed_at`; Hooks remain observations, not completion proof. No watchlist or supervisor state is changed.
 
 The optional rebuildable history index stores source coordinates and content hashes,
 not transcript bodies or delivery acknowledgements. Unchanged files reuse the index;
