@@ -1,5 +1,7 @@
 """The reader, preview, and follow agree on selected Claude history."""
 import json
+import io
+import contextlib
 import os
 import tempfile
 import unittest
@@ -35,6 +37,51 @@ class RewindIntegrationTests(unittest.TestCase):
                 'cwd': '/Users/alice/my-app', 'timestamp': '2026-01-01T00:00:00Z',
                 'message': {'role': role, 'content': text if role == 'user' else
                             [{'type': 'text', 'text': text}]}}
+
+    def observe(self, cursor, delta=True):
+        output = io.StringIO()
+        with patch.object(cli, 'session_metadata', return_value={
+                'id': SID, 'source': 'claude', 'project_path': '/Users/alice/my-app'}), \
+             patch('sources.runtime_events.read', return_value={
+                 'next_event_cursor': 9, 'events': [], 'has_more': False}), \
+             contextlib.redirect_stdout(output):
+            code = cli.main(['observe', str(self.path), '--cursor-line', str(cursor),
+                             '--cursor-source-path', str(self.path)] + (['--delta'] if delta else []))
+        self.assertEqual(code, 0)
+        return json.loads(output.getvalue())
+
+    def test_observe_delta_reports_removals_and_keeps_event_cursors(self):
+        result = self.observe(3)
+        self.assertEqual(result['conversation_follow_mode'], 'delta_selected_branch')
+        self.assertFalse(result['conversation_reconciliation_required'])
+        self.assertEqual(result['conversation_removed_lines'], [2])
+        self.assertEqual(result['conversation_delta_from'], 3)
+        self.assertNotIn('Start', result['conversation'])
+        self.assertIn('Current answer', result['conversation'])
+        self.assertEqual(result['hooks']['next_event_cursor'], 9)
+        self.assertEqual(self.observe(3, delta=False)['conversation_follow_mode'], 'full_selected_branch')
+        self.assertEqual(self.observe(0)['conversation_follow_mode'], 'full_selected_branch')
+
+    def test_observe_unverified_branch_falls_back_to_full_context(self):
+        with self.path.open('a') as stream:
+            stream.write(json.dumps(self.message('broken', 'missing', 'Partial history')) + '\n')
+        result = self.observe(4)
+        self.assertEqual(result['conversation_follow_mode'], 'full_saved_history_unverified')
+        self.assertTrue(result['conversation_reconciliation_required'])
+        self.assertNotIn('conversation_removed_lines', result)
+        self.assertIn('Start', result['conversation'])
+
+    def test_observe_delta_rejects_a_concurrently_changed_file(self):
+        render = cli.render_context
+        def changed(*args, **kwargs):
+            text = render(*args, **kwargs)
+            with self.path.open('a') as stream:
+                stream.write('\n')
+            return text
+        with patch.object(cli, 'render_context', side_effect=changed), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(['observe', str(self.path), '--cursor-line', '3',
+                                      '--delta']), 1)
 
     def test_current_and_historical_reader_are_distinct(self):
         current = server.extract_conversation(self.path)

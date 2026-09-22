@@ -52,6 +52,11 @@ python3 scripts/session_logbook.py <command> ...
   It returns Hook facts, native Codex/Kimi lifecycle facts, and anchored conversation.
   Save `transcript_path` and pass it back as `--cursor-source-path`. A reported
   `cursor_reset_reason` requires clearing the old source line and turn state.
+  A stateful Claude consumer may request `observe --delta`. A verified response has
+  `conversation_follow_mode: delta_selected_branch`, `conversation_delta_from`, and
+  `conversation_removed_lines`; replace the repeated cursor anchor and retire removed
+  content and decisions. Full-branch responses still require reconciliation. Other
+  sources keep their existing semantics, and this option never authorizes a target switch.
   Save all three cursors: `hooks.next_event_cursor`, `native.next_line_cursor`, and
   the conversation's `NEXT_CURSOR`. Supply them as `--event-cursor`,
   `--native-line-cursor`, and `--cursor-line` on the next call. Drain `has_more`

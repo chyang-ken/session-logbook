@@ -77,8 +77,13 @@ received.
 
 ## Follow-up
 
-`observe` still returns the full Claude conversation and flags
-`conversation_reconciliation_required`. Giving it the same delta is a separate change.
+`observe` now offers an opt-in `--delta` with structured removal anchors, while
+plain observation retains the full reconciliation contract. Unverified branches,
+source changes and unattributed conversation cursors keep the full response;
+concurrent source writes fail without advancing cursors. The consuming monitor
+can request a full reconciliation when a removed anchor was actually read, rather
+than repeatedly reacting to every historical hidden line. See runtime-observation.md
+and the observe cases in tests/test_rewind_integration.py.
 
 ## Commit
 
