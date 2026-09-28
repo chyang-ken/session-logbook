@@ -22,7 +22,7 @@ from sources.activity import activity_time
 from sources import anchored_transcript, session_identity, codex_history, claude_history
 from sources import antigravity as ag_source
 from sources import claude_events
-from sources.claude_text import human_turn_words
+from sources.claude_text import assistant_search_words, human_turn_words, project_wake_words
 from sources import codex as codex_source
 from sources import devin as devin_source
 from sources import kimi as kimi_source
@@ -228,7 +228,7 @@ def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
             # summary or a harness note is not something the person said.
             return "user", human_turn_words(row)
         if kind == "assistant":
-            return "assistant", server._assistant_text((row.get("message") or {}).get("content"))
+            return "assistant", assistant_search_words((row.get("message") or {}).get("content"))
         return None, ""
 
     if row.get("type") != "response_item":
@@ -281,7 +281,7 @@ def iter_messages(path, source):
     for text, line_numbers in queued.items():
         for line_number in line_numbers:
             if line_number not in unconfirmed:
-                yield line_number, claude_events.QUEUED_INPUT_ROLE, text.strip()
+                yield line_number, claude_events.QUEUED_INPUT_ROLE, project_wake_words(text).strip()
 
 
 def _parse_since(value: Optional[str]) -> Optional[float]:
