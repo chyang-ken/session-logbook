@@ -20,7 +20,8 @@ from sources import antigravity as ag_source
 from sources import anchored_transcript
 from sources import claude_events
 from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
-                                 anchored_user_text, human_turn_words, is_system_user_string,
+                                 anchored_user_text, assistant_search_words, human_turn_words,
+                                 is_system_user_string, project_wake_words,
                                  normalize_record, strip_leading_reminders)
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
@@ -2518,7 +2519,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                 if t == "user":
                     text = human_turn_words(d)
                 elif t == "assistant":
-                    text = _assistant_text(d.get("message", {}).get("content"))
+                    text = assistant_search_words(d.get("message", {}).get("content"))
                 elif t == "response_item":
                     # Codex row: extract message.role=user/assistant text and search it too
                     p = d.get("payload") or {}
@@ -2551,11 +2552,15 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                             prefix = "…" if start > 0 else ""
                             suffix = "…" if end < len(text) else ""
                             role = "you" if t == "user" else ""
-                            snippets.append({
+                            candidate = {
                                 "text": prefix + snippet + suffix,
                                 "role": role,
                                 "term": term,
-                            })
+                            }
+                            # A Project worker that edits its reply repeats the same words;
+                            # one snippet of them is enough.
+                            if candidate not in snippets:
+                                snippets.append(candidate)
                             break  # take one snippet per line
 
                 # Stop early once all terms are found and the snippet quota is full
@@ -2598,7 +2603,7 @@ def _record_queued_hit(queued, terms, term_found, queued_hits):
     the same words, so the session matches on the same terms whichever record is shown.
     The snippet itself waits, because only the end of the file settles which record that is.
     """
-    text = queued.strip()
+    text = project_wake_words(queued).strip()
     lowered = text.lower()
     for term in terms:
         if term in lowered:

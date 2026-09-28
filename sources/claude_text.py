@@ -1,4 +1,5 @@
 """Shared cleanup for Claude's leading environment reminders."""
+import html
 import re
 
 
@@ -128,12 +129,68 @@ def anchored_user_text(row):
     return text
 
 
+# A Claude Project worker is woken by the channel, not by a prompt box. The person's
+# message reaches it as a user record wrapped in an envelope like
+#   <wake reason="mention" ...><project ...><thread ...>
+#     <message from="human" author-id="..." sent-at="..." ...>escaped text</message>
+#   </thread></project></wake>
+# and one record can carry several envelopes. The envelope is transport: its attributes
+# would make every worker match "human" or "mention", and the body is HTML-escaped, so a
+# typed "<" or "&" would not match either. The channel tells the worker that every
+# message in a wake is from the project owner.
+_WAKE_ENVELOPE = re.compile(r"\s*<wake[\s>]")
+_WAKE_MESSAGE = re.compile(r"<message\b[^>]*>(.*?)</message>", re.DOTALL)
+
+
+def project_wake_words(text):
+    """The message bodies inside a Project wake envelope, or the text unchanged."""
+    if not _WAKE_ENVELOPE.match(text or ''):
+        return text
+    bodies = [html.unescape(body).strip() for body in _WAKE_MESSAGE.findall(text)]
+    bodies = [body for body in bodies if body]
+    return '\n\n'.join(bodies) if bodies else text
+
+
 def human_turn_words(row):
     """Only the words the person typed in a human turn, or '' - for matching a search.
 
     The same verdict as :func:`anchored_user_text`, without the ``[image]`` placeholder:
     that word is ours, and a search for "image" must not find it in every pasted picture.
+    A Project wake envelope is reduced to the messages it carries.
     """
     if not anchored_user_text(row):
         return ''
-    return user_record_text(normalize_record(row), image_placeholder='')
+    return project_wake_words(user_record_text(normalize_record(row), image_placeholder=''))
+
+
+# A Project worker answers the person through the channel's tools rather than with a
+# text block: its visible reply is the ``text`` input of these calls, and the text blocks
+# it writes are often just "waiting on the agents". ``send_message`` is left out - it
+# goes to another session, not to the person.
+PROJECT_REPLY_TOOLS = frozenset({
+    'mcp__hearthbot__reply',
+    'mcp__hearthbot__update_message',
+})
+
+
+def assistant_search_words(content):
+    """What the assistant said to the person, for matching a search.
+
+    Text blocks, plus the text a Project worker posted to its channel. Thinking and
+    every other tool call stay out.
+    """
+    if not isinstance(content, list):
+        return ''
+    parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get('type') == 'text':
+            text = block.get('text')
+        elif block.get('type') == 'tool_use' and block.get('name') in PROJECT_REPLY_TOOLS:
+            text = (block.get('input') or {}).get('text')
+        else:
+            continue
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return ' '.join(parts)
