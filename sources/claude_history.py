@@ -21,7 +21,9 @@ from sources.claude_text import anchored_user_text, normalize_record
 # counting typed text that shares a record with a tool result. Same reason to rebuild.
 # 8: `user_turn` stopped counting the summary the client writes at a compaction
 # (`isCompactSummary`), so [U#] moves down by one after every compaction in a Session.
-SCHEMA = 8
+# 9: `user_turn` stopped counting a note a Claude Project's coordinator relayed into the
+# thread (<project_claude_message> / <relay>); it is another agent speaking.
+SCHEMA = 9
 _MEMORY = {}
 
 

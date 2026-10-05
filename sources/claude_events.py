@@ -38,15 +38,17 @@ script. The 2026-09-20 format audit found Chinese prose in machine records and E
 prose in human ones. Every predicate below keys on an explicit structural marker the
 client wrote - a record type, an ``origin.kind``, a ``commandMode``, an XML wrapper.
 """
+import html
 import re
 
-from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
-                                 interrupt_marker_text, is_compact_summary,
-                                 is_system_user_string, user_record_text)
+from sources.claude_text import (PROJECT_RELAY_PREFIXES, SYSTEM_USER_PREFIXES_EVENT,
+                                 SYSTEM_USER_PREFIXES_SKIP, interrupt_marker_text,
+                                 is_compact_summary, is_system_user_string, user_record_text)
 
 __all__ = [
     'enqueued_text', 'delivered_text', 'notification_prompt', 'api_error_label',
-    'parse_task_notification', 'parse_system_user_event', 'extract_inner_xml',
+    'parse_task_notification', 'parse_system_user_event', 'parse_project_relay',
+    'extract_inner_xml',
     'ApiErrorRun', 'QUEUED_INPUT_ROLE', 'compact_summary_text',
 ]
 
@@ -182,6 +184,24 @@ def extract_inner_xml(text, tag):
     return text[start + len(open_tag):end] if end >= 0 else ''
 
 
+_RELAY_SENDER = re.compile(r'<relay\b[^>]*?\bfrom="([^"]*)"')
+
+
+def parse_project_relay(stripped):
+    """A Project coordinator's note as one ``[sender] note`` line of text.
+
+    Only the ``<note>`` body is kept: the wrapper, its session and thread ids and the
+    sentence saying who wrote it are transport, and the sender label says the same thing.
+    The body is HTML-escaped by the channel, as a wake envelope's is.
+    """
+    sender = _RELAY_SENDER.search(stripped)
+    note = extract_inner_xml(stripped, 'note')
+    if not note.strip():
+        note = re.sub(r'<[^>]*>', ' ', stripped)
+    note = html.unescape(note).strip() or '(empty)'
+    return '[%s] %s' % (sender.group(1) if sender else 'coordinator', note)
+
+
 def parse_system_user_event(stripped):
     """A user-role pseudo message as a system event, or ``None`` when it is not one.
 
@@ -201,6 +221,9 @@ def parse_system_user_event(stripped):
         if err:
             parts.append('[stderr] %s' % err)
         return {'type': 'bash_output', 'text': '\n'.join(parts) if parts else '(no output)'}
+    if stripped.startswith(PROJECT_RELAY_PREFIXES):
+        # Another agent speaking into this thread, shown the way a teammate report is.
+        return {'type': 'teammate_message', 'text': parse_project_relay(stripped)}
     if stripped.startswith('<teammate-message'):
         # Attributes may include teammate_id / summary; the body follows the closing >
         head_end = stripped.find('>')

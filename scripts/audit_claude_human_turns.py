@@ -13,7 +13,9 @@ asks four consumers whether that record is a human turn:
 and reports every record where the four do not agree, grouped by the record's shape. A
 turn that is only an image has no words for S to carry; that is expected, it is counted
 apart, and it is not a disagreement. Records the client marks as a compaction summary are
-counted too, with how many of them any consumer still calls a human turn.
+counted too, with how many of them any consumer still calls a human turn; so are the notes
+a Claude Project's coordinator relays into a worker's thread, and the card previews that
+still show a Project envelope instead of the words inside it.
 Agreement is the contract in CLAUDE.md section 2; this is how it is checked against real
 data, which unit fixtures cannot stand in for.
 
@@ -72,7 +74,12 @@ _MARKERS = (
     ('<local-command-', 'local command output'),
     ('<task-notification>', 'task notification'),
     ('This session is being continued', 'compaction summary'),
+    ('<wake', 'project wake envelope'),
+    ('<project_claude_message', 'project coordinator note'),
+    ('<relay ', 'project coordinator note'),
 )
+# What a card preview of the person's words should never start with.
+_ENVELOPES = ('<wake', '<project_claude_message', '<relay ')
 
 
 def _stamped(path, *args, **kwargs):
@@ -164,7 +171,13 @@ def audit(path):
     # between them can see - so count the records that read like one and lack the flag.
     unflagged = sum(1 for line, record in rows.items() if line not in summaries
                     and shape(record).endswith('compaction summary'))
-    return {'shapes': shapes, 'quoted': quoted, 'turns': len(turns), 'wordless': len(wordless),
+    relays = {line for line, record in rows.items()
+              if shape(record).endswith('project coordinator note')}
+    previews = [m.get('text') or '' for m in (server.extract_metadata(path) or {}).get('recent_msgs', [])
+                if m.get('role') == 'user']
+    return {'relays': len(relays), 'relay_turns': len(relays & turns),
+            'wrapped_previews': sum(1 for text in previews if text.lstrip().startswith(_ENVELOPES)),
+            'shapes': shapes, 'quoted': quoted, 'turns': len(turns), 'wordless': len(wordless),
             'summaries': len(summaries), 'summary_turns': len(summaries & turns),
             'unflagged': unflagged,
             'disagrees': bool(shapes)}
@@ -190,6 +203,7 @@ def main():
     shapes, sessions = collections.Counter(), collections.Counter()
     errors, disagreeing, quoted, turns = collections.Counter(), 0, 0, 0
     wordless, summaries, summary_turns, unflagged = 0, 0, 0, 0
+    relays, relay_turns, wrapped_previews = 0, 0, 0
     from multiprocessing import Pool
     with Pool(args.workers) as pool:
         for result in pool.imap_unordered(_work, files, chunksize=8):
@@ -205,6 +219,9 @@ def main():
             summaries += result['summaries']
             summary_turns += result['summary_turns']
             unflagged += result['unflagged']
+            relays += result['relays']
+            relay_turns += result['relay_turns']
+            wrapped_previews += result['wrapped_previews']
     print('sessions read: %d   unreadable: %s' % (len(files) - sum(errors.values()), dict(errors) or 0))
     print('records any consumer calls a human turn: %d' % turns)
     print('sessions where the four consumers disagree: %d' % disagreeing)
@@ -213,6 +230,9 @@ def main():
           % (summaries, summary_turns))
     print('records that open like a compaction summary but lack the flag (expected 0): %d' % unflagged)
     print('banner-shaped lines that are quoted text, not banners: %d' % quoted)
+    print('project coordinator notes: %d   of which a consumer calls a human turn: %d'
+          % (relays, relay_turns))
+    print('card previews of the person that still show a Project envelope: %d' % wrapped_previews)
     if shapes:
         print('\nR = reader user turn, A = anchored [U#], C = card count, S = message stream / search'
               '\nrecords  sessions  who    shape')

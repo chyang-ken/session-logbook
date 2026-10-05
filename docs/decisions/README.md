@@ -25,7 +25,12 @@ never seen the work can tell which record answers their question.
 
 ### Session identity — what counts as one conversation, and what counts as one turn
 
-These nine were written over two days by parallel branches and are best read together.
+- [`2026-10-05-claude-project-threads.md`](2026-10-05-claude-project-threads.md) — a Claude
+  Project worker shows the person's words without the wake envelope everywhere they are
+  shown; a coordinator's relayed note is a teammate event, not a human turn, and a worker it
+  checked in on is not a one-shot run. Builds on the human-turn rule below.
+
+The nine below were written over two days by parallel branches and are best read together.
 
 - [`2026-09-21-compaction-summary-and-record-level-previews.md`](2026-09-21-compaction-summary-and-record-level-previews.md)
   — the client's compaction summary is not something the person said; previews and search

@@ -14,11 +14,28 @@ _LEADING_REMINDERS = re.compile(r"^(?:\s*<system-reminder>.*?</system-reminder>\
 #   <task-notification>               background-task completion notice
 #   <bash-stdout> / <bash-stderr>     bash-mode output from `!command`; unlike <bash-input>
 #   <teammate-message ...>            teammate agent report with variable attributes
+#   <project_claude_message ...> / <relay ...>
+#                                     a note a Claude Project's coordinator session relayed
+#                                     into a worker's thread; see PROJECT_RELAY_PREFIXES
 # These live here rather than in server.py because the anchored transcript, the history
 # index and the HTTP layer all have to agree on what counts as a human turn; two copies
 # of this list is how [U#] came to disagree with user_turn_count.
 SYSTEM_USER_PREFIXES_SKIP = ("<local-command-", "<command-", "<system-reminder>")
-SYSTEM_USER_PREFIXES_EVENT = ("<task-notification>", "<bash-stdout>", "<bash-stderr>", "<teammate-message")
+
+# A Claude Project's coordinator is another Claude session. When it writes into a worker's
+# thread, the note reaches the worker as a user record wrapped as
+#   <project_claude_message session="..." thread_id="...">
+#     <relay from="coordinator" session="..." current-time="...">
+#       The note below was written by the coordinator session, a Claude session, not by your user.
+#       <note>escaped text</note>
+#     </relay>
+#   </project_claude_message>
+# Older notes carry the <relay> alone. The record says itself that nobody typed it, and the
+# client files it with origin.kind "task-notification" / subkind "projects-relay": it is
+# another agent speaking, like a teammate report, and not a human turn.
+PROJECT_RELAY_PREFIXES = ("<project_claude_message", "<relay ")
+SYSTEM_USER_PREFIXES_EVENT = ("<task-notification>", "<bash-stdout>", "<bash-stderr>",
+                              "<teammate-message") + PROJECT_RELAY_PREFIXES
 
 # The record the client writes when the person presses Esc. It is filed under the user role
 # and the model does receive it, but nobody typed it: it reports that something happened.
@@ -113,7 +130,8 @@ def anchored_user_text(row):
     - the summary the client marks ``isCompactSummary`` - it wrote that too, to replace the
       turns it compacted away; the model receives it, and nobody said it;
     - the user-role pseudo-messages in ``is_system_user_string``: a background-task notice,
-      bash-mode output, a teammate report, a slash-command injection, an interrupt marker;
+      bash-mode output, a teammate report, a Project coordinator's note, a slash-command
+      injection, an interrupt marker;
     - a record holding nothing but tool results.
 
     A human turn, even though it has no typed words: a message that is only an image.
@@ -149,6 +167,31 @@ def project_wake_words(text):
     bodies = [html.unescape(body).strip() for body in _WAKE_MESSAGE.findall(text)]
     bodies = [body for body in bodies if body]
     return '\n\n'.join(bodies) if bodies else text
+
+
+def is_project_checkin(row):
+    """Whether this record is a Project coordinator's note delivered to a running worker.
+
+    Not a human turn, but a turn all the same: the worker acts on it, so a session that got
+    one is not a one-shot run. The client's own ``isMeta`` copy, the brief a coordinator hands
+    a worker it spawns, is left out: it opens the session the way a first message does.
+    """
+    row = normalize_record(row)
+    if not isinstance(row, dict) or row.get('type') != 'user' or row.get('isMeta'):
+        return False
+    return user_record_text(row).lstrip().startswith(PROJECT_RELAY_PREFIXES)
+
+
+def human_turn_text(row):
+    """The text of a human turn as it is shown to a reader, or '' when this record is not one.
+
+    The verdict is :func:`anchored_user_text`'s, taken on the record as written; only the
+    wording shown changes. A Project wake envelope is reduced to the messages it carries,
+    so the card, the title, the reader and the transcripts show what the person typed, as
+    search already matches it. The envelope itself stays one ``[L#]`` away in the source.
+    """
+    text = anchored_user_text(row)
+    return project_wake_words(text) if text else ''
 
 
 def human_turn_words(row):

@@ -20,8 +20,9 @@ from sources import antigravity as ag_source
 from sources import anchored_transcript
 from sources import claude_events
 from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
-                                 anchored_user_text, assistant_search_words, human_turn_words,
-                                 is_system_user_string, project_wake_words,
+                                 anchored_user_text, assistant_search_words, human_turn_text,
+                                 human_turn_words, is_project_checkin, is_system_user_string,
+                                 project_wake_words,
                                  normalize_record, strip_leading_reminders)
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
@@ -58,7 +59,11 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 # user_turn_count / single_turn; and the card previews (first message, recent_msgs) ask the
 # same record-level rule, so a harness note or a summary leaves them and a message with a
 # picture attached enters them.
-CACHE_SCHEMA_VERSION = 15
+# 16: a Claude Project coordinator's relayed note is no longer a human turn, which moves
+# user_turn_count for Project workers (single_turn stays false for a worker that got a
+# check-in); and a Project wake envelope is shown unwrapped in the card previews (first
+# message, recent_msgs), which the CLI title reads.
+CACHE_SCHEMA_VERSION = 16
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -433,8 +438,10 @@ _is_system_user_string = is_system_user_string
 # There is deliberately no helper here that takes message *content*. Whether a person said
 # something is decided by the record (`isMeta`, `isCompactSummary`, the record type), and a
 # function handed only the content cannot see any of it: that is how hook feedback reached a
-# card preview, and how a message with a picture attached went missing from search. Previews
-# ask `anchored_user_text(record)`; search asks `human_turn_words(record)`.
+# card preview, and how a message with a picture attached went missing from search. Whether
+# a record is a human turn is `anchored_user_text(record)`; previews show
+# `human_turn_text(record)`, the same verdict with a Project wake envelope unwrapped; search
+# asks `human_turn_words(record)`.
 
 
 def _truncate(text: str, n: int) -> str:
@@ -456,7 +463,7 @@ def _extract_first_user_msg(f):
             d = normalize_record(json.loads(line))
         except Exception:
             continue
-        text = anchored_user_text(d)
+        text = human_turn_text(d)
         if text:
             return {
                 "role": "user",
@@ -873,7 +880,7 @@ def extract_metadata(jsonl_path: Path):
             rows = [row for _, row in claude_history.records(jsonl_path)]
             lines = [json.dumps(row) for row in rows]
             first_user_msg = next(({'role': 'user',
-                'text': _truncate(anchored_user_text(row), SNIPPET_MAX),
+                'text': _truncate(human_turn_text(row), SNIPPET_MAX),
                 'ts': row.get('timestamp')} for row in rows
                 if anchored_user_text(row)), None)
 
@@ -881,7 +888,10 @@ def extract_metadata(jsonl_path: Path):
     # user message. When tail covers the whole file (size <= TAIL_BUFFER), the count is exact;
     # otherwise the file is large enough to be multi-turn, so clamp to 2 to avoid one-shot
     # misclassification. tool_result array content and command/system-reminder injections do not count.
+    # A Project worker the coordinator checked in on took more than its head message, even
+    # when the person spoke once: a check-in is no human turn, and no one-shot run either.
     user_turn_count = 0
+    checked_in = False
     for line in lines:
         try:
             d = normalize_record(json.loads(line))
@@ -889,9 +899,11 @@ def extract_metadata(jsonl_path: Path):
             continue
         if _selection_user_turn(d):
             user_turn_count += 1
-    single_turn = user_turn_count == 1
+        elif is_project_checkin(d):
+            checked_in = True
+    single_turn = user_turn_count == 1 and not checked_in
     if size > TAIL_BUFFER and not selected_branch:
-        if user_turn_count < 2:
+        if user_turn_count < 2 and not checked_in:
             observed = 0
             try:
                 with jsonl_path.open(encoding="utf-8", errors="replace") as full:
@@ -904,7 +916,10 @@ def extract_metadata(jsonl_path: Path):
                             observed += 1
                             if observed >= 2:
                                 break
-                single_turn = observed == 1
+                        elif is_project_checkin(record):
+                            checked_in = True
+                            break
+                single_turn = observed == 1 and not checked_in
             except OSError:
                 single_turn = None
         user_turn_count = max(user_turn_count, 2)
@@ -936,7 +951,7 @@ def extract_metadata(jsonl_path: Path):
                     "ts": d.get("timestamp"),
                 })
         elif t == "user" and len(tail_users) < RECENT_USER_N:
-            text = anchored_user_text(d)
+            text = human_turn_text(d)
             if text:
                 tail_users.append({
                     "role": "user",
@@ -1240,6 +1255,8 @@ def _claude_text_turn(record, text, skill_context, ts):
     if kind == 'harness_note':
         return {'type': 'system_notification', 'kind': kind,
                 'text': _truncate_conv(text, CONV_HARNESS_NOTE_MAX), 'ts': ts}
+    if kind == 'user':
+        text = project_wake_words(text)
     return {'type': kind, 'text': _truncate_conv(text, CONV_USER_MAX), 'ts': ts}
 
 
@@ -1537,6 +1554,8 @@ def _transcript_text_block(record, text, skill_context):
     kind = _claude_text_kind(record, skill_context)
     if kind == 'harness_note':
         return '## SYSTEM\n%s\n' % _truncate_conv(text, CONV_HARNESS_NOTE_MAX)
+    if kind == 'user':
+        text = project_wake_words(text)
     return '## %s\n%s\n' % (kind.upper(), text)
 
 

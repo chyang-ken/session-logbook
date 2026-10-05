@@ -32,7 +32,8 @@ import json
 import re
 from datetime import datetime, timezone
 from sources import claude_events
-from sources.claude_text import strip_leading_reminders, anchored_user_text, user_record_text
+from sources.claude_text import (strip_leading_reminders, anchored_user_text, project_wake_words,
+                                 user_record_text)
 
 
 def trunc(s, n):
@@ -458,7 +459,8 @@ def render_claude(path, records=None) -> str:
             uturn = o.get('_logbook_user_turn', uturn + 1)
             o_lines.append("")
             o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts}{side} ━━━━━━━━━━")
-            o_lines.append(str(txt))
+            # A Project wake envelope is transport; the person's words are its messages.
+            o_lines.append(str(project_wake_words(txt)))
         elif t == 'assistant':
             msg = o.get('message') or {}
             for b in (msg.get('content') or []):
