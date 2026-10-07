@@ -178,8 +178,8 @@ class CompactionSummaryTests(Fixture):
 
     def test_a_history_cache_written_before_the_rule_is_rebuilt(self):
         path = self.session()
-        self.assertEqual(claude_history.SCHEMA, 8)
-        with patch.object(claude_history, 'SCHEMA', 7):
+        self.assertEqual(claude_history.SCHEMA, 9)
+        with patch.object(claude_history, 'SCHEMA', 8):
             claude_history._MEMORY.clear()
             with patch.object(claude_history, 'anchored_user_text',
                               lambda row: claude_text.user_record_text(row) if row.get('type') == 'user' else ''):
@@ -190,7 +190,7 @@ class CompactionSummaryTests(Fixture):
         self.assertEqual(fresh[-1], 2)
 
     def test_the_scan_cache_schema_moved_with_the_card_count(self):
-        self.assertEqual(server.CACHE_SCHEMA_VERSION, 15)
+        self.assertEqual(server.CACHE_SCHEMA_VERSION, 16)
 
 
 class PreviewAndSearchTests(Fixture):

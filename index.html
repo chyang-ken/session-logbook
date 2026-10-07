@@ -2816,7 +2816,9 @@ function renderRecentDaysSelector() {
 }
 
 function isSuspected(m) {
-  return m.user_turn_count === 1 && !m.human_confirmed;
+  // single_turn === false is the backend saying "one human turn, but not a one-shot run"
+  // (a Project worker its coordinator checked in on); sources that do not report it are unchanged.
+  return m.user_turn_count === 1 && m.single_turn !== false && !m.human_confirmed;
 }
 
 // The set of sessions the dashboard actually displays right now: one entry per conversation,
