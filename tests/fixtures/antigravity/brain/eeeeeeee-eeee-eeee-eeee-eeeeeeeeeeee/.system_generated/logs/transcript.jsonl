@@ -1,0 +1,4 @@
+{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "created_at": "2026-01-03T00:00:00Z", "content": "<USER_REQUEST>abandonedneedle first attempt</USER_REQUEST>"}
+{"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-01-03T00:00:05Z", "content": "Answering the abandonedneedle question."}
+{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "created_at": "2026-01-03T00:05:00Z", "content": "<USER_REQUEST>liveneedle second attempt</USER_REQUEST>"}
+{"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "created_at": "2026-01-03T00:05:07Z", "content": "Answering the liveneedle question."}

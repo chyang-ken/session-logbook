@@ -5,6 +5,7 @@ They identify database records, never generated transcript files. N anchors refe
 to message_nodes.row_id; follow returns a full snapshot because branches can change.
 """
 import json
+from sources.activity import activity_fields
 import hashlib
 import os
 import sqlite3
@@ -141,6 +142,9 @@ def _metadata(path, meta, chain):
             'project_path': meta.get('working_directory') or '',
             'jsonl_path': str(path), 'source_kind': 'sqlite',
             'mtime': mtime, 'mtime_iso': _iso(mtime),
+            **activity_fields(((n['message'].get('metadata') or {}).get('created_at')
+                               or n['created_at'] for n in chain
+                               if all(message_text(n))), mtime),
             'size': sum(len(n['chat_message'].encode()) for n in chain),
             'model': meta.get('model'), 'custom_title': meta.get('title') or '',
             'user_turn_count': len(users), 'last_stop_reason': None,
@@ -210,14 +214,16 @@ def digest_header(path):
     ])
 
 
-def render_context(path, after_line=0):
+def render_context(path, after_line=0, first_turn=None, last_turns=None):
+    from sources import anchored_transcript
     meta, chain = read_session(path)
     turns = _turns(chain)
-    out = [digest_header(path), '# SESSION_ID: devin:' + meta['id'],
-           f'# INPUT_CURSOR: N{after_line}',
-           f'# NEXT_CURSOR: N{chain[-1]["row_id"] if chain else 0}',
-           '# FOLLOW_MODE: full-snapshot', '# EXPLICIT_TERMINAL: unknown',
-           '# A quiet database does not prove completion or liveness.', '']
+    head = [digest_header(path), '# SESSION_ID: devin:' + meta['id'],
+            f'# INPUT_CURSOR: N{after_line}',
+            f'# NEXT_CURSOR: N{chain[-1]["row_id"] if chain else 0}',
+            '# FOLLOW_MODE: full-snapshot', '# EXPLICIT_TERMINAL: unknown',
+            '# A quiet database does not prove completion or liveness.']
+    out = []
     u = 0
     for t in turns:
         anchor = f'[N{t["node_id"]}]'
@@ -233,7 +239,11 @@ def render_context(path, after_line=0):
             out.append(f'{anchor} TOOL {t["name"]} {t["summary"]}\n{result_anchor} result: {status}, {t.get("result_size", 0)} chars {detail}')
         else:
             out.append(f'{anchor} {t.get("text", "")}')
-    return '\n\n'.join(out)
+    # Slice on the rendered body only, so the header a reader needs to orient itself -- and
+    # to learn that this IS a slice -- survives the cut.
+    body, turn_notes = anchored_transcript.slice_from_turn(
+        '\n\n'.join(out), first_turn, last_turns)
+    return '\n\n'.join(head + turn_notes + ['', body])
 
 
 def extract_transcript(path):

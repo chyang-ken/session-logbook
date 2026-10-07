@@ -133,7 +133,7 @@ class TestRipgrepDiscovery(unittest.TestCase):
         for call in run.call_args_list:
             cmd = call.args[0]
             self.assertLessEqual(sum(len(os.fsencode(arg)) + 1 for arg in cmd), 160)
-            passed_paths.extend(cmd[7:])
+            passed_paths.extend(cmd[cmd.index("--") + 1:])
         self.assertEqual(passed_paths, [str(path) for path in paths])
 
     def test_runtime_failure_warns_and_falls_back(self):
@@ -143,6 +143,81 @@ class TestRipgrepDiscovery(unittest.TestCase):
              contextlib.redirect_stderr(io.StringIO()) as stderr:
             self.assertIsNone(server._rg_prefilter(["needle"], [Path("session.jsonl")]))
         self.assertIn("exited with status 2", stderr.getvalue())
+
+class TestSessionSearch(unittest.TestCase):
+    def test_title_only_metadata_hit_bypasses_transcript_prefilter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(
+                json.dumps({
+                    "type": "user",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {"content": "unrelated transcript text"},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            meta = {
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "jsonl_path": str(path),
+                "mtime": path.stat().st_mtime,
+                "custom_title": "Codex Launch Review",
+            }
+            with mock.patch.object(server, "_cache", {str(path): meta}), \
+                    mock.patch.object(server, "_rg_prefilter", return_value=set()):
+                results = server.search_sessions("Codex Launch Review")
+
+        self.assertEqual([result["id"] for result in results], [meta["id"]])
+        self.assertEqual(results[0]["snippets"][0]["text"],
+                         "Session title: Codex Launch Review")
+
+    def test_user_title_matches_and_combines_with_transcript_terms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(
+                json.dumps({
+                    "type": "user",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {"content": "payment retry details"},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            meta = {
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "jsonl_path": str(path),
+                "mtime": path.stat().st_mtime,
+                "custom_title": "Source title",
+            }
+            state = {meta["id"]: {"title_override": "Billing recovery"}}
+            with mock.patch.object(server, "_cache", {str(path): meta}), \
+                    mock.patch.object(server, "_state", state), \
+                    mock.patch.object(server, "_rg_prefilter", return_value=set()):
+                results = server.search_sessions("billing retry")
+
+        self.assertEqual([result["id"] for result in results], [meta["id"]])
+        self.assertEqual(results[0]["snippets"][0]["text"],
+                         "Session title: Billing recovery")
+
+
+class TestEnrichedSessions(unittest.TestCase):
+    def test_local_title_and_human_confirmation_overlay_source_metadata(self):
+        meta = {
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "mtime": time.time(),
+            "custom_title": "Source title",
+        }
+        local = {
+            meta["id"]: {
+                "title_override": "My title",
+                "human_confirmed": True,
+            }
+        }
+        with mock.patch.object(server, "scan_sessions", return_value=[meta]), \
+                mock.patch.object(server, "_state", local):
+            item = server.enriched_sessions()[0]
+
+        self.assertEqual(item["custom_title"], "Source title")
+        self.assertEqual(item["display_title"], "My title")
+        self.assertTrue(item["human_confirmed"])
 
 
 class TestComputeScope(unittest.TestCase):
@@ -993,7 +1068,7 @@ class TestSkillToolBody(unittest.TestCase):
                 {"type": "user", "message": {"role": "user", "content": [{
                     "type": "text",
                     "text": "Base directory for this skill: /x/.claude/skills/web-access\n\n# web-access Skill\n...",
-                }]}},
+                }]}, "isMeta": True},
             ])
             conv = server.extract_conversation(path)
             users = [t for t in conv["turns"] if t["type"] == "user"]
@@ -1012,7 +1087,7 @@ class TestSkillToolBody(unittest.TestCase):
                 {"type": "user", "message": {"role": "user", "content": [{
                     "type": "text",
                     "text": "Base directory for this skill: /x/.claude/skills/web-access\n\n# body...",
-                }]}},
+                }]}, "isMeta": True},
             ])
             conv = server.extract_conversation(path)
             users = [t for t in conv["turns"] if t["type"] == "user"]
@@ -1040,7 +1115,7 @@ class TestSkillToolBody(unittest.TestCase):
             path = self._write_session(Path(td), [
                 {"type": "user", "message": {"role": "user", "content": [{
                     "type": "text", "text": "Continue from where you left off.",
-                }]}},
+                }]}, "isMeta": True},
             ])
             conv = server.extract_conversation(path)
             users = [t for t in conv["turns"] if t["type"] == "user"]
@@ -1064,7 +1139,7 @@ class TestSkillToolBody(unittest.TestCase):
                 }]}},
                 {"type": "user", "message": {"role": "user", "content": [{
                     "type": "text", "text": "any text here that is the skill body",
-                }]}},
+                }]}, "isMeta": True},
             ])
             conv = server.extract_conversation(path)
             self.assertEqual(

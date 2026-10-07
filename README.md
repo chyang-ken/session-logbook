@@ -1,6 +1,6 @@
 # Session Logbook
 
-A minimal, local, zero-dependency dashboard for browsing and organizing your AI coding-agent sessions — **Claude Code, Codex, Antigravity, Kimi Code, and Devin Local** — all in one place.
+A minimal, local, zero-dependency retrieval layer for finding and re-reading your AI coding-agent sessions — **Claude Code, Codex, Antigravity, Kimi Code, Devin Local, and Pi** — all in one place.
 
 [![CI](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/chyang-ken/session-logbook/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@ A minimal, local, zero-dependency dashboard for browsing and organizing your AI 
 
 > Read this in other languages: [Chinese](README_zh-CN.md)
 
-Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, `~/.gemini`, `~/.kimi-code`, and the Devin Local database. Session Logbook reads them **read-only**, lays them out on one page, and lets you star, archive, note, search, and re-read them — without leaving your machine.
+Your agents leave behind hundreds of session transcripts scattered under `~/.claude`, `~/.codex`, `~/.gemini`, `~/.kimi-code`, `~/.pi/agent/sessions`, and the Devin Local database. Session Logbook reads them **read-only** so you can find past work by time or text, open the full Session, and reuse it without leaving your machine.
 
 ![Session Logbook screenshot](docs/screenshot.png)
 
@@ -16,10 +16,11 @@ Your agents leave behind hundreds of session transcripts scattered under `~/.cla
 
 ## Why
 
-You run many agents, in many worktrees, across many projects, in parallel. A flat list of session files is unusable. This dashboard gives that pile structure:
+At enough volume, managing every Session by hand stops working. Session Logbook focuses on the two jobs that remain useful:
 
-- **One page, four zones** — ⭐ Starred / 🔥 Recent / 🕸 Dusty / 📦 Archived. Time-decayed automatically so your working set stays clean.
-- **Multi-agent** — Claude Code, Codex, Antigravity, Kimi Code, and Devin Local sessions, unified and grouped by project.
+- **Find past work** — browse by recency or search the words you remember.
+- **Read it in context** — open the complete Session Detail instead of reconstructing the work from filenames or snippets.
+- **Cross-agent** — Claude Code, Codex, Antigravity, Kimi Code, Devin Local, and Pi sessions share one local surface.
 - **Read-only and private** — it never sends a message, spawns a session, or talks to the network. Binds `127.0.0.1` only and serves its browser assets locally.
 
 ## Quickstart
@@ -58,6 +59,9 @@ append-only delta. Copied source references have the form
 
 ## Give a Session to another Agent
 
+For optional lifecycle evidence alongside conversation, see
+[runtime observation (experimental)](docs/runtime-observation.md).
+
 The dashboard does not need to be running. The read-only Agent CLI accepts a known Session
 ID, an exact JSONL path, or a search query:
 
@@ -65,12 +69,21 @@ ID, an exact JSONL path, or a search query:
 # Compact context with [L#] anchors back to the original JSONL
 python3 session_logbook_cli.py context '<session-id-or-path>'
 
+# Just the tail: the last 3 human turns, addressed by the [U#] the transcript prints
+python3 session_logbook_cli.py context '<session-id-or-path>' --last-turns 3
+
 # On the next check, repeat the cursor line once, then return later content
 python3 session_logbook_cli.py follow '<session-id-or-path>' --cursor-line 427
 
 # Search only real user messages across recent Session history
 python3 session_logbook_cli.py search 'payment retry' --role user --since 30d
 ```
+
+Claude Desktop can copy history into another Session ID. Related source files are
+shown as evidence links; the selected file stays the transcript, and shared history
+never automatically changes a supervisor's target. Explicit source-qualified follow
+checks copied record identity and rejects divergent cursors. See the
+[Claude history contract](docs/decisions/2026-09-19-claude-copied-history.md).
 
 The repository also ships one Agent Skill, [`session-logbook`](skills/session-logbook/SKILL.md),
 covering handoff, follow-up observation, evidence expansion, discovery, and historical mining.
@@ -85,12 +98,21 @@ ln -s "$PWD/skills/session-logbook" ~/.codex/skills/session-logbook
 
 ## Features
 
-- **Four zones, one page** — Starred / Recent / Dusty / Archived, with project grouping (by the last two path segments; `.worktrees/` fold into their parent).
-- **Time decay** — a session untouched for N days drops into 🕸 Dusty automatically (toggle 7 / 14 / 21 days in the UI). Your main surface only shows what's live.
-- **Card previews** — opening user message + the most recent user/assistant turns, so you can tell sessions apart at a glance.
+Pi reads the last saved branch of each session, including its original messages before
+compaction. Its `parentSession` field indicates a fork, not an automated sub-agent.
+Set `PI_CODING_AGENT_DIR` for a custom agent home, or
+`PI_CODING_AGENT_SESSION_DIR` for a custom session directory. Extension-specific
+subagent layouts and per-project session-directory settings are not auto-discovered.
+
+- **Full-text search** — multi-word AND; matched snippets highlighted; source titles, personal titles, and session IDs match too. Backed by `ripgrep` when available, with a pure-Python fallback.
 - **Full conversation view** — click a card to expand; user / assistant / tool / skill turns are color-coded. Pop out to a standalone full-screen reader (`/?session=<id>`).
 - **Conversation navigation** — jump between user turns with `↑ N/M ↓ go to: __`, use `latest` to reach the newest message, or move with the keyboard (`j` next, `k` prev).
-- **Full-text search** — multi-word AND; matched snippets highlighted; session IDs match too. Backed by `ripgrep` when available, with a pure-Python fallback.
+- **Card previews** — opening user message + the most recent user/assistant turns, so you can tell sessions apart at a glance.
+- **Cross-project timeline** — the default view sorts Sessions by last activity across projects.
+- **Suspected automated-run filter** — single-turn Sessions are hidden by default with an explicit filter and an empty-result recovery action. Confirm human participation to correct a false positive.
+- **Personal titles** — add a local name for future retrieval; source titles remain intact and searchable.
+- **Optional four-zone project view** — Starred / Recent / Dusty / Archived, grouped by project (by the last two path segments; `.worktrees/` fold into their parent).
+- **Time decay** — a Session untouched for N days drops into 🕸 Dusty automatically (toggle 7 / 14 / 21 days in the UI).
 - **Star / Archive / Note** — lightweight organizing that persists to `~/.session-logbook/state.json`.
 - **Files panel** — browse a project's recently-changed files or fuzzy-find by name (`fd`-backed).
 - **Downloadable anchored transcript** — export a compact, navigable transcript with line-number anchors back to the original JSONL (useful for feeding a session to an agent for analysis).
@@ -114,14 +136,14 @@ ln -s "$PWD/skills/session-logbook" ~/.codex/skills/session-logbook
 |---|---|
 | Change the port? | `python3 server.py --port 47822` |
 | Change the default Dusty threshold? | `DUSTY_AFTER_DAYS` in `server.py`, or toggle 7/14/21d in the UI |
-| Reset all stars/archives/notes? | `rm ~/.session-logbook/state.json` |
+| Reset local metadata? | Removing `~/.session-logbook/state.json` resets stars, archives, notes, personal titles, and participation confirmations; source records are untouched. |
 | A session has no preview? | It's too short (system-only), or its tail is all tool output — increase `TAIL_BUFFER` |
 | What's the colored dot on a card? | Green = last `stop_reason` was `end_turn`; yellow = `tool_use`; gray = unknown. A hint only — archiving is always manual. |
 | A session failed to parse? | It's still listed with an empty preview; one bad file never crashes the dashboard. |
 
 ## What it deliberately does *not* do
 
-Send messages · spawn sessions · multi-user auth · live push (SSE/WebSocket) · cross-machine sync. The CLI is already your orchestrator — this is a read-only cockpit, not a client. Rationale in [`docs/philosophy.md`](docs/philosophy.md).
+Send messages · spawn Sessions · manage whether a client Session stays alive or archived · multi-user auth · live push (SSE/WebSocket) · cross-machine sync. This is a read-only retrieval layer, not an agent client or lifecycle manager. Rationale in [`docs/philosophy.md`](docs/philosophy.md).
 
 ## License
 

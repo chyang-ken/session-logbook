@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Session Logbook - a minimal, zero-dependency, local dashboard for AI-agent sessions."""
+"""Session Logbook - a minimal local retrieval layer for AI-agent sessions."""
 import argparse
+import contextlib
 import json
 import hashlib
 import sqlite3
@@ -17,10 +18,18 @@ from pathlib import Path
 
 from sources import antigravity as ag_source
 from sources import anchored_transcript
+from sources import claude_events
+from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
+                                 anchored_user_text, human_turn_words, is_system_user_string,
+                                 normalize_record, strip_leading_reminders)
+from sources.activity import activity_fields, activity_time
+from sources import claude_history, claude_desktop
 from sources import codex as codex_source
 from sources import devin as devin_source
 
 from sources import kimi as kimi_source
+from sources import pi as pi_source
+from sources import session_identity
 
 # ---------- Config ----------
 HOST = "127.0.0.1"
@@ -38,7 +47,17 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 
 # bump this whenever extract_metadata schema changes, or whenever a fix changes the *values*
 # it produces for already-scanned sessions (a stale cache is only refreshed on mtime change)
-CACHE_SCHEMA_VERSION = 4
+# 13 covers two independent shape changes that were developed in parallel and each claimed
+# 12: conversation identity added head_session_id / compaction_parent_uuids to the metadata,
+# and the Antigravity in-file rewind changed the turn counts it produces. A cache written by
+# either one alone is wrong for the other, so the combined build takes a number of its own.
+# 14: user_turn_count / single_turn follow the shared human-turn rule in sources/claude_text.py
+# (an interrupt marker no longer counts; an image-only message and reminder-wrapped text do).
+# 15: a compaction summary (`isCompactSummary`) is no longer a human turn, which moves
+# user_turn_count / single_turn; and the card previews (first message, recent_msgs) ask the
+# same record-level rule, so a harness note or a summary leaves them and a message with a
+# picture attached enters them.
+CACHE_SCHEMA_VERSION = 15
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -73,6 +92,8 @@ BRIEF_TIMEOUT_SEC = 180  # claude -p call timeout; measured ~10-15s, leaving 12x
 # Search
 SEARCH_SNIPPET_CONTEXT = 60   # how many characters to take on each side of a match
 SEARCH_MAX_SNIPPETS = 3       # max snippets returned per session
+# Keep each ripgrep argv comfortably below macOS ARG_MAX. Session paths can be long, and
+# several thousand of them otherwise make subprocess startup fail with E2BIG.
 MAX_JSON_BODY = 1024 * 1024   # local state updates should never need more than 1 MiB
 RIPGREP_FALLBACK_PATHS = (
     Path("/opt/homebrew/bin/rg"),  # Apple Silicon Homebrew GUI/background services
@@ -85,7 +106,7 @@ RIPGREP_ARG_CHUNK_BYTES = 256 * 1024 if os.name != "nt" else 24 * 1024
 
 # ---------- In-memory state ----------
 _cache = {}   # jsonl_path_str -> session meta dict
-_state = {}   # session_id -> { archived, archived_at, note }
+_state = {}   # session_id -> local user metadata (archive/star/note/title/human confirmation)
 # Whether load_state() has run successfully. Distinguishes genuinely empty state from
 # forgotten initialization. Every HTTP handler entry point falls back to load_state()
 # (idempotent) to prevent startup paths such as `import server; ThreadingHTTPServer(...)`
@@ -99,8 +120,15 @@ _state_loaded = False
 _CWD_TRUTH_MAP = {}    # encoded_dir_name -> real_cwd
 _CWD_INDEX_SEEN = set()  # jsonl_path_str values already peeked; reused by incremental scanning
 _CWD_SEQ = {}  # jsonl_path_str -> list[str] order-preserving deduped cwd sequence for pick_project_path
+# Codex stores most session titles outside each transcript. Persist the index version with
+# the scan cache so a rename can invalidate cached metadata even when the transcript mtime
+# itself does not change.
+_codex_session_index_mtime_ns = None
 # Mark dirty only when scanning actually changes the cache; frequent /api/sessions polling must not write repeatedly.
 _scan_cache_dirty = False
+# Bumped on every scan-cache mutation so derived views (conversation identity) know when
+# the underlying record set changed without diffing thousands of entries.
+_cache_generation = 0
 
 
 def _is_trusted_http_request(host: str, origin: str = "", fetch_site: str = "") -> bool:
@@ -135,6 +163,19 @@ def _is_trusted_http_request(host: str, origin: str = "", fetch_site: str = "") 
 
 
 # ---------- State persistence ----------
+def _state_backup_dir():
+    """Where backups of the state file in use belong.
+
+    BACKUP_DIR is the production directory. When a test or a pre-merge smoke launcher
+    rebinds STATE_FILE to a temp directory, the backups follow it instead of being skipped:
+    an unbacked write is exactly the situation the backup exists for, and writing into the
+    temp directory keeps the production directory untouched.
+    """
+    if STATE_FILE == DEFAULT_STATE_FILE:
+        return BACKUP_DIR
+    return STATE_FILE.parent / "backups"
+
+
 def _backup_state_file(state_file, backup_dir, retention_days):
     """Copy state_file into backup_dir with a timestamp suffix and clean old backups.
 
@@ -215,17 +256,34 @@ def save_state():
     tmp = STATE_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(_state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(STATE_FILE)
-    # production-only: after a successful write, do a rotating backup. Failure never raises
-    # and does not affect the main save path. Tests monkey-patch STATE_FILE to a temp path,
-    # so this auto-skips and leaves the real backup directory untouched.
-    if STATE_FILE == DEFAULT_STATE_FILE:
-        _backup_state_file(STATE_FILE, BACKUP_DIR, BACKUP_RETENTION_DAYS)
+    # Read the file back before calling the save a success. An atomic rename only proves the
+    # rename happened; a full disk, a truncated write or a filesystem that reordered the data
+    # all survive it silently, and this is the one file the user cannot reconstruct.
+    verified = False
+    try:
+        verified = json.loads(STATE_FILE.read_text(encoding="utf-8")) == _state
+    except Exception as e:
+        print(f"[critical] save_state wrote {STATE_FILE} but could not read it back: {e}. "
+              f"Treat the on-disk file as suspect and check "
+              f"{_state_backup_dir()} before further writes.", file=sys.stderr)
+    else:
+        if not verified:
+            print(f"[critical] save_state read-back mismatch at {STATE_FILE}: the file on disk "
+                  f"does not match the state just written. Check "
+                  f"{_state_backup_dir()} before further writes.", file=sys.stderr)
+    # After a successful write, do a rotating backup. Failure never raises and does not
+    # affect the main save path. The backup follows STATE_FILE rather than only guarding the
+    # production path, so a rebound STATE_FILE (the prescribed pre-merge smoke test) still
+    # gets one, next to the file it is actually protecting.
+    _backup_state_file(STATE_FILE, _state_backup_dir(), BACKUP_RETENTION_DAYS)
+    return verified
 
 
 # ---------- Scan cache persistence ----------
 def _mark_scan_cache_dirty():
-    global _scan_cache_dirty
+    global _scan_cache_dirty, _cache_generation
     _scan_cache_dirty = True
+    _cache_generation += 1
 
 
 def _prune_legacy_scan_cache_backups():
@@ -256,6 +314,7 @@ def _scan_cache_payload():
         "cwd_truth_map": _CWD_TRUTH_MAP,
         "cwd_index_seen": sorted(_CWD_INDEX_SEEN),
         "cwd_seq": _CWD_SEQ,
+        "codex_session_index_mtime_ns": _codex_session_index_mtime_ns,
     }
 
 
@@ -268,6 +327,7 @@ def _validate_scan_cache_payload(payload):
     truth = payload.get("cwd_truth_map")
     seen = payload.get("cwd_index_seen")
     seq = payload.get("cwd_seq")
+    codex_index_mtime = payload.get("codex_session_index_mtime_ns")
     if not isinstance(cache, dict):
         return False, "cache is not an object"
     if not isinstance(truth, dict) or not all(
@@ -283,12 +343,15 @@ def _validate_scan_cache_payload(payload):
         for k, v in seq.items()
     ):
         return False, "cwd_seq is not a string-list map"
+    if codex_index_mtime is not None and not isinstance(codex_index_mtime, int):
+        return False, "codex_session_index_mtime_ns is not an integer or null"
     return True, ""
 
 
 def load_scan_cache():
     """Restore the warm scan cache from disk. Any failure returns False so the caller falls back to a full scan."""
-    global _cache, _CWD_TRUTH_MAP, _CWD_INDEX_SEEN, _CWD_SEQ, _scan_cache_dirty
+    global _cache, _CWD_TRUTH_MAP, _CWD_INDEX_SEEN, _CWD_SEQ
+    global _codex_session_index_mtime_ns, _scan_cache_dirty, _cache_generation
     if not SCAN_CACHE_FILE.exists():
         return False
     try:
@@ -314,8 +377,10 @@ def load_scan_cache():
     _CWD_TRUTH_MAP = dict(payload["cwd_truth_map"])
     _CWD_INDEX_SEEN = set(payload["cwd_index_seen"])
     _CWD_SEQ = {k: list(v) for k, v in payload["cwd_seq"].items()}
+    _codex_session_index_mtime_ns = payload["codex_session_index_mtime_ns"]
     _DECODE_DIR_CACHE.clear()
     _scan_cache_dirty = False
+    _cache_generation += 1  # a wholesale cache replacement invalidates every derived view
     return True
 
 
@@ -356,35 +421,19 @@ def _assistant_text(content):
     return " ".join(parts)
 
 
-# System-injection prefixes for user-role records that are not user input. The harness
-# writes these events into JSONL as user messages, but semantically they belong to the
-# system/agent side. Once recognized, classify them separately so they do not count as
-# user input.
-#   <command-*> / <local-command-*>   slash command injection + hook stdout
-#   <system-reminder>                 system prompt
-#   <task-notification>               background-task completion notice
-#   <bash-stdout> / <bash-stderr>     bash-mode output from `!command`; unlike <bash-input>
-#   <teammate-message ...>            teammate agent report with variable attributes
-_SYSTEM_USER_PREFIXES_SKIP = ("<local-command-", "<command-", "<system-reminder>")
-_SYSTEM_USER_PREFIXES_EVENT = ("<task-notification>", "<bash-stdout>", "<bash-stderr>", "<teammate-message")
+# The prefix lists and the predicate now live in sources/claude_text.py, because the
+# anchored transcript and the history index have to apply the same rule; keeping a second
+# copy here is how [U#] came to count notifications that user_turn_count already excluded.
+_SYSTEM_USER_PREFIXES_SKIP = SYSTEM_USER_PREFIXES_SKIP
+_SYSTEM_USER_PREFIXES_EVENT = SYSTEM_USER_PREFIXES_EVENT
+_is_system_user_string = is_system_user_string
 
 
-def _is_system_user_string(stripped):
-    """Whether user-role string content is a system-side injection rather than real user input. stripped should be lstrip output."""
-    return stripped.startswith(_SYSTEM_USER_PREFIXES_SKIP) or stripped.startswith(_SYSTEM_USER_PREFIXES_EVENT)
-
-
-def _user_text(content):
-    """Return string content only; arrays are tool_result and are skipped.
-    Also skip slash-command injections and system-side pseudo-user messages such as
-    task-notification / bash output / teammate.
-    """
-    if isinstance(content, str):
-        stripped = content.lstrip()
-        if _is_system_user_string(stripped):
-            return ""
-        return content
-    return ""
+# There is deliberately no helper here that takes message *content*. Whether a person said
+# something is decided by the record (`isMeta`, `isCompactSummary`, the record type), and a
+# function handed only the content cannot see any of it: that is how hook feedback reached a
+# card preview, and how a message with a picture attached went missing from search. Previews
+# ask `anchored_user_text(record)`; search asks `human_turn_words(record)`.
 
 
 def _truncate(text: str, n: int) -> str:
@@ -397,24 +446,23 @@ def _truncate(text: str, n: int) -> str:
 
 
 def _extract_first_user_msg(f):
-    """Read forward from the file head and return the first user message with string content. f is at the start."""
+    """Read forward from the file head and return the first human turn. f is at the start."""
     for _ in range(500):  # scan at most 500 lines to avoid an oversized head
         line = f.readline()
         if not line:
             break
         try:
-            d = json.loads(line)
+            d = normalize_record(json.loads(line))
         except Exception:
             continue
-        if d.get("type") == "user":
-            text = _user_text(d.get("message", {}).get("content"))
-            if text:
-                return {
-                    "role": "user",
-                    "text": _truncate(text, SNIPPET_MAX),
-                    "ts": d.get("timestamp"),
-                    "is_first": True,
-                }
+        text = anchored_user_text(d)
+        if text:
+            return {
+                "role": "user",
+                "text": _truncate(text, SNIPPET_MAX),
+                "ts": d.get("timestamp"),
+                "is_first": True,
+            }
     return None
 
 
@@ -670,45 +718,90 @@ def _clean_custom_title(raw):
     return s
 
 
-def _extract_custom_title(jsonl_path: Path):
-    """Scan the full JSONL and return the customTitle from the last custom-title row.
+def _scan_title_and_compactions(jsonl_path: Path):
+    """One full pass for the effective custom title and for compaction lineage.
 
-    Each /title call appends a {"type":"custom-title","customTitle":"..."} row; the last
-    one is the currently effective title. A bytes substring prefilter avoids parsing JSON
-    for every line.
+    Each /title call appends a {"type":"custom-title","customTitle":"..."} row; the last one
+    is the currently effective title. A compaction appends a compact_boundary row whose
+    logicalParentUuid names the last record before the compaction. Almost always that record
+    is in this same file, but Claude Code sometimes starts a new file at a compaction, and
+    then the boundary is the only native pointer back to the earlier half of the
+    conversation. Both answers come from one pass because both need every line, and the
+    result is cached in the scan cache by mtime.
+
+    Returns (title, external_parent_uuids). A uuid is "external" only after a second pass has
+    confirmed it is nowhere in this file; that second pass runs for the roughly two percent of
+    files that carry a boundary at all.
     """
-    needle = b'"type":"custom-title"'
-    last = None
+    title_needle = b'"type":"custom-title"'
+    boundary_needle = b'"compact_boundary"'
+    last, boundaries = None, []
     try:
         with open(jsonl_path, "rb") as f:
+            offset = 0
             for line in f:
-                if needle not in line:
+                start, offset = offset, offset + len(line)
+                if title_needle in line:
+                    try:
+                        d = normalize_record(json.loads(line))
+                    except Exception:
+                        d = {}
+                    if d.get("type") == "custom-title":
+                        cleaned = _clean_custom_title(d.get("customTitle"))
+                        if cleaned:
+                            last = cleaned
+                    continue
+                if boundary_needle not in line:
                     continue
                 try:
                     d = json.loads(line)
                 except Exception:
                     continue
-                if d.get("type") == "custom-title":
-                    cleaned = _clean_custom_title(d.get("customTitle"))
-                    if cleaned:
-                        last = cleaned
+                if not isinstance(d, dict) or d.get("subtype") != "compact_boundary":
+                    continue
+                parent = d.get("logicalParentUuid")
+                if isinstance(parent, str) and parent:
+                    boundaries.append((parent, start))
     except Exception:
-        return None
-    return last
+        return None, []
+    if not boundaries:
+        return last, []
+    # "In this file" means "written into this file before the boundary". A uuid that only
+    # turns up further down was not there when the compaction happened, so it is not what
+    # the boundary points at -- and reading the whole file would wrongly call the
+    # conversation self-contained and lose the link.
+    external = []
+    try:
+        with open(jsonl_path, "rb") as f:
+            for parent, start in boundaries:
+                if parent in external:
+                    continue
+                f.seek(0)
+                if not _uuid_pattern(parent).search(f.read(start)):
+                    external.append(parent)
+    except Exception:
+        return last, []
+    return last, external
+
+
+def _uuid_pattern(uuid):
+    """Match a record that *is* this uuid, tolerating whitespace around the colon.
+
+    Deliberately not a plain substring of the uuid: the same value also appears as
+    parentUuid on the record's children, and treating that as ownership would point a
+    compaction link at the wrong file.
+    """
+    return re.compile(rb'"uuid"\s*:\s*"' + re.escape(uuid.encode("utf-8", "ignore")) + rb'"')
+
+
+def _extract_custom_title(jsonl_path: Path):
+    """Return only the effective custom title; kept for callers that want nothing else."""
+    return _scan_title_and_compactions(jsonl_path)[0]
 
 
 def _selection_user_turn(record):
-    """Match the preview's user-turn rules without counting tool/system traffic."""
-    if record.get("type") != "user" or record.get("isMeta"):
-        return False
-    content = record.get("message", {}).get("content")
-    if isinstance(content, str):
-        return bool(content.strip()) and not _is_system_user_string(content.lstrip())
-    if isinstance(content, list):
-        return any(isinstance(b, dict) and b.get("type") == "text"
-                   and isinstance(b.get("text"), str) and b["text"].strip()
-                   and not _is_system_user_string(b["text"].lstrip()) for b in content)
-    return False
+    """Whether this record is a human turn, by the one rule the reader and [U#] also use."""
+    return bool(anchored_user_text(record))
 
 
 def extract_metadata(jsonl_path: Path):
@@ -730,8 +823,19 @@ def extract_metadata(jsonl_path: Path):
     last_stop_reason = None
     first_user_msg = None
 
+    head_session_id = None
     try:
         with open(jsonl_path, "rb") as f:
+            # 0) The very first record's sessionId. A rewind or resume re-stamps every copied
+            # record with the new id, so head == filename; a fork does not, so a head that
+            # disagrees with the filename is the one fork signature visible in the file alone.
+            try:
+                head = json.loads(f.readline() or b"{}")
+                if isinstance(head, dict) and isinstance(head.get("sessionId"), str):
+                    head_session_id = head["sessionId"] or None
+            except Exception:
+                head_session_id = None
+            f.seek(0)
             # 1) Read the file head first to capture the first user message as the opener
             first_user_msg = _extract_first_user_msg(f)
 
@@ -760,6 +864,18 @@ def extract_metadata(jsonl_path: Path):
     tail_text = tail_bytes.decode("utf-8", errors="replace")
     lines = [l for l in tail_text.split("\n") if l.strip()]
 
+    # A persisted CLI branch selection also governs previews and turn counts.
+    selected_branch = False
+    if '"last-prompt"' in tail_text:
+        selected_branch = claude_history.rewind_status(jsonl_path)['status'] == 'selected'
+        if selected_branch:
+            rows = [row for _, row in claude_history.records(jsonl_path)]
+            lines = [json.dumps(row) for row in rows]
+            first_user_msg = next(({'role': 'user',
+                'text': _truncate(anchored_user_text(row), SNIPPET_MAX),
+                'ts': row.get('timestamp')} for row in rows
+                if anchored_user_text(row)), None)
+
     # Count real user turns to detect claude -p one-shot sessions, which have only the head
     # user message. When tail covers the whole file (size <= TAIL_BUFFER), the count is exact;
     # otherwise the file is large enough to be multi-turn, so clamp to 2 to avoid one-shot
@@ -767,13 +883,13 @@ def extract_metadata(jsonl_path: Path):
     user_turn_count = 0
     for line in lines:
         try:
-            d = json.loads(line)
+            d = normalize_record(json.loads(line))
         except ValueError:
             continue
         if _selection_user_turn(d):
             user_turn_count += 1
     single_turn = user_turn_count == 1
-    if size > TAIL_BUFFER:
+    if size > TAIL_BUFFER and not selected_branch:
         if user_turn_count < 2:
             observed = 0
             try:
@@ -798,7 +914,7 @@ def extract_metadata(jsonl_path: Path):
 
     for line in reversed(lines):
         try:
-            d = json.loads(line)
+            d = normalize_record(json.loads(line))
         except Exception:
             continue
         t = d.get("type")
@@ -819,7 +935,7 @@ def extract_metadata(jsonl_path: Path):
                     "ts": d.get("timestamp"),
                 })
         elif t == "user" and len(tail_users) < RECENT_USER_N:
-            text = _user_text(d.get("message", {}).get("content"))
+            text = anchored_user_text(d)
             if text:
                 tail_users.append({
                     "role": "user",
@@ -839,7 +955,7 @@ def extract_metadata(jsonl_path: Path):
     tail_qas = []
     for line in lines:
         try:
-            d = json.loads(line)
+            d = normalize_record(json.loads(line))
         except Exception:
             continue
         tt = d.get("type")
@@ -890,6 +1006,8 @@ def extract_metadata(jsonl_path: Path):
     all_tail = tail_users + tail_asts + tail_qas
     all_tail.sort(key=lambda m: m.get("ts") or "")
 
+    custom_title, compaction_parents = _scan_title_and_compactions(jsonl_path)
+
     # Prepend first_user_msg unless it is already in tail_users for a short session
     recent_msgs = []
     if first_user_msg:
@@ -906,10 +1024,14 @@ def extract_metadata(jsonl_path: Path):
         "mtime_iso": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
         "size": size,
         "recent_msgs": recent_msgs,
+        **activity_fields((m.get("ts") for m in recent_msgs
+                           if m.get("role") in ("user", "assistant")), mtime),
         "last_stop_reason": last_stop_reason,
         "user_turn_count": user_turn_count,
         "single_turn": single_turn,
-        "custom_title": _extract_custom_title(jsonl_path),
+        "custom_title": custom_title,
+        "head_session_id": head_session_id,
+        "compaction_parent_uuids": compaction_parents,
     }
 
 
@@ -967,66 +1089,10 @@ def _truncate_conv(text, max_chars):
     return text[:max_chars].rstrip() + ' …'
 
 
-def _extract_inner_xml(text, tag):
-    """Extract the first body from `<tag>...</tag>`, returning an empty string if absent.
-    Used to parse pseudo-XML system events injected by the harness: task-notification,
-    bash-output, and teammate.
-    """
-    open_tag = f'<{tag}>'
-    close_tag = f'</{tag}>'
-    i = text.find(open_tag)
-    if i < 0:
-        return ''
-    j = text.find(close_tag, i + len(open_tag))
-    if j < 0:
-        return ''
-    return text[i + len(open_tag):j]
-
-
-def _parse_system_event(stripped):
-    """Recognize user-role pseudo messages as system-event turns. stripped is lstrip output.
-    Return dict({type, text}) or None; None means it is not an event and the original skip
-    logic should apply.
-    """
-    if stripped.startswith('<task-notification>'):
-        status = _extract_inner_xml(stripped, 'status') or '?'
-        summary = _extract_inner_xml(stripped, 'summary') or '(no summary)'
-        return {'type': 'system_notification',
-                'text': f'[{status}] {summary}'}
-    if stripped.startswith('<bash-stdout>') or stripped.startswith('<bash-stderr>'):
-        out = _extract_inner_xml(stripped, 'bash-stdout')
-        err = _extract_inner_xml(stripped, 'bash-stderr')
-        parts = []
-        if out and out != '(Bash completed with no output)':
-            parts.append(out)
-        if err:
-            parts.append(f'[stderr] {err}')
-        body = '\n'.join(parts) if parts else '(no output)'
-        return {'type': 'bash_output', 'text': body}
-    if stripped.startswith('<teammate-message'):
-        # Attributes may include teammate_id / summary; body follows the closing >
-        head_end = stripped.find('>')
-        head = stripped[:head_end] if head_end > 0 else ''
-        # Extract teammate_id and summary attributes
-        def _attr(name):
-            key = f'{name}="'
-            i = head.find(key)
-            if i < 0:
-                return ''
-            i += len(key)
-            j = head.find('"', i)
-            return head[i:j] if j > i else ''
-        teammate = _attr('teammate_id') or 'teammate'
-        summary = _attr('summary')
-        body_text = stripped[head_end + 1:].rstrip()
-        # Drop the trailing </teammate-message> from the body
-        close_tag = '</teammate-message>'
-        if body_text.endswith(close_tag):
-            body_text = body_text[:-len(close_tag)].rstrip()
-        display = summary or body_text or '(empty)'
-        return {'type': 'teammate_message',
-                'text': f'[{teammate}] {display}'}
-    return None
+# The parser moved to sources/claude_events.py so the anchored transcript renders the same
+# events the reader does; these names stay for the call sites below and for tests.
+_extract_inner_xml = claude_events.extract_inner_xml
+_parse_system_event = claude_events.parse_system_user_event
 
 
 def _truncate_tool_result(text, max_chars):
@@ -1134,16 +1200,49 @@ def _format_qa_preview(qa_unit, max_chars):
 
 
 def file_fingerprint(path) -> str:
-    """Cheap change signal for a session file: mtime (ns) + size.
+    """Change signal for a session file and its observed history references.
 
     Taken *before* the file is parsed, so a write that lands mid-parse is still reported as a
     change on the next poll — the fingerprint can lag behind the content, never run ahead of it.
     """
+    if codex_source.is_codex_path(path):
+        from sources import codex_history
+        return codex_history.fingerprint(path)
+    if Path(PROJECTS_DIR).resolve() in Path(path).resolve().parents:
+        return claude_history.describe(path)['history_fingerprint']
     st = os.stat(path)
-    return f"{st.st_mtime_ns}:{st.st_size}"
+    version = f"{st.st_mtime_ns}:{st.st_size}"
+    return version
 
 
-def extract_conversation(jsonl_path):
+CONV_HARNESS_NOTE_MAX = 300
+
+
+def _claude_text_kind(record, skill_context):
+    """What a user-role record with readable text is, once commands and events are ruled out.
+
+    A person's message is `user` whatever preceded it - a built-in slash command such as
+    /clear announces no body, and the next thing typed used to be filed as its skill.
+    Whatever is left was written by the client (`isMeta`): the `skill` body when a command or
+    a Skill call announced one, otherwise a `harness_note` (the "[Image: source: ...]" line
+    after a pasted image, hook feedback, a message relayed from another session).
+    """
+    if anchored_user_text(record):
+        return 'user'
+    return 'skill' if skill_context else 'harness_note'
+
+
+def _claude_text_turn(record, text, skill_context, ts):
+    """The reader's turn for that record. A harness note is shown, short, as a system event:
+    it explains what the agent did next, and it is not something the person said."""
+    kind = _claude_text_kind(record, skill_context)
+    if kind == 'harness_note':
+        return {'type': 'system_notification', 'kind': kind,
+                'text': _truncate_conv(text, CONV_HARNESS_NOTE_MAX), 'ts': ts}
+    return {'type': kind, 'text': _truncate_conv(text, CONV_USER_MAX), 'ts': ts}
+
+
+def extract_conversation(jsonl_path, include_rewound=False):
     """Read the full JSONL and extract conversation content, filtering metadata/thinking/image and pairing tool_use with result."""
     turns = []
     pending_tools = {}  # tool_use_id -> {name, summary, ts}
@@ -1156,210 +1255,256 @@ def extract_conversation(jsonl_path):
     total_lines = 0
     project_path = None
     custom_title = None  # title set by /title; take the last one in the file
+    # Queue entries are provisional: the same text usually shows up again as a delivered
+    # record further down the file, and then the delivered record is the one turn to show.
+    # Park each entry's turn here and drop the ones a delivery later accounts for, rather
+    # than guessing from the queue bookkeeping alone.
+    queued_turns = {}  # exact enqueued string -> turn dicts awaiting confirmation, in queue order
+    delivered = {}  # exact delivered string -> how many times it was handed over
+    errors = claude_events.ApiErrorRun()
 
-    with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            total_lines += 1
-            try:
-                d = json.loads(line)
-            except Exception:
+    def close_error_run():
+        """Write a finished retry run's total into the slot reserved at its first record."""
+        if errors.count:
+            errors.slot['text'] = errors.summary()
+            errors.slot['retries'] = errors.count
+            errors.clear()
+
+    total_lines = claude_history.summary(jsonl_path)['physical_lines']
+    for _line_number, d in claude_history.records(jsonl_path, include_rewound=include_rewound):
+        t = d.get('type')
+        ts = d.get('timestamp', '')
+
+        if project_path is None and d.get('cwd'):
+            project_path = d['cwd']
+
+        handed_over = claude_events.delivered_text(d)
+        if handed_over is not None:
+            delivered[handed_over] = delivered.get(handed_over, 0) + 1
+
+        error_label = claude_events.api_error_label(d)
+        if error_label is not None:
+            # Still the same run only when nothing else was rendered in between: the slot
+            # this run reserved is still the newest turn.
+            if errors.matches(error_label) and turns and turns[-1] is errors.slot:
+                errors.extend(ts)
+            else:
+                close_error_run()
+                slot = {'type': 'api_error', 'text': error_label, 'retries': 1, 'ts': ts}
+                turns.append(slot)
+                errors.open(error_label, ts, slot)
+            continue
+
+        queued = claude_events.enqueued_text(d)
+        if queued is not None:
+            if claude_events.is_task_notification(queued):
+                turn = {'type': 'system_notification', 'delivered': False,
+                        'text': _truncate_conv(claude_events.parse_task_notification(queued), CONV_USER_MAX),
+                        'ts': ts}
+            elif claude_events.is_queued_human_text(queued):
+                turn = {'type': 'queued_input',
+                        'text': _truncate_conv(queued.strip(), CONV_USER_MAX), 'ts': ts}
+            else:
+                continue  # an injected block the reader already shows where it was delivered
+            turns.append(turn)
+            queued_turns.setdefault(queued, []).append(turn)
+            continue
+
+        notification = claude_events.notification_prompt(d)
+        if notification is not None:
+            turns.append({'type': 'system_notification', 'delivered': True,
+                          'text': _truncate_conv(claude_events.parse_task_notification(notification), CONV_USER_MAX),
+                          'ts': ts})
+            continue
+
+        if t == 'custom-title':
+            cleaned = _clean_custom_title(d.get('customTitle'))
+            if cleaned:
+                custom_title = cleaned
+            continue
+
+        if t == 'assistant':
+            content = d.get('message', {}).get('content', [])
+            if not isinstance(content, list):
                 continue
-
-            t = d.get('type')
-            ts = d.get('timestamp', '')
-
-            if project_path is None and d.get('cwd'):
-                project_path = d['cwd']
-
-            if t == 'custom-title':
-                cleaned = _clean_custom_title(d.get('customTitle'))
-                if cleaned:
-                    custom_title = cleaned
-                continue
-
-            if t == 'assistant':
-                content = d.get('message', {}).get('content', [])
-                if not isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if not isinstance(block, dict):
                     continue
-                text_parts = []
-                for block in content:
+                bt = block.get('type')
+                if bt == 'text':
+                    txt = block.get('text', '')
+                    if txt:
+                        text_parts.append(txt)
+                elif bt == 'tool_use':
+                    tool_id = block.get('id', '')
+                    tname = block.get('name', '?')
+                    # Translate Agent (subagent dispatch) into a subagent_spawn turn. The
+                    # corresponding tool_result is not expanded yet, but the tool_id must be
+                    # recorded with a spawn sentinel so the later tool_result branch skips it.
+                    # Otherwise it falls through to the unknown-tool fallback and renders an
+                    # anonymous tool block alongside subagent_spawn, violating spec section 6.2.
+                    if tname == 'Agent':
+                        inp = block.get('input', {}) or {}
+                        sub_name = inp.get('subagent_type') or 'general-purpose'
+                        desc = inp.get('description') or ''
+                        if not desc:
+                            # Fallback: when description is missing, use the first 120 prompt characters
+                            prompt = inp.get('prompt', '') or ''
+                            desc = prompt[:120]
+                        turns.append({
+                            'type': 'subagent_spawn',
+                            'name': sub_name,
+                            'description': _truncate_conv(desc, 500),
+                            'ts': ts,
+                        })
+                        pending_tools[tool_id] = {'__spawn__': True}
+                        continue
+                    pending_tools[tool_id] = {
+                        'name': tname,
+                        'summary': _tool_input_summary(
+                            tname, block.get('input', {})),
+                        'ts': ts,
+                        # Only AskUserQuestion keeps raw input for later QA unit synthesis
+                        '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
+                    }
+                    # AI called the Skill tool: mark the next user-array text block as the skill body
+                    if tname == 'Skill':
+                        pending_skill_body = True
+                # thinking: skip entirely
+            if text_parts:
+                turns.append({
+                    'type': 'assistant',
+                    'text': _truncate_conv(
+                        '\n'.join(text_parts), CONV_ASSISTANT_MAX),
+                    'ts': ts,
+                })
+
+        elif t == 'user':
+            summary = claude_events.compact_summary_text(d)
+            if summary is not None:
+                # The client's account of the turns it compacted away. Not a `user` turn -
+                # nobody said it - and not a one-line event either: it is the only record
+                # of what the agent still knew afterwards, so the reader keeps it, folded.
+                turns.append({'type': 'compact_summary',
+                              'text': _truncate_conv(summary, CONV_USER_MAX),
+                              'ts': ts})
+                next_is_skill = False
+                pending_skill_body = False
+                continue
+            msg_content = d.get('message', {}).get('content')
+            if isinstance(msg_content, str):
+                text = strip_leading_reminders(msg_content).strip()
+                if not text:
+                    next_is_skill = False
+                elif text.startswith('<command-'):
+                    # slash-command injection: the next user message is the skill body
+                    next_is_skill = True
+                elif text.startswith(('<local-command-', '<system-reminder>')):
+                    # silent injection only: skip without affecting next_is_skill
+                    next_is_skill = False
+                elif (event := _parse_system_event(text)) is not None:
+                    # System events (task-notification / bash output / teammate) become
+                    # independent turns, not user/skill, and do not affect next_is_skill.
+                    next_is_skill = False
+                    turns.append({
+                        **event,
+                        'text': _truncate_conv(event['text'], CONV_USER_MAX),
+                        'ts': ts,
+                    })
+                else:
+                    turns.append(_claude_text_turn(d, text, next_is_skill, ts))
+                    next_is_skill = False
+            elif isinstance(msg_content, list):
+                user_texts = []
+                for block in msg_content:
                     if not isinstance(block, dict):
                         continue
                     bt = block.get('type')
-                    if bt == 'text':
-                        txt = block.get('text', '')
-                        if txt:
-                            text_parts.append(txt)
-                    elif bt == 'tool_use':
-                        tool_id = block.get('id', '')
-                        tname = block.get('name', '?')
-                        # Translate Agent (subagent dispatch) into a subagent_spawn turn. The
-                        # corresponding tool_result is not expanded yet, but the tool_id must be
-                        # recorded with a spawn sentinel so the later tool_result branch skips it.
-                        # Otherwise it falls through to the unknown-tool fallback and renders an
-                        # anonymous tool block alongside subagent_spawn, violating spec section 6.2.
-                        if tname == 'Agent':
-                            inp = block.get('input', {}) or {}
-                            sub_name = inp.get('subagent_type') or 'general-purpose'
-                            desc = inp.get('description') or ''
-                            if not desc:
-                                # Fallback: when description is missing, use the first 120 prompt characters
-                                prompt = inp.get('prompt', '') or ''
-                                desc = prompt[:120]
+                    if bt == 'tool_result':
+                        tool_id = block.get('tool_use_id', '')
+                        raw = _tool_result_content(
+                            block.get('content', ''))
+                        is_err = block.get('is_error', False)
+                        if tool_id in pending_tools:
+                            tc = pending_tools.pop(tool_id)
+                            # Agent (subagent spawn) tool_result is not expanded yet
+                            if tc.get('__spawn__'):
+                                continue
+                            # AskUserQuestion becomes a QA turn, a conversation subtype, not a truncated tool path
+                            if tc['name'] == 'AskUserQuestion':
+                                qa_unit = _build_qa_unit(
+                                    tc.get('_raw_input'),
+                                    d.get('toolUseResult'))
+                                if qa_unit:
+                                    turns.append({
+                                        'type': 'qa',
+                                        'questions': qa_unit['questions'],
+                                        'ts': tc.get('ts', ts),
+                                    })
+                                    continue
+                                # fallback: on parse failure, use the tool path
+                            tc.pop('_raw_input', None)
+                            tc['result'] = _truncate_tool_result(
+                                raw, CONV_TOOL_RESULT_MAX)
+                            tc['is_error'] = is_err
+                            turns.append({'type': 'tool', **tc})
+                        else:
                             turns.append({
-                                'type': 'subagent_spawn',
-                                'name': sub_name,
-                                'description': _truncate_conv(desc, 500),
-                                'ts': ts,
+                                'type': 'tool', 'name': '?',
+                                'summary': '',
+                                'result': _truncate_tool_result(
+                                    raw, CONV_TOOL_RESULT_MAX),
+                                'is_error': is_err, 'ts': ts,
                             })
-                            pending_tools[tool_id] = {'__spawn__': True}
-                            continue
-                        pending_tools[tool_id] = {
-                            'name': tname,
-                            'summary': _tool_input_summary(
-                                tname, block.get('input', {})),
-                            'ts': ts,
-                            # Only AskUserQuestion keeps raw input for later QA unit synthesis
-                            '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
-                        }
-                        # AI called the Skill tool: mark the next user-array text block as the skill body
-                        if tname == 'Skill':
-                            pending_skill_body = True
-                    # thinking: skip entirely
-                if text_parts:
-                    turns.append({
-                        'type': 'assistant',
-                        'text': _truncate_conv(
-                            '\n'.join(text_parts), CONV_ASSISTANT_MAX),
-                        'ts': ts,
-                    })
-
-            elif t == 'user':
-                msg_content = d.get('message', {}).get('content')
-                if isinstance(msg_content, str):
-                    text = msg_content.strip()
-                    if not text:
+                    elif bt == 'text':
+                        txt = strip_leading_reminders(block.get('text', ''))
+                        if txt and not txt.lstrip().startswith(
+                                '<system-reminder>'):
+                            user_texts.append(txt)
+                    elif bt == 'image':
+                        user_texts.append('[image]')
+                if user_texts:
+                    full = '\n'.join(user_texts).strip()
+                    if not full or full.startswith((
+                            '<local-command-', '<command-')):
                         next_is_skill = False
-                    elif text.startswith('<command-'):
-                        # slash-command injection: the next user message is the skill body
-                        next_is_skill = True
-                    elif text.startswith(('<local-command-', '<system-reminder>')):
-                        # silent injection only: skip without affecting next_is_skill
-                        next_is_skill = False
-                    elif (event := _parse_system_event(text)) is not None:
-                        # System events (task-notification / bash output / teammate) become
-                        # independent turns, not user/skill, and do not affect next_is_skill.
-                        next_is_skill = False
+                        pending_skill_body = False
+                    elif (event := _parse_system_event(full)) is not None:
+                        # The interrupt marker the client writes on Esc, and any other
+                        # pseudo-message that arrives as blocks: an event, not user input.
                         turns.append({
                             **event,
                             'text': _truncate_conv(event['text'], CONV_USER_MAX),
                             'ts': ts,
                         })
-                    else:
-                        turn_type = 'skill' if next_is_skill else 'user'
                         next_is_skill = False
+                        pending_skill_body = False
+                    elif d.get('isMeta') and full == 'Continue from where you left off.':
+                        # Resume prompt injected by --resume / Continue button. Only the
+                        # client's own record counts: a person may type the same sentence.
                         turns.append({
-                            'type': turn_type,
-                            'text': _truncate_conv(text, CONV_USER_MAX),
+                            'type': 'system_notification',
+                            'text': 'Continue from where you left off',
                             'ts': ts,
                         })
-                elif isinstance(msg_content, list):
-                    user_texts = []
-                    for block in msg_content:
-                        if not isinstance(block, dict):
-                            continue
-                        bt = block.get('type')
-                        if bt == 'tool_result':
-                            tool_id = block.get('tool_use_id', '')
-                            raw = _tool_result_content(
-                                block.get('content', ''))
-                            is_err = block.get('is_error', False)
-                            if tool_id in pending_tools:
-                                tc = pending_tools.pop(tool_id)
-                                # Agent (subagent spawn) tool_result is not expanded yet
-                                if tc.get('__spawn__'):
-                                    continue
-                                # AskUserQuestion becomes a QA turn, a conversation subtype, not a truncated tool path
-                                if tc['name'] == 'AskUserQuestion':
-                                    qa_unit = _build_qa_unit(
-                                        tc.get('_raw_input'),
-                                        d.get('toolUseResult'))
-                                    if qa_unit:
-                                        turns.append({
-                                            'type': 'qa',
-                                            'questions': qa_unit['questions'],
-                                            'ts': tc.get('ts', ts),
-                                        })
-                                        continue
-                                    # fallback: on parse failure, use the tool path
-                                tc.pop('_raw_input', None)
-                                tc['result'] = _truncate_tool_result(
-                                    raw, CONV_TOOL_RESULT_MAX)
-                                tc['is_error'] = is_err
-                                turns.append({'type': 'tool', **tc})
-                            else:
-                                turns.append({
-                                    'type': 'tool', 'name': '?',
-                                    'summary': '',
-                                    'result': _truncate_tool_result(
-                                        raw, CONV_TOOL_RESULT_MAX),
-                                    'is_error': is_err, 'ts': ts,
-                                })
-                        elif bt == 'text':
-                            txt = block.get('text', '')
-                            if txt and not txt.lstrip().startswith(
-                                    '<system-reminder>'):
-                                user_texts.append(txt)
-                        elif bt == 'image':
-                            user_texts.append('[image]')
-                    if user_texts:
-                        full = '\n'.join(user_texts).strip()
-                        if not full or full.startswith((
-                                '<local-command-', '<command-')):
-                            next_is_skill = False
-                            pending_skill_body = False
-                        elif full.startswith('[Request interrupted by user'):
-                            # User interrupted the agent: system-injected event text, not user input
-                            turns.append({
-                                'type': 'system_notification',
-                                'text': 'Request interrupted by user',
-                                'ts': ts,
-                            })
-                            next_is_skill = False
-                            pending_skill_body = False
-                        elif full == 'Continue from where you left off.':
-                            # Resume prompt injected by --resume / Continue button, not user input
-                            turns.append({
-                                'type': 'system_notification',
-                                'text': 'Continue from where you left off',
-                                'ts': ts,
-                            })
-                            next_is_skill = False
-                            pending_skill_body = False
-                        elif pending_skill_body or full.startswith(
-                                'Base directory for this skill: '):
-                            # Body injected after the AI called Skill: classify as skill, not user
-                            turns.append({
-                                'type': 'skill',
-                                'text': _truncate_conv(full, CONV_USER_MAX),
-                                'ts': ts,
-                            })
-                            next_is_skill = False
-                            pending_skill_body = False
-                        else:
-                            turn_type = 'skill' if next_is_skill else 'user'
-                            next_is_skill = False
-                            pending_skill_body = False
-                            turns.append({
-                                'type': turn_type,
-                                'text': _truncate_conv(
-                                    full, CONV_USER_MAX),
-                                'ts': ts,
-                            })
+                        next_is_skill = False
+                        pending_skill_body = False
                     else:
-                        # Pure tool_result messages (for example Skill launch reports) do not
-                        # consume pending_skill_body / next_is_skill; the following real text inherits it.
-                        pass
+                        skill_context = (next_is_skill or pending_skill_body
+                                         or full.startswith('Base directory for this skill: '))
+                        turns.append(_claude_text_turn(d, full, skill_context, ts))
+                        next_is_skill = False
+                        pending_skill_body = False
+                else:
+                    # Pure tool_result messages (for example Skill launch reports) do not
+                    # consume pending_skill_body / next_is_skill; the following real text inherits it.
+                    pass
+
+    close_error_run()
+    confirmed = {id(turn) for turn in claude_events.confirmed_queue_entries(queued_turns, delivered)}
+    if confirmed:
+        turns = [turn for turn in turns if id(turn) not in confirmed]
 
     return {
         'id': jsonl_path.stem,
@@ -1367,7 +1512,31 @@ def extract_conversation(jsonl_path):
         'total_lines': total_lines,
         'turns': turns,
         'custom_title': custom_title,
+        'source': 'claude',
+        'include_rewound': include_rewound,
+        'jsonl_path': str(jsonl_path),
+        **claude_history.describe(jsonl_path),
     }
+
+
+_TRANSCRIPT_EVENT_LABELS = {
+    'system_notification': 'NOTIFICATION',
+    'bash_output': 'BASH-OUTPUT',
+    'teammate_message': 'TEAMMATE',
+}
+
+
+def _transcript_event_block(event):
+    label = _TRANSCRIPT_EVENT_LABELS.get(event['type'], 'SYSTEM')
+    return f'## {label}\n{event["text"]}\n'
+
+
+def _transcript_text_block(record, text, skill_context):
+    """The export block for a user-role record, labelled by the same rule the reader uses."""
+    kind = _claude_text_kind(record, skill_context)
+    if kind == 'harness_note':
+        return '## SYSTEM\n%s\n' % _truncate_conv(text, CONV_HARNESS_NOTE_MAX)
+    return '## %s\n%s\n' % (kind.upper(), text)
 
 
 def extract_transcript(jsonl_path: Path) -> str:
@@ -1381,123 +1550,174 @@ def extract_transcript(jsonl_path: Path) -> str:
     next_is_skill = False
     project_path = None
     total_lines = 0
+    # Same three event kinds as the reader, same confirmation rule. An export that quietly
+    # dropped them would read as though the agent had seen everything the person typed.
+    queued_blocks = {}
+    delivered = {}
+    errors = claude_events.ApiErrorRun()
 
-    with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            total_lines += 1
-            try:
-                d = json.loads(line)
-            except Exception:
+    def close_error_run():
+        if errors.count:
+            out_blocks[errors.slot] = '## CONNECTION-ERROR\n%s\n' % errors.summary()
+            errors.clear()
+
+    total_lines = claude_history.summary(jsonl_path)['physical_lines']
+    for _line_number, d in claude_history.records(jsonl_path):
+        t = d.get('type')
+        if project_path is None and d.get('cwd'):
+            project_path = d['cwd']
+
+        handed_over = claude_events.delivered_text(d)
+        if handed_over is not None:
+            delivered[handed_over] = delivered.get(handed_over, 0) + 1
+
+        error_label = claude_events.api_error_label(d)
+        if error_label is not None:
+            if errors.matches(error_label) and errors.slot == len(out_blocks) - 1:
+                errors.extend(d.get('timestamp', ''))
+            else:
+                close_error_run()
+                out_blocks.append('## CONNECTION-ERROR\n%s\n' % error_label)
+                errors.open(error_label, d.get('timestamp', ''), len(out_blocks) - 1)
+            continue
+
+        queued = claude_events.enqueued_text(d)
+        if queued is not None:
+            if claude_events.is_task_notification(queued):
+                block = ('## NOTIFICATION (queued, delivery not confirmed)\n%s\n'
+                         % claude_events.parse_task_notification(queued))
+            elif claude_events.is_queued_human_text(queued):
+                block = ('## QUEUED-INPUT (delivery not confirmed)\n%s\n' % queued.strip())
+            else:
                 continue
-            t = d.get('type')
-            if project_path is None and d.get('cwd'):
-                project_path = d['cwd']
+            out_blocks.append(block)
+            queued_blocks.setdefault(queued, []).append(len(out_blocks) - 1)
+            continue
 
-            if t == 'assistant':
-                content = d.get('message', {}).get('content', [])
-                if not isinstance(content, list):
+        notification = claude_events.notification_prompt(d)
+        if notification is not None:
+            out_blocks.append('## NOTIFICATION\n%s\n'
+                              % claude_events.parse_task_notification(notification))
+            continue
+
+        if t == 'assistant':
+            content = d.get('message', {}).get('content', [])
+            if not isinstance(content, list):
+                continue
+            text_parts = []
+            for block in content:
+                if not isinstance(block, dict):
                     continue
-                text_parts = []
-                for block in content:
+                bt = block.get('type')
+                if bt == 'text':
+                    txt = block.get('text', '')
+                    if txt:
+                        text_parts.append(txt)
+                elif bt == 'tool_use':
+                    tname = block.get('name', '?')
+                    pending_tools[block.get('id', '')] = {
+                        'name': tname,
+                        'summary': _tool_input_summary(
+                            tname, block.get('input', {})),
+                        # Keep raw AskUserQuestion input for QA synthesis
+                        '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
+                    }
+            if text_parts:
+                out_blocks.append('## ASSISTANT\n' + '\n'.join(text_parts) + '\n')
+
+        elif t == 'user':
+            summary = claude_events.compact_summary_text(d)
+            if summary is not None:
+                # The client's account of the turns it compacted away: kept whole, as the
+                # export keeps every message, and labelled as what it is rather than USER.
+                out_blocks.append('## COMPACTION SUMMARY\n%s\n' % summary)
+                next_is_skill = False
+                continue
+            msg_content = d.get('message', {}).get('content')
+            if isinstance(msg_content, str):
+                text = strip_leading_reminders(msg_content).strip()
+                if not text:
+                    next_is_skill = False
+                elif text.startswith('<command-'):
+                    next_is_skill = True
+                elif text.startswith(('<local-command-', '<system-reminder>')):
+                    next_is_skill = False
+                elif (event := _parse_system_event(text)) is not None:
+                    # Keep system events as independent labeled export blocks so later LLM readers can distinguish actors
+                    next_is_skill = False
+                    out_blocks.append(_transcript_event_block(event))
+                else:
+                    out_blocks.append(_transcript_text_block(d, text, next_is_skill))
+                    next_is_skill = False
+            elif isinstance(msg_content, list):
+                user_texts = []
+                for block in msg_content:
                     if not isinstance(block, dict):
                         continue
                     bt = block.get('type')
-                    if bt == 'text':
-                        txt = block.get('text', '')
-                        if txt:
-                            text_parts.append(txt)
-                    elif bt == 'tool_use':
-                        tname = block.get('name', '?')
-                        pending_tools[block.get('id', '')] = {
-                            'name': tname,
-                            'summary': _tool_input_summary(
-                                tname, block.get('input', {})),
-                            # Keep raw AskUserQuestion input for QA synthesis
-                            '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
-                        }
-                if text_parts:
-                    out_blocks.append('## ASSISTANT\n' + '\n'.join(text_parts) + '\n')
-
-            elif t == 'user':
-                msg_content = d.get('message', {}).get('content')
-                if isinstance(msg_content, str):
-                    text = msg_content.strip()
-                    if not text:
-                        next_is_skill = False
-                    elif text.startswith('<command-'):
-                        next_is_skill = True
-                    elif text.startswith(('<local-command-', '<system-reminder>')):
-                        next_is_skill = False
-                    elif (event := _parse_system_event(text)) is not None:
-                        # Keep system events as independent labeled export blocks so later LLM readers can distinguish actors
-                        next_is_skill = False
-                        label_map = {
-                            'system_notification': 'NOTIFICATION',
-                            'bash_output': 'BASH-OUTPUT',
-                            'teammate_message': 'TEAMMATE',
-                        }
-                        label = label_map.get(event['type'], 'SYSTEM')
-                        out_blocks.append(f'## {label}\n{event["text"]}\n')
-                    else:
-                        label = 'SKILL' if next_is_skill else 'USER'
-                        next_is_skill = False
-                        out_blocks.append(f'## {label}\n{text}\n')
-                elif isinstance(msg_content, list):
-                    user_texts = []
-                    for block in msg_content:
-                        if not isinstance(block, dict):
-                            continue
-                        bt = block.get('type')
-                        if bt == 'tool_result':
-                            tool_id = block.get('tool_use_id', '')
-                            # AskUserQuestion becomes a ## QA block; answer is not truncated
-                            if tool_id in pending_tools and pending_tools[tool_id]['name'] == 'AskUserQuestion':
-                                tc = pending_tools.pop(tool_id)
-                                qa_unit = _build_qa_unit(
-                                    tc.get('_raw_input'),
-                                    d.get('toolUseResult'))
-                                if qa_unit:
-                                    out_blocks.append(
-                                        '## QA\n' + _format_qa_transcript(qa_unit) + '\n')
-                                    continue
-                                # fallback: treat input/result as a tool path, a rare defensive case
-                                pending_tools[tool_id] = tc
-                            raw = _tool_result_content(block.get('content', ''))
-                            result = (raw or '').strip()
-                            if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
-                                n = TRANSCRIPT_TOOL_RESULT_MAX
-                                lines = result.count('\n') + 1
-                                result = (result[:n].rstrip() +
-                                          f' …[+{len(result)-n} chars, ~{lines} lines]')
-                            err_tag = ' [ERROR]' if block.get('is_error') else ''
-                            if tool_id in pending_tools:
-                                tc = pending_tools.pop(tool_id)
-                                tc.pop('_raw_input', None)
-                                head = f"[tool: {tc['name']}({tc['summary']})]{err_tag}"
-                            else:
-                                head = f"[tool: ?()]{err_tag}"
-                            out_blocks.append(head + ('\n' + result + '\n' if result else '\n'))
-                        elif bt == 'text':
-                            txt = block.get('text', '')
-                            if txt and not txt.lstrip().startswith('<system-reminder>'):
-                                user_texts.append(txt)
-                        elif bt == 'image':
-                            user_texts.append('[image]')
-                    if user_texts:
-                        full = '\n'.join(user_texts).strip()
-                        if full and not full.startswith(('<local-command-', '<command-')):
-                            label = 'SKILL' if next_is_skill else 'USER'
-                            next_is_skill = False
-                            out_blocks.append(f'## {label}\n{full}\n')
+                    if bt == 'tool_result':
+                        tool_id = block.get('tool_use_id', '')
+                        # AskUserQuestion becomes a ## QA block; answer is not truncated
+                        if tool_id in pending_tools and pending_tools[tool_id]['name'] == 'AskUserQuestion':
+                            tc = pending_tools.pop(tool_id)
+                            qa_unit = _build_qa_unit(
+                                tc.get('_raw_input'),
+                                d.get('toolUseResult'))
+                            if qa_unit:
+                                out_blocks.append(
+                                    '## QA\n' + _format_qa_transcript(qa_unit) + '\n')
+                                continue
+                            # fallback: treat input/result as a tool path, a rare defensive case
+                            pending_tools[tool_id] = tc
+                        raw = _tool_result_content(block.get('content', ''))
+                        result = (raw or '').strip()
+                        if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
+                            n = TRANSCRIPT_TOOL_RESULT_MAX
+                            lines = result.count('\n') + 1
+                            result = (result[:n].rstrip() +
+                                      f' …[+{len(result)-n} chars, ~{lines} lines]')
+                        err_tag = ' [ERROR]' if block.get('is_error') else ''
+                        if tool_id in pending_tools:
+                            tc = pending_tools.pop(tool_id)
+                            tc.pop('_raw_input', None)
+                            head = f"[tool: {tc['name']}({tc['summary']})]{err_tag}"
                         else:
-                            next_is_skill = False
-                    else:
+                            head = f"[tool: ?()]{err_tag}"
+                        out_blocks.append(head + ('\n' + result + '\n' if result else '\n'))
+                    elif bt == 'text':
+                        txt = strip_leading_reminders(block.get('text', ''))
+                        if txt and not txt.lstrip().startswith('<system-reminder>'):
+                            user_texts.append(txt)
+                    elif bt == 'image':
+                        user_texts.append('[image]')
+                if user_texts:
+                    full = '\n'.join(user_texts).strip()
+                    if not full or full.startswith(('<local-command-', '<command-')):
                         next_is_skill = False
+                    elif (event := _parse_system_event(full)) is not None:
+                        next_is_skill = False
+                        out_blocks.append(_transcript_event_block(event))
+                    else:
+                        out_blocks.append(_transcript_text_block(d, full, next_is_skill))
+                        next_is_skill = False
+                else:
+                    next_is_skill = False
+
+    close_error_run()
+    dropped = set(claude_events.confirmed_queue_entries(queued_blocks, delivered))
+    if dropped:
+        out_blocks = [block for i, block in enumerate(out_blocks) if i not in dropped]
 
     header = (f'# Session {jsonl_path.stem}\n'
               f'Project: {project_path or "(unknown)"}\n'
               f'Raw lines: {total_lines}\n\n')
-    return header + '\n'.join(out_blocks)
+    history = claude_history.describe(jsonl_path)
+    header += ('History: selected file only; shared history does not establish '
+               'continuation or fork. Other source branches are not merged.\n')
+    for source in history.get('source_files', []):
+        header += (f"Source ({source['relation']}): Session {source['session_id']} "
+                   f"{source['path']} [L{source['first_line']}-L{source['last_line']}]\n")
+    return header + '\n' + '\n'.join(out_blocks)
 
 
 def get_or_generate_brief(sid: str, jsonl_path: Path, transcript_text: str):
@@ -1507,10 +1727,11 @@ def get_or_generate_brief(sid: str, jsonl_path: Path, transcript_text: str):
     {'cached', 'generated', 'regenerated', 'failed'}. Failures are not cached.
     """
     source_digest = None
-    if devin_source.is_devin_path(jsonl_path):
+    if devin_source.is_devin_path(jsonl_path) or codex_source.is_codex_path(jsonl_path):
         # The selected chain may change without a timestamp/size change.
         size = len(transcript_text.encode())
-        mtime = devin_source.extract_metadata(jsonl_path)["mtime"]
+        mtime = (devin_source.extract_metadata(jsonl_path)["mtime"] if devin_source.is_devin_path(jsonl_path)
+                 else jsonl_path.stat().st_mtime)
         source_digest = hashlib.sha256(transcript_text.encode()).hexdigest()
     else:
         st = jsonl_path.stat()
@@ -1579,8 +1800,13 @@ def generate_briefing(transcript_text: str) -> str:
         return f"[briefing exception: {e}]"
 
 
-def _find_jsonl(session_id):
+def _find_jsonl(session_id, resolve_conversation=True):
     """Locate a JSONL file by session ID, checking cache first and filesystem fallback next.
+
+    A record id always resolves to exactly its own file; that is checked first and never
+    overridden. Only when nothing owns the id as a record is it tried as a conversation id,
+    which resolves to that conversation's current record. Callers that report the result to
+    a person or an Agent say which happened rather than swapping the target silently.
 
     When multiple files share a session_id, choose the largest one. Worktree ghost files are
     around 100B while real project copies are usually hundreds of KB; arbitrary traversal
@@ -1590,6 +1816,11 @@ def _find_jsonl(session_id):
     been populated yet but the Codex session can be found on disk.
     """
     candidates = [m for m in _cache.values() if m.get('id') == session_id]
+    if any(m.get("source") == "codex" for m in candidates):
+        # A warm cache may still name the previous rollout after a resume.
+        p, _forked_child = codex_source.find_rollout_by_session_id(session_id)
+        if p is not None:
+            return p
     candidates.sort(key=lambda m: m.get('size', 0), reverse=True)
     for meta in candidates:
         p = Path(meta['jsonl_path'])
@@ -1627,6 +1858,13 @@ def _find_jsonl(session_id):
     kimi_wire = kimi_source.find_wire_by_session_id(session_id)
     if kimi_wire is not None:
         return kimi_wire
+    found = pi_source.find_session(session_id)
+    if found is not None:
+        return found
+    if resolve_conversation:
+        current = conversation_index().get(session_id)
+        if current and current != session_id:
+            return _find_jsonl(current, resolve_conversation=False)
     return None
 
 
@@ -1659,7 +1897,7 @@ def compute_scope(session_meta, state_entry, now=None):
         return "archived"
     if entry.get("starred"):
         return "starred"
-    mtime = session_meta.get("mtime", 0)
+    mtime = activity_time(session_meta)
     cutoff = now - DUSTY_AFTER_DAYS * 86400
     if mtime >= cutoff:
         return "recent"
@@ -1669,6 +1907,7 @@ def compute_scope(session_meta, state_entry, now=None):
 # ---------- Scanning ----------
 def scan_sessions(force=False):
     """Scan all Claude + Codex sessions, update cache incrementally, and return items by descending mtime."""
+    global _codex_session_index_mtime_ns
     if force:
         if _cache or _CWD_TRUTH_MAP or _CWD_INDEX_SEEN or _CWD_SEQ:
             _mark_scan_cache_dirty()
@@ -1705,6 +1944,9 @@ def scan_sessions(force=False):
                         _mark_scan_cache_dirty()
 
     # --- Codex paths ---
+    current_codex_index_mtime_ns = codex_source.session_index_mtime_ns()
+    codex_titles_changed = current_codex_index_mtime_ns != _codex_session_index_mtime_ns
+    codex_index_titles = codex_source.session_index_titles() if codex_titles_changed else {}
     codex_seen = set()
     for jsonl_path in codex_source.scan_sessions():
         key = str(jsonl_path)
@@ -1719,6 +1961,20 @@ def scan_sessions(force=False):
             if meta and _cache.get(key) != meta:
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
+
+        # Most Codex titles live only in session_index.jsonl. Refresh just that cached field
+        # when the roster changes instead of reparsing every transcript on every new title.
+        cached = _cache.get(key)
+        indexed_title = codex_index_titles.get((cached or {}).get("id"))
+        if indexed_title and cached.get("custom_title") != indexed_title:
+            updated = dict(cached)
+            updated["custom_title"] = indexed_title
+            _cache[key] = updated
+            _mark_scan_cache_dirty()
+
+    if codex_titles_changed:
+        _codex_session_index_mtime_ns = current_codex_index_mtime_ns
+        _mark_scan_cache_dirty()
 
     # --- Antigravity paths ---
     ag_seen = set()
@@ -1773,11 +2029,26 @@ def scan_sessions(force=False):
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
 
+    # --- Pi paths ---
+    pi_seen = set()
+    for path in pi_source.scan_sessions():
+        key = str(path)
+        pi_seen.add(key)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        cached = _cache.get(key)
+        if force or cached is None or cached.get("mtime") != mtime:
+            meta = pi_source.extract_metadata(path)
+            if meta:
+                _cache[key] = meta
+                _mark_scan_cache_dirty()
+
     # --- Clean stale cache keys per root prefix so sources do not delete each other. ---
     # Codex uses is_codex_path to recognize both roots (sessions + archived_sessions); otherwise
     # stale keys under the archived root would never be removed because they are not under CODEX_ROOT.
     projects_root_str = str(PROJECTS_DIR)
-    ag_root_str = str(ag_source.AG_BRAIN)
     cwd_index_removed = False
     for p in list(_cache.keys()):
         if p.startswith(projects_root_str) and p not in claude_seen:
@@ -1790,10 +2061,13 @@ def scan_sessions(force=False):
         elif devin_source.is_devin_path(p) and p not in devin_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
-        elif p.startswith(ag_root_str) and p not in ag_seen:
+        elif ag_source.is_antigravity_path(p) and p not in ag_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
         elif kimi_source.is_kimi_path(p) and p not in kimi_seen:
+            del _cache[p]
+            _mark_scan_cache_dirty()
+        elif pi_source.is_pi_path(p) and p not in pi_seen:
             del _cache[p]
             _mark_scan_cache_dirty()
     for p in list(_CWD_SEQ.keys()):
@@ -1806,7 +2080,7 @@ def scan_sessions(force=False):
         _rebuild_cwd_truth_map_from_seq()
 
     save_scan_cache()
-    return _dedup_by_id(sorted(_cache.values(), key=lambda m: m["mtime"], reverse=True))
+    return _dedup_by_id(sorted(_cache.values(), key=activity_time, reverse=True))
 
 
 def _dedup_by_id(metas):
@@ -1825,7 +2099,12 @@ def _dedup_by_id(metas):
         if not sid:
             continue
         prev = by_id.get(sid)
-        if prev is None or m.get("size", 0) > prev.get("size", 0):
+        newer_codex = (prev is not None and m.get("source") == "codex"
+                       and prev.get("source") == "codex"
+                       and codex_source.rollout_rank(Path(m["jsonl_path"])) >
+                       codex_source.rollout_rank(Path(prev["jsonl_path"])))
+        if (prev is None or newer_codex or
+                (m.get("source") != "codex" and m.get("size", 0) > prev.get("size", 0))):
             by_id[sid] = m
     # Preserve original order (descending mtime)
     seen_ids = set()
@@ -1841,11 +2120,173 @@ def _dedup_by_id(metas):
     return result
 
 
+# ---------- Conversation identity ----------
+# A record is one transcript file and keeps its id, path and line anchors forever. A
+# conversation is the ordered set of records a person would call one conversation: a Claude
+# Desktop rewind, resume or cross-file compaction mints a new record id without starting a
+# new conversation. See docs/decisions/2026-09-20-conversation-identity.md.
+_COMPACTION_UUID_OWNERS = {}
+# A project directory with more transcripts than this is not worth a linear scan for one
+# uuid; the conversation stays split, which is the safe answer.
+COMPACTION_SIBLING_CAP = 200
+COMPACTION_READ_CAP = 64 * 1024 * 1024  # per sibling, for the ripgrep-less fallback
+_conversation_memo = {"generation": None, "at": 0.0, "index": {}, "by_record": {}}
+CONVERSATION_MEMO_TTL = 5.0  # seconds; Desktop descriptors change without touching _cache
+
+
+def _uuid_owner_stems(directory, uuid):
+    """Which transcripts in one project directory contain this record uuid.
+
+    Bounded on purpose: siblings of the file that asked, never the whole library. The answer
+    is memoized for the process because a record's uuid never moves between files.
+    """
+    key = (str(directory), uuid)
+    if key in _COMPACTION_UUID_OWNERS:
+        return _COMPACTION_UUID_OWNERS[key]
+    pattern = r'"uuid"\s*:\s*"%s"' % re.escape(uuid)
+    try:
+        siblings = sorted(Path(directory).glob("*.jsonl"))
+    except OSError:
+        siblings = []
+    stems = ()
+    if siblings and len(siblings) <= COMPACTION_SIBLING_CAP:
+        hits = None
+        rg_executable = _find_ripgrep()
+        if rg_executable:
+            try:
+                proc = subprocess.run(
+                    [rg_executable, "-l", "--no-messages", "-e", pattern, "--"]
+                    + [str(p) for p in siblings],
+                    capture_output=True, timeout=30,
+                )
+                if proc.returncode in (0, 1):
+                    hits = [Path(line) for line in
+                            proc.stdout.decode("utf-8", "replace").splitlines() if line]
+            except Exception:
+                hits = None
+        if hits is None:
+            compiled = _uuid_pattern(uuid)
+            hits = []
+            for sibling in siblings:
+                try:
+                    if sibling.stat().st_size > COMPACTION_READ_CAP:
+                        continue
+                    if compiled.search(sibling.read_bytes()):
+                        hits.append(sibling)
+                except OSError:
+                    continue
+        stems = tuple(sorted({p.stem for p in hits}))
+    _COMPACTION_UUID_OWNERS[key] = stems
+    return stems
+
+
+def compaction_links(metas):
+    """Resolve (child, parent) record pairs for compactions that started a new file.
+
+    A compact_boundary carries logicalParentUuid, the last record before the compaction.
+    When that uuid is not in the boundary's own file, the conversation continued across a
+    file boundary and the owning file is its predecessor. Ambiguous or unresolvable
+    boundaries produce no link, so the records stay separate.
+    """
+    links = []
+    for meta in metas:
+        if meta.get("source", "claude") != "claude":
+            continue
+        parents = meta.get("compaction_parent_uuids") or []
+        child = meta.get("id")
+        path = meta.get("jsonl_path")
+        if not parents or not child or not isinstance(path, str):
+            continue
+        for uuid in parents:
+            owners = [stem for stem in _uuid_owner_stems(Path(path).parent, uuid)
+                      if stem != child]
+            if len(owners) == 1:
+                links.append((child, owners[0]))
+                break  # The first resolvable boundary names this file's predecessor.
+    return links
+
+
+def annotate_conversations(items, descriptor_root=None):
+    """Stamp conversation identity onto cards. Pure with respect to the cards given."""
+    memberships = claude_desktop.descriptor_memberships(descriptor_root)
+    return session_identity.conversation_identity(items, memberships, compaction_links(items))
+
+
+CONVERSATION_FIELDS = ("conversation_id", "conversation_current_id", "conversation_records",
+                       "forked_from_record_id", "forked_from_conversation_id",
+                       "spawned_from_conversation_id")
+
+
+def _conversation_views():
+    """(facts by record id, current record by conversation id) from the warm cache.
+
+    Never rescans and never reads state: conversation identity is derived from the
+    transcripts and the Desktop descriptors alone. Memoized against the scan-cache
+    generation, plus a short clock so a descriptor written while the cache is idle is
+    still picked up.
+    """
+    now = time.time()
+    if (_conversation_memo["generation"] == _cache_generation
+            and now - _conversation_memo["at"] < CONVERSATION_MEMO_TTL):
+        return _conversation_memo["by_record"], _conversation_memo["index"]
+    if not _cache:
+        load_scan_cache()
+    metas = _dedup_by_id(sorted(_cache.values(), key=activity_time, reverse=True))
+    by_record, index = {}, {}
+    for item in annotate_conversations(metas):
+        facts = {key: item[key] for key in CONVERSATION_FIELDS if key in item}
+        by_record[item["id"]] = facts
+        conversation_id = facts.get("conversation_id")
+        current = facts.get("conversation_current_id")
+        if conversation_id and current and conversation_id != current:
+            index[conversation_id] = current
+    _conversation_memo.update(generation=_cache_generation, at=now,
+                              by_record=by_record, index=index)
+    return by_record, index
+
+
+def conversation_index():
+    """{conversation_id: current record id}, for resolving a conversation id to a file.
+
+    A record id is never looked up here: it already resolves to exactly its own file, and
+    keeping that true is the whole contract.
+    """
+    return _conversation_views()[1]
+
+
+def conversation_for_record(record_id):
+    """Conversation facts for one record, using the warm cache and never rescanning."""
+    return _conversation_views()[0].get(record_id)
+
+
+def conversation_state_targets(record_id):
+    """(current record to write, every record whose state counts) for one target.
+
+    Accepts a conversation id or any member record id. A write lands on the current record;
+    only un-star has to reach further, because a star set on a superseded record would
+    otherwise resurrect the moment the conversation folds again.
+    """
+    resolved = conversation_index().get(record_id)
+    target = resolved or record_id
+    facts = conversation_for_record(target)
+    if not facts:
+        return target, [target]
+    current = facts.get("conversation_current_id") or target
+    members = [r["id"] for r in facts.get("conversation_records") or []] or [current]
+    return current, members
+
+
 def enriched_sessions():
-    """Return all sessions without filtering, adding scope/archive/star/note fields.
+    """Return all sessions without filtering, adding local user metadata.
 
     Also backfill source / cli_version / model for Claude-path metadata; Codex already
     includes them. The frontend labels cards by source.
+
+    Order matters. Per-record state is resolved first so the Desktop rewind annotation can
+    still title an ancestor from that record's own override. Conversation identity is
+    computed next, and only then does the conversation-level state view replace the current
+    record's fields. Superseded records keep their own values: they are evidence of what the
+    user did to that file, not a second opinion about the conversation.
     """
     items = scan_sessions()
     import time as _time
@@ -1865,7 +2306,29 @@ def enriched_sessions():
         item["starred"] = bool(st.get("starred"))
         item["starred_at"] = st.get("starred_at")
         item["note"] = st.get("note", "")
+        item["title_override"] = st.get("title_override", "")
+        item["display_title"] = item["title_override"] or item.get("custom_title", "")
+        item["human_confirmed"] = bool(st.get("human_confirmed"))
         result.append(item)
+    result = annotate_conversations(claude_desktop.annotate_sessions(result))
+    for item in result:
+        sid = item["id"]
+        if (item.get("conversation_current_id") or sid) != sid:
+            continue  # Superseded record: its card keeps reporting its own state.
+        records = [r["id"] for r in item.get("conversation_records") or []] or [sid]
+        merged = session_identity.merge_conversation_state(records, sid, _state)
+        item["archived"] = _effective_archived(item, merged["archived_entry"])
+        item["archived_at"] = merged["archived_at"]
+        item["starred"] = merged["starred"]
+        item["starred_at"] = merged["starred_at"]
+        item["note"] = merged["note"]
+        item["older_notes"] = merged["older_notes"]
+        item["title_override"] = merged["title_override"]
+        item["title_override_source_id"] = merged["title_override_source_id"]
+        item["display_title"] = item["title_override"] or item.get("custom_title", "")
+        item["human_confirmed"] = merged["human_confirmed"]
+        item["scope"] = compute_scope(
+            item, dict(merged["archived_entry"], starred=merged["starred"]), now=now)
     return result
 
 
@@ -1900,12 +2363,54 @@ def _find_ripgrep():
     return None
 
 
-def _search_session(jsonl_path: Path, terms: list[str]):
+def _search_codex_history(path, terms, metadata=None, messages=None):
+    """Search a Codex session's effective history.
+
+    messages, when given, replaces reading the history: an iterable of
+    (source_path, line, role, text) in history order that must include every message
+    whose text contains a term (search_sessions supplies only such messages).
+    """
+    from sources import codex_history
+    meta = metadata or codex_source.extract_metadata(path) or {}
+    sid = meta.get('id') or ''
+    title = str(_state.get(sid, {}).get('title_override') or meta.get('custom_title') or '')
+    found = {term for term in terms if term in title.lower()}
+    snippets = [{'text': 'Session title: ' + title, 'role': '', 'term': ''}] if found else []
+    if messages is None:
+        messages = codex_history.iter_messages(path)
+    for source_path, line, role, text in messages:
+        hits = [term for term in terms if term in text.lower()]
+        found.update(hits)
+        if hits and len(snippets) < SEARCH_MAX_SNIPPETS:
+            term = hits[0]
+            at = text.lower().find(term)
+            start, end = max(0, at - SEARCH_SNIPPET_CONTEXT), min(len(text), at + len(term) + SEARCH_SNIPPET_CONTEXT)
+            snippets.append({'text': ('…' if start else '') + re.sub(r'\s+', ' ', text[start:end]).strip() + ('…' if end < len(text) else ''),
+                'role': 'you' if role == 'user' else '', 'term': term,
+                'source_path': source_path, 'line': line})
+    if any(term in sid.lower() for term in terms):
+        return snippets or [{'text': 'Session ID: ' + sid, 'role': '', 'term': ''}]
+    return snippets if len(found) == len(terms) else []
+
+
+def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = None, lines=None):
     """Full-text search one session by scanning user/assistant messages and returning snippets.
 
     terms is a lowercase search-term list with AND semantics: every term must appear in the
     same session to count as a hit. Return [] for no match.
+
+    lines, when given, replaces reading a Claude, Antigravity or Kimi file: the
+    (physical line number, raw line) pairs that contain at least one term, in file order.
+    Every other line is skipped by the line prefilter below anyway, so the result is the
+    same. The line number is what lets Antigravity drop rows a rewind abandoned. Other
+    sources ignore it.
     """
+    if codex_source.is_codex_path(jsonl_path):
+        return _search_codex_history(jsonl_path, terms, session_meta)
+    if pi_source.is_pi_path(jsonl_path):
+        meta = session_meta or pi_source.extract_metadata(jsonl_path) or {}
+        return pi_source.search(jsonl_path, terms, meta,
+                                str(_state.get(meta.get("id"), {}).get("title_override") or ""))
     # Claude filename = session id (jsonl_path.stem is the UUID). Codex filenames are
     # rollout-<date>-<uuid>.jsonl, so stem is not the ID shown on the card. Read it from
     # session_meta.payload.id, otherwise pasted Codex card IDs miss id_hit and fallback
@@ -1914,13 +2419,24 @@ def _search_session(jsonl_path: Path, terms: list[str]):
         try:
             found, snippets = devin_source.search(jsonl_path, terms)
             sid = devin_source.extract_metadata(jsonl_path)["id"]
+            custom_title = str((session_meta or {}).get("custom_title") or "")
+            title_override = str(_state.get(sid, {}).get("title_override") or "")
+            title_terms = {
+                term for term in terms
+                if term in f"{custom_title} {title_override}".lower()
+            }
+            if title_terms:
+                snippets.insert(0, {
+                    "text": f"Session title: {title_override or custom_title}",
+                    "role": "", "term": "",
+                })
             if any(t in sid.lower() for t in terms):
                 return snippets or [{"text": f"Session ID: {sid}", "role": "", "term": ""}]
-            return snippets if len(found) == len(terms) else []
+            return snippets if len(set(found) | title_terms) == len(terms) else []
         except (ValueError, OSError, sqlite3.Error):
             return []
     is_codex = codex_source.is_codex_path(jsonl_path)
-    is_ag = str(jsonl_path).startswith(str(ag_source.AG_BRAIN))
+    is_ag = ag_source.is_antigravity_path(jsonl_path)
     if is_codex:
         meta = codex_source._read_session_meta(jsonl_path)
         session_id = (meta or {}).get('id') or jsonl_path.stem
@@ -1931,15 +2447,25 @@ def _search_session(jsonl_path: Path, terms: list[str]):
         # Kimi filenames are wire.jsonl; id is the <session_id>/agents/main/ ancestor directory name
         session_id = kimi_source.session_id_for_path(jsonl_path)
     else:
-        session_id = jsonl_path.stem
+        session_id = (session_meta or {}).get("id") or jsonl_path.stem
 
     # 1) Session ID match: any term matching the ID returns a snippet
     id_lower = session_id.lower()
     id_hit = any(t in id_lower for t in terms)
 
-    # 2) Scan JSONL and collect all text lines
+    # 2) Titles are metadata, and Codex commonly stores them only in the separate
+    # session_index.jsonl roster. Seed the match before scanning transcript messages.
+    custom_title = str((session_meta or {}).get("custom_title") or "")
+    title_override = str(_state.get(session_id, {}).get("title_override") or "")
+    title_blob = f"{custom_title} {title_override}".lower()
+    title_terms = {term for term in terms if term in title_blob}
     snippets = []
-    term_found = set()  # track which terms were found
+    if title_terms:
+        matched_title = title_override or custom_title
+        snippets.append({"text": f"Session title: {matched_title}", "role": "", "term": ""})
+    term_found = set(title_terms)  # track terms found in title or message text
+    if len(term_found) == len(terms):
+        return snippets
 
     # Cheap line-level prefilter: substring-match the raw line first and skip expensive
     # json.loads for lines that cannot match. Body text is contained in the raw line, so if
@@ -1949,22 +2475,48 @@ def _search_session(jsonl_path: Path, terms: list[str]):
     # frequency terms that rg cannot narrow at file level but most lines still do not contain.
     prefilter_safe = not any(c in t for t in terms for c in '"\\\n\r\t')
 
+    # An Antigravity rewind abandons earlier rows inside the same file. Search the live
+    # history only, in line with the reader and with the other branching sources.
+    skip_lines = ag_source.abandoned_line_numbers(jsonl_path) if is_ag else frozenset()
+
+    # Text the person typed into the queue is findable even when nothing proves the agent
+    # ever received it - losing your own words because the agent missed them is the worse
+    # failure. Its snippet is held back until the whole file has been read, because a
+    # delivered copy further down means the delivered record is the one to show. Background
+    # notifications and connection errors are not indexed: nobody searches for them, and
+    # they would drown real matches in sessions that retried a hundred times.
+    queued_hits = {}  # exact enqueued string -> pending snippets, in queue order
+    queued_delivered = {}
+
     try:
-        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if prefilter_safe:
+        with contextlib.ExitStack() as stack:
+            f = lines if lines is not None else enumerate(stack.enter_context(
+                open(jsonl_path, "r", encoding="utf-8", errors="replace")), 1)
+            for line_number, line in f:
+                if line_number in skip_lines:
+                    continue
+                # Supplied lines were already selected by ripgrep for containing a term.
+                if prefilter_safe and lines is None:
                     line_lower = line.lower()
                     if not any(term in line_lower for term in terms):
                         continue
                 try:
-                    d = json.loads(line)
+                    d = normalize_record(json.loads(line))
                 except Exception:
                     continue
 
                 t = d.get("type")
                 text = ""
+                handed_over = claude_events.delivered_text(d)
+                if handed_over is not None:
+                    queued_delivered[handed_over] = queued_delivered.get(handed_over, 0) + 1
+                queued = claude_events.enqueued_text(d)
+                if queued is not None:
+                    if claude_events.is_queued_human_text(queued):
+                        _record_queued_hit(queued, terms, term_found, queued_hits)
+                    continue
                 if t == "user":
-                    text = _user_text(d.get("message", {}).get("content"))
+                    text = human_turn_words(d)
                 elif t == "assistant":
                     text = _assistant_text(d.get("message", {}).get("content"))
                 elif t == "response_item":
@@ -2014,12 +2566,58 @@ def _search_session(jsonl_path: Path, terms: list[str]):
         print(f"[warn] search read failed {jsonl_path}: {e}", file=sys.stderr)
         return []
 
+    confirmed = {id(snippet) for snippet in claude_events.confirmed_queue_entries(queued_hits, queued_delivered)}
+    for parked in queued_hits.values():
+        for snippet in parked:
+            if id(snippet) not in confirmed and len(snippets) < SEARCH_MAX_SNIPPETS:
+                snippets.append(snippet)
+
     # AND semantics: unless the ID matched, every term must appear in text
     if id_hit:
         return snippets or [{"text": f"Session ID: {session_id}", "role": "", "term": ""}]
     if len(term_found) < len(terms):
         return []
     return snippets
+
+
+def _snippet_around(text, term):
+    """The SEARCH_SNIPPET_CONTEXT window around a term, with ellipses where it was cut."""
+    idx = text.lower().find(term)
+    if idx < 0:
+        return None
+    start = max(0, idx - SEARCH_SNIPPET_CONTEXT)
+    end = min(len(text), idx + len(term) + SEARCH_SNIPPET_CONTEXT)
+    body = re.sub(r"\s+", " ", text[start:end].strip())
+    return ("…" if start > 0 else "") + body + ("…" if end < len(text) else "")
+
+
+def _record_queued_hit(queued, terms, term_found, queued_hits):
+    """Park a snippet for queued text, and count its terms towards the AND match now.
+
+    Counting immediately is safe either way: if a delivered copy turns up later it carries
+    the same words, so the session matches on the same terms whichever record is shown.
+    The snippet itself waits, because only the end of the file settles which record that is.
+    """
+    text = queued.strip()
+    lowered = text.lower()
+    for term in terms:
+        if term in lowered:
+            term_found.add(term)
+            body = _snippet_around(text, term)
+            if body is not None:
+                queued_hits.setdefault(queued, []).append({
+                    "text": body, "role": claude_events.QUEUED_INPUT_ROLE, "term": term})
+            break
+
+
+def _raw_forms(term):
+    """Return the forms a term can take in raw JSONL bytes.
+
+    JSON escapes quotes, backslashes and control characters inside strings, so a term
+    containing them appears in the file only in escaped form.
+    """
+    escaped = json.dumps(term, ensure_ascii=False)[1:-1]
+    return [term] if escaped == term else [term, escaped]
 
 
 def _rg_prefilter(terms, paths):
@@ -2047,7 +2645,10 @@ def _rg_prefilter(terms, paths):
     candidate = None  # None = unconstrained so far; intersect per term to implement AND
     for term in terms:
         # -i is case-insensitive and -F is literal matching, aligned with _search_session lower()+substring semantics
-        fixed = [rg_executable, "-l", "-i", "-F", "--no-messages", "--", term]
+        fixed = [rg_executable, "-l", "-i", "-F", "--no-messages"]
+        for form in _raw_forms(term):
+            fixed += ["-e", form]
+        fixed.append("--")
         fixed_bytes = sum(len(os.fsencode(arg)) + 1 for arg in fixed)
         batches = []
         batch = []
@@ -2087,6 +2688,195 @@ def _rg_prefilter(terms, paths):
     return candidate or set()
 
 
+_RG_PCRE2 = {}
+
+
+def _rg_has_pcre2(rg_executable):
+    if rg_executable not in _RG_PCRE2:
+        try:
+            r = subprocess.run([rg_executable, "--pcre2-version"], capture_output=True, timeout=5)
+            _RG_PCRE2[rg_executable] = r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            _RG_PCRE2[rg_executable] = False
+    return _RG_PCRE2[rg_executable]
+
+
+def _rg_matching_lines(terms, paths):
+    """Yield (path, line_number, byte_offset, raw_line) for lines containing any term.
+
+    Lines of one file arrive together and in file order; ripgrep prints each file's
+    matches as one block. Matching is case-insensitive and literal, like the file-level
+    prefilter. Raises RuntimeError when ripgrep is unavailable or fails, so the caller
+    can fall back to reading whole files.
+    """
+    rg_executable = _find_ripgrep()
+    if not rg_executable:
+        raise RuntimeError("ripgrep executable not found")
+    fixed = [rg_executable, "--no-messages", "-a", "-i", "-n", "-b", "-H", "--null",
+             "--no-heading", "--color", "never"]
+    if _rg_has_pcre2(rg_executable):
+        # Skip occurrences inside JSON keys ("timestamp", "sessionId", ...), which appear
+        # on nearly every line. Inside a JSON string a quote is always escaped, so a term
+        # followed by identifier characters and '":' can only be (part of) a key.
+        fixed.append("-P")
+        for term in terms:
+            for form in _raw_forms(term):
+                fixed += ["-e", re.escape(form) + '(?![A-Za-z0-9_]*":)']
+    else:
+        fixed.append("-F")
+        for term in terms:
+            for form in _raw_forms(term):
+                fixed += ["-e", form]
+    fixed.append("--")
+    fixed_bytes = sum(len(os.fsencode(arg)) + 1 for arg in fixed)
+    batches, batch, batch_bytes = [], [], fixed_bytes
+    for path_str in paths:
+        arg_bytes = len(os.fsencode(path_str)) + 1
+        if batch and batch_bytes + arg_bytes > RIPGREP_ARG_CHUNK_BYTES:
+            batches.append(batch)
+            batch, batch_bytes = [], fixed_bytes
+        batch.append(path_str)
+        batch_bytes += arg_bytes
+    if batch:
+        batches.append(batch)
+    for path_batch in batches:
+        try:
+            proc = subprocess.Popen([*fixed, *path_batch], stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL)
+        except OSError as e:
+            raise RuntimeError(f"ripgrep could not start ({type(e).__name__})")
+        try:
+            for raw in proc.stdout:
+                path, sep, rest = raw.partition(b"\0")
+                number, _, rest = rest.partition(b":")
+                offset, _, content = rest.partition(b":")
+                if not sep or not number.isdigit() or not offset.isdigit():
+                    raise RuntimeError("unexpected ripgrep output")
+                if content.endswith(b"\n"):
+                    content = content[:-1]
+                yield os.fsdecode(path), int(number), int(offset), content
+        finally:
+            proc.stdout.close()
+            code = proc.wait()
+        # rg exit codes: 0=matches, 1=no matches (both normal), >=2=real error
+        if code not in (0, 1):
+            raise RuntimeError(f"ripgrep exited with status {code}")
+
+
+def _codex_message(raw):
+    """Return (role, text) when a raw Codex record is a user/assistant message, else None.
+
+    Mirrors codex_history.read_segment's record validation and iter_messages' selection.
+    """
+    try:
+        row = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(row, dict) or row.get("type") != "response_item":
+        return None
+    payload = row.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "message":
+        return None
+    role = payload.get("role")
+    if role not in {"user", "assistant"}:
+        return None
+    text = codex_source._extract_text_from_message_content(payload.get("content"))
+    return (role, text) if text else None
+
+
+def _search_by_matching_lines(terms, entries, chains):
+    """Search entries using only lines that contain a term; return {path: snippets}.
+
+    entries: [(meta, jsonl_path, kind)] with kind "generic", "codex" or "full".
+    chains: {str(codex path): [(resolved file, last line or None)]} in history order.
+    Every candidate file is streamed: a session may match one term by title or id and
+    another in content. A file ripgrep reports in two separate blocks is read in full.
+    """
+    by_path = {str(path): (meta, path) for meta, path, kind in entries if kind == "generic"}
+    codex_files = {f for chain in chains.values() for f, _ in chain}
+    stream_files = sorted(set(by_path) | codex_files)
+    results, codex_hits, finished, reread = {}, {}, set(), set()
+    sizes = {}
+
+    def lines_of(first, rest):
+        yield first
+        yield from rest
+
+    records = _rg_matching_lines(terms, stream_files)
+    failure = []
+
+    def advance():
+        # A matcher below swallows exceptions from its line source, so a ripgrep
+        # failure must be recorded here and re-raised after the stream ends.
+        try:
+            return next(records, None)
+        except RuntimeError as e:
+            failure.append(e)
+            return None
+
+    pending = advance()
+    while pending is not None:
+        path = pending[0]
+
+        def same_file():
+            nonlocal pending
+            while pending is not None and pending[0] == path:
+                yield pending
+                pending = advance()
+
+        if path in finished:
+            reread.add(path)
+            for _ in same_file():
+                pass
+            continue
+        finished.add(path)
+        if path in by_path:
+            meta, jsonl_path = by_path[path]
+            rows = ((number, raw.decode("utf-8", "replace"))
+                    for _, number, _, raw in same_file())
+            results[path] = _search_session(jsonl_path, terms, meta, lines=rows)
+            for _ in same_file():  # drain lines left after an early stop
+                pass
+        else:
+            if path not in sizes:
+                try:
+                    sizes[path] = os.path.getsize(path)
+                except OSError:
+                    sizes[path] = 0
+            for _, number, offset, raw in same_file():
+                # A final line without a newline is still being written; the history
+                # reader skips it, so search does too.
+                if offset + len(raw) + 1 > sizes[path]:
+                    continue
+                message = _codex_message(raw)
+                if message and any(term in message[1].lower() for term in terms):
+                    codex_hits.setdefault(path, []).append((number, *message))
+
+    if failure:
+        raise failure[0]
+    for path in reread:
+        if path in by_path:
+            meta, jsonl_path = by_path[path]
+            results[path] = _search_session(jsonl_path, terms, meta)
+    for meta, jsonl_path, kind in entries:
+        key = str(jsonl_path)
+        if kind == "generic" and key not in results:
+            results[key] = _search_session(jsonl_path, terms, meta, lines=[])
+        elif kind == "codex":
+            chain = chains[key]
+            if any(f in reread for f, _ in chain):
+                results[key] = _search_session(jsonl_path, terms, meta)
+                continue
+            messages = [(f, number, role, text)
+                        for f, last in chain
+                        for number, role, text in codex_hits.get(f, ())
+                        if last is None or number <= last]
+            results[key] = _search_codex_history(jsonl_path, terms, meta, messages=messages)
+        elif kind == "full":
+            results[key] = _search_session(jsonl_path, terms, meta)
+    return results
+
+
 def search_sessions(query: str):
     """Full-text search all sessions. Return [{id, snippets}, ...] sorted by existing cache mtime descending."""
     terms = [t.lower() for t in query.split() if t]
@@ -2098,31 +2888,118 @@ def search_sessions(query: str):
         scan_sessions()
 
     # (key, meta) list matching the original traversal order
-    ordered = sorted(_cache.items(), key=lambda kv: kv[1].get("mtime", 0), reverse=True)
+    ordered = sorted(_cache.items(), key=lambda kv: activity_time(kv[1]), reverse=True)
+    from sources import codex_history
+    selected = {str(path) for path in codex_history.canonical_paths([Path(m['jsonl_path']) for _, m in ordered])}
+    ordered = [(key, meta) for key, meta in ordered if str(meta['jsonl_path']) in selected]
+
 
     # ripgrep prefilter: select files whose content contains every term and skip expensive
     # per-line JSON parsing for the rest. prefiltered=None means rg is unavailable, so scan
     # every file as before.
     prefiltered = _rg_prefilter(terms, [Path(m["jsonl_path"]) for _, m in ordered])
 
-    results = []
+    # A Codex continuation also carries text from ancestor files, so its own file is not
+    # enough evidence to skip it. Prefilter it against every physical file of its
+    # effective history instead; without a complete indexed history, read it in full.
+    inherited = {
+        Path(m["jsonl_path"]) for _, m in ordered
+        if codex_source.is_codex_path(Path(m["jsonl_path"]))
+        and (codex_source._read_session_meta(Path(m["jsonl_path"])) or {}).get("history_base")
+    }
+    chains = {}
+    chain_hit = {}
+    if inherited and prefiltered is not None:
+        from sources import history_index
+        chains = history_index.segment_paths(inherited, codex_history.resolve) or {}
+        chain_files = sorted({f for files in chains.values() if files for f, _ in files})
+        term_hits = []
+        for term in terms:
+            hits = _rg_prefilter([term], [Path(f) for f in chain_files]) if chain_files else set()
+            if hits is None:
+                term_hits = None
+                break
+            term_hits.append(hits)
+        if term_hits is not None:
+            for path, files in chains.items():
+                if files:
+                    chain_hit[str(path)] = all(any(f in hits for f, _ in files) for hits in term_hits)
+
+    candidates = []
     for key, meta in ordered:
         jsonl_path = Path(meta["jsonl_path"])
         is_devin = devin_source.is_devin_path(jsonl_path)
         if not is_devin and not jsonl_path.exists():
             continue
-        if not is_devin and prefiltered is not None and str(jsonl_path) not in prefiltered:
+        passed = chain_hit.get(str(jsonl_path))
+        if passed is None:
+            passed = (is_devin or jsonl_path in inherited or prefiltered is None
+                      or str(jsonl_path) in prefiltered)
+        if not passed:
             # Content does not contain all terms. The only exception is a term matching the
             # session id itself, because rg searches content and does not cover pure id-substring
             # search. Use meta.id plus filename stem as an id fallback, covering Claude
             # (id=stem) and Codex (id in meta). Prefer one extra downstream check over skipping
             # a true hit.
             id_blob = (meta.get("id", "") + " " + jsonl_path.stem).lower()
-            if not any(t in id_blob for t in terms):
+            title_blob = (
+                str(meta.get("custom_title") or "") + " "
+                + str(_state.get(meta.get("id"), {}).get("title_override") or "")
+            ).lower()
+            if not any(t in id_blob or t in title_blob for t in terms):
                 continue
-        snippets = _search_session(jsonl_path, terms)
+        candidates.append((meta, jsonl_path))
+
+    # Read only the lines that contain a term instead of whole files, whose size is
+    # mostly tool output. Every matcher already skips other lines, so results are
+    # unchanged. Terms that JSON escapes are also matched in their escaped raw form.
+    found = None
+    line_mode = prefiltered is not None
+    if line_mode:
+        entries, line_chains = [], {}
+        for meta, jsonl_path in candidates:
+            key = str(jsonl_path)
+            if devin_source.is_devin_path(jsonl_path) or pi_source.is_pi_path(jsonl_path):
+                entries.append((meta, jsonl_path, "full"))
+            elif codex_source.is_codex_path(jsonl_path):
+                if jsonl_path in inherited:
+                    chain = chains.get(jsonl_path)
+                    if not chain:
+                        entries.append((meta, jsonl_path, "full"))
+                        continue
+                    line_chains[key] = [(f, last) for f, last in chain[:-1]] + [(chain[-1][0], None)]
+                else:
+                    line_chains[key] = [(str(jsonl_path.resolve()), None)]
+                entries.append((meta, jsonl_path, "codex"))
+            else:
+                entries.append((meta, jsonl_path, "generic"))
+        try:
+            found = _search_by_matching_lines(terms, entries, line_chains)
+        except RuntimeError as e:
+            _warn_search_fallback(f"line search unavailable ({e})")
+            found = None
+
+    # A hit keeps its own record id, path and line anchors so the evidence stays traceable,
+    # and carries the conversation it belongs to so a caller can fold hits without losing
+    # which physical file each snippet came from.
+    conversations = {}
+    try:
+        conversations = _conversation_views()[0]
+    except Exception as e:  # identity is additive; search must never fail because of it
+        print(f"[warn] conversation identity unavailable for search: {e}", file=sys.stderr)
+
+    results = []
+    for meta, jsonl_path in candidates:
+        if found is not None:
+            snippets = found.get(str(jsonl_path), [])
+        else:
+            snippets = _search_session(jsonl_path, terms, meta)
         if snippets:
-            results.append({"id": meta["id"], "snippets": snippets})
+            facts = conversations.get(meta["id"]) or {}
+            results.append({"id": meta["id"], "snippets": snippets,
+                            "conversation_id": facts.get("conversation_id", meta["id"]),
+                            "conversation_current_id":
+                                facts.get("conversation_current_id", meta["id"])})
 
     return results
 
@@ -2458,7 +3335,7 @@ def open_file_in_system(file_path: str, root: str, reveal: bool = False) -> tupl
 PWA_MANIFEST = json.dumps({
     "name": "Session Logbook",
     "short_name": "Logbook",
-    "description": "A minimal, local dashboard for browsing your Claude Code, Codex, Antigravity, and Kimi Code agent sessions.",
+    "description": "Find and re-read local Claude Code, Codex, Antigravity, Kimi Code, Devin Local, and Pi agent sessions.",
     "start_url": "/",
     "scope": "/",
     "display": "standalone",
@@ -2661,14 +3538,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, search_sessions(q))
 
         if path == "/api/stats":
-            import time as _time
-            items = scan_sessions()
-            now = _time.time()
+            # Count conversations, not records. Before this the bar counted every file a
+            # rewind chain left behind while the list showed one card, so the two disagreed.
             counts = {"starred": 0, "recent": 0, "dusty": 0, "archived": 0}
-            for m in items:
-                sc = compute_scope(m, _state.get(m["id"], {}), now=now)
-                counts[sc] = counts.get(sc, 0) + 1
-            counts["total"] = len(items)
+            total = 0
+            for item in enriched_sessions():
+                if (item.get("conversation_current_id") or item["id"]) != item["id"]:
+                    continue
+                total += 1
+                counts[item["scope"]] = counts.get(item["scope"], 0) + 1
+            counts["total"] = total
             return self._send_json(200, counts)
 
         cm = re.match(r"^/api/sessions/([^/]+)/conversation$", path)
@@ -2685,6 +3564,38 @@ class Handler(BaseHTTPRequestHandler):
                     fingerprint = conv['fingerprint']
                 else:
                     fingerprint = file_fingerprint(jsonl)
+                include_rewound = (qs.get('include_rewound') or [''])[0] == '1'
+                desktop_meta = {}
+                if Path(PROJECTS_DIR).resolve() in Path(jsonl).resolve().parents:
+                    desktop_meta = claude_desktop.metadata_for_session(sid, scan_sessions())
+                    fingerprint += ':' + hashlib.sha256(json.dumps(
+                        desktop_meta, sort_keys=True).encode()).hexdigest()
+                    fingerprint += ':all' if include_rewound else ':current'
+                # The reader shows the conversation's own note and title, so a change to
+                # either has to move the fingerprint or the standalone live reader stops
+                # redrawing. The record id in the response never changes.
+                resolved_from = conversation_index().get(sid)
+                record_id = resolved_from or sid
+                conversation = dict(conversation_for_record(record_id) or {})
+                if resolved_from:
+                    conversation['resolved_from_conversation_id'] = sid
+                conversation_state = {}
+                current_id = conversation.get('conversation_current_id') or record_id
+                members = ([r['id'] for r in conversation.get('conversation_records') or []]
+                           or [record_id])
+                if current_id == record_id:
+                    conversation_state = session_identity.merge_conversation_state(
+                        members, record_id, _state)
+                # A note is a note about the conversation, and a write lands on the current
+                # record whichever member is addressed. So an earlier record on screen shows
+                # the same note the card shows and the same note an edit here would change -
+                # otherwise a deep link to a superseded record looks like the note was lost.
+                note_state = conversation_state or session_identity.merge_conversation_state(
+                    members, current_id, _state)
+                fingerprint += ':' + hashlib.sha256(json.dumps(
+                    [conversation, note_state.get('older_notes'), note_state.get('note'),
+                     conversation_state.get('title_override')],
+                    sort_keys=True, default=str).encode()).hexdigest()
                 seen = (qs.get('fingerprint') or [''])[0]
                 if seen and seen == fingerprint:
                     return self._send_json(200, {'id': sid, 'unchanged': True, 'fingerprint': fingerprint})
@@ -2692,12 +3603,27 @@ class Handler(BaseHTTPRequestHandler):
                     pass  # Already parsed from one coherent SQLite snapshot above.
                 elif codex_source.is_codex_path(jsonl):
                     conv = codex_source.extract_conversation(jsonl)
-                elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
+                elif ag_source.is_antigravity_path(jsonl):
                     conv = ag_source.extract_conversation(jsonl)
                 elif kimi_source.is_kimi_path(jsonl):
                     conv = kimi_source.extract_conversation(jsonl)
+                elif pi_source.is_pi_path(jsonl):
+                    conv = pi_source.extract_conversation(jsonl)
                 else:
-                    conv = extract_conversation(jsonl)
+                    conv = extract_conversation(jsonl, include_rewound=include_rewound)
+                    conv.update(desktop_meta)
+                st = _state.get(sid, {})
+                conv['title_override'] = st.get('title_override', '')
+                conv['display_title'] = conv['title_override'] or conv.get('custom_title', '')
+                conv['human_confirmed'] = bool(st.get('human_confirmed'))
+                conv.update(conversation)
+                if conversation_state:
+                    conv['title_override'] = conversation_state['title_override']
+                    conv['title_override_source_id'] = conversation_state['title_override_source_id']
+                    conv['display_title'] = conv['title_override'] or conv.get('custom_title', '')
+                    conv['human_confirmed'] = conversation_state['human_confirmed']
+                conv['note'] = note_state['note']
+                conv['older_notes'] = note_state['older_notes']
                 conv['fingerprint'] = fingerprint
                 return self._send_json(200, conv)
             except Exception as e:
@@ -2714,10 +3640,12 @@ class Handler(BaseHTTPRequestHandler):
                     text = devin_source.extract_transcript(jsonl)
                 elif codex_source.is_codex_path(jsonl):
                     text = codex_source.extract_transcript(jsonl)
-                elif str(jsonl).startswith(str(ag_source.AG_BRAIN)):
+                elif ag_source.is_antigravity_path(jsonl):
                     text = ag_source.extract_transcript(jsonl)
                 elif kimi_source.is_kimi_path(jsonl):
                     text = kimi_source.extract_transcript(jsonl)
+                elif pi_source.is_pi_path(jsonl):
+                    text = pi_source.extract_transcript(jsonl)
                 else:
                     text = extract_transcript(jsonl)
                 brief_param = (qs.get('brief') or ['0'])[0].lower()
@@ -2762,9 +3690,15 @@ class Handler(BaseHTTPRequestHandler):
                 elif codex_source.is_codex_path(jsonl):
                     src = "codex"
                     body = anchored_transcript.render_codex(jsonl)
+                elif ag_source.is_antigravity_path(jsonl):
+                    src = "antigravity"
+                    body = anchored_transcript.render_antigravity(jsonl)
                 elif kimi_source.is_kimi_path(jsonl):
                     src = "kimi"
                     body = anchored_transcript.render_kimi(jsonl)
+                elif pi_source.is_pi_path(jsonl):
+                    src = "pi"
+                    body = anchored_transcript.render_pi(jsonl)
                 else:
                     src = "claude"
                     body = anchored_transcript.render_claude(jsonl)
@@ -2843,14 +3777,23 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         path = url.path
 
-        m = re.match(r"^/api/sessions/([^/]+)/(archive|note|star)$", path)
+        m = re.match(r"^/api/sessions/([^/]+)/(archive|note|star|title|human)$", path)
         if m:
-            sid, action = urllib.parse.unquote(m.group(1)), m.group(2)
+            addressed, action = urllib.parse.unquote(m.group(1)), m.group(2)
             try:
                 body = self._read_json()
             except Exception:
                 return self._send_json(400, {"error": "Invalid JSON"})
 
+            # A conversation id or any of its member record ids writes to the current
+            # record, so the next rewind does not strand what was just set. state.json stays
+            # keyed by record: nothing here re-keys or rewrites an existing entry.
+            try:
+                sid, members = conversation_state_targets(addressed)
+            except Exception as e:
+                print(f"[warn] conversation targets unavailable for {action}: {e}",
+                      file=sys.stderr)
+                sid, members = addressed, [addressed]
             entry = dict(_state.get(sid, {}))
             if action == "archive":
                 archived = bool(body.get("archived", True))
@@ -2870,10 +3813,35 @@ class Handler(BaseHTTPRequestHandler):
                     entry["starred_at"] = datetime.now(timezone.utc).isoformat()
                 else:
                     entry.pop("starred_at", None)
+                    # The conversation reads as starred when any member is, so un-starring
+                    # has to clear every member; otherwise the star comes straight back.
+                    for member in members:
+                        if member == sid:
+                            continue
+                        other = _state.get(member)
+                        if other and other.get("starred"):
+                            other = dict(other)
+                            other["starred"] = False
+                            other.pop("starred_at", None)
+                            _state[member] = other
+            elif action == "title":
+                title = str(body.get("title_override") or "").strip()
+                if title:
+                    entry["title_override"] = title
+                else:
+                    entry.pop("title_override", None)
+            elif action == "human":
+                confirmed = bool(body.get("human_confirmed", True))
+                if confirmed:
+                    entry["human_confirmed"] = True
+                else:
+                    entry.pop("human_confirmed", None)
 
             _state[sid] = entry
             save_state()
-            return self._send_json(200, {"id": sid, **entry})
+            return self._send_json(200, {"id": sid, **entry,
+                                         "addressed_id": addressed,
+                                         "conversation_members": members})
 
         if path == "/api/open-file":
             try:

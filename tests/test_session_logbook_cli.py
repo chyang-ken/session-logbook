@@ -12,6 +12,10 @@ from sources import codex as codex_source
 from sources import kimi as kimi_source
 
 
+# Distinct from the single-turn Claude fixture the `recent` tests write.
+AG_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+
+
 def _write_jsonl(path: Path, rows: list[dict]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
@@ -27,8 +31,10 @@ class SessionLogbookCliTests(unittest.TestCase):
         self.claude_root = root / "claude-projects"
         self.codex_root = root / "codex-sessions"
         self.codex_archived = root / "codex-archived"
+        self.codex_index = root / "session_index.jsonl"
         self.kimi_root = root / "kimi-home" / "sessions"
         self.devin_root = root / "devin-data"
+        self.ag_root = root / "antigravity-brain"
 
         project = self.claude_root / "-Users-alice-my-app"
         self.claude = _write_jsonl(project / "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl", [
@@ -62,6 +68,14 @@ class SessionLogbookCliTests(unittest.TestCase):
                     "type": "task_complete"}},
             ],
         )
+        self.codex_index.write_text(
+            json.dumps({
+                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "thread_name": "Codex Launch Review",
+                "updated_at": "2026-08-20T10:00:04Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
 
         kimi_session = self.kimi_root / "wd_third-app_0123456789ab" / "session_cccccccc-cccc-cccc-cccc-cccccccccccc"
         (kimi_session).mkdir(parents=True)
@@ -89,15 +103,53 @@ class SessionLogbookCliTests(unittest.TestCase):
                 "content": [{"type": "text", "text": "hidden token audit"}]}},
         ])
 
+        # An Antigravity conversation that was rewound once: the opening two rows (L1-L2)
+        # were abandoned when the user re-asked at the same step slot on L3.
+        self.antigravity = _write_jsonl(
+            self.ag_root / AG_ID / ".system_generated" / "logs" / "transcript.jsonl",
+            [
+                {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:00Z",
+                 "content": "<USER_REQUEST>review the deploy script</USER_REQUEST>"},
+                {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:01Z",
+                 "content": "Abandoned draft answer."},
+                {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:02Z",
+                 "content": "<USER_REQUEST>trace the deploy failure</USER_REQUEST>"},
+                {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:03Z",
+                 "thinking": "weighing a stale cache against a bad tag",
+                 "tool_calls": [{"name": "run_command", "args": {
+                     "toolSummary": '"run the deploy check"', "CommandLine": '"./check.sh"',
+                     "Cwd": '"/Users/alice/deploy-app"'}}]},
+                {"step_index": 2, "source": "SYSTEM", "type": "RUN_COMMAND",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:04Z",
+                 "content": "Created At: 2026-08-20T09:00:04Z\nCompleted At: 2026-08-20T09:00:05Z\n"
+                            "stale cache detected\nexit 0"},
+                {"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE",
+                 "status": "DONE", "created_at": "2026-08-20T09:00:06Z",
+                 "content": "The deploy failed on a stale cache."},
+            ],
+        )
+
         self.patches = [
             mock.patch.object(server, "PROJECTS_DIR", self.claude_root),
             mock.patch.object(codex_source, "CODEX_ROOT", self.codex_root),
             mock.patch.object(codex_source, "CODEX_ARCHIVED_ROOT", self.codex_archived),
+            mock.patch.object(codex_source, "SESSION_INDEX_PATH", self.codex_index),
+            mock.patch.object(codex_source, "_INDEX_CACHE", {"mtime_ns": None, "data": {}}),
             mock.patch.object(cli.devin_source, "DEVIN_ROOT", self.devin_root),
+            mock.patch.object(cli.pi_source, "PI_SESSIONS_ROOT", root / "no-pi"),
+            mock.patch.object(cli.ag_source, "AG_BRAIN", self.ag_root),
+            mock.patch.object(cli.ag_source, "AG_SUMMARIES", root / "no-summaries.pb"),
+            mock.patch.object(cli.ag_source, "_TITLE_CACHE", {"mtime": 0.0, "data": {}}),
             mock.patch.object(kimi_source, "KIMI_SESSIONS_ROOT", self.kimi_root),
             mock.patch.object(kimi_source, "SESSION_INDEX_PATH", self.kimi_root.parent / "session_index.jsonl"),
             mock.patch.object(kimi_source, "_INDEX_CACHE", {"mtime": 0.0, "data": {}}),
             mock.patch.object(server, "_cache", {}),
+            mock.patch.object(server, "_state", {}),
+            mock.patch.object(server, "_state_loaded", True),
             mock.patch.object(server, "_CWD_TRUTH_MAP", {}),
             mock.patch.object(server, "_CWD_INDEX_SEEN", set()),
             mock.patch.object(server, "_CWD_SEQ", {}),
@@ -109,6 +161,62 @@ class SessionLogbookCliTests(unittest.TestCase):
         for patcher in reversed(self.patches):
             patcher.stop()
         self.tmp.cleanup()
+
+    def test_recent_lists_newest_first_without_a_known_target(self):
+        rows = cli.recent_sessions(since="2026-08-01")
+        self.assertEqual([row["id"] for row in rows], [
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            AG_ID,
+        ])
+        self.assertEqual(rows[0]["title"], "design payment retry")
+        self.assertEqual(rows[1]["title"], "Codex Launch Review")
+        self.assertEqual(rows[2]["source"], "antigravity")
+        self.assertEqual(rows[0]["last_user_at_iso"], "2026-08-20T10:00:02+00:00")
+        self.assertTrue(all(row["selection_group"] == "primary" for row in rows))
+
+    def test_recent_since_excludes_older_conversations(self):
+        self.assertEqual(cli.recent_sessions(since="2026-08-21"), [])
+        self.assertEqual(cli.recent_sessions(since="6h"), [])
+
+    def test_recent_hides_single_turn_sessions_until_asked_or_confirmed(self):
+        sid = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+        _write_jsonl(self.claude_root / "-Users-alice-my-app" / f"{sid}.jsonl", [
+            {"type": "user", "timestamp": "2026-08-20T11:00:00Z", "cwd": "/Users/alice/my-app",
+             "message": {"content": "nightly dependency report"}},
+            {"type": "assistant", "timestamp": "2026-08-20T11:00:01Z", "cwd": "/Users/alice/my-app",
+             "message": {"content": [{"type": "text", "text": "report written"}],
+                         "stop_reason": "end_turn"}},
+        ])
+        self.assertNotIn(sid, [row["id"] for row in cli.recent_sessions(since="2026-08-01")])
+
+        shown = cli.recent_sessions(since="2026-08-01", include_suspected=True)
+        suspected = next(row for row in shown if row["id"] == sid)
+        self.assertEqual(shown[0]["id"], sid)
+        self.assertEqual((suspected["selection_group"], suspected["selection_reason"]),
+                         ("other", "single_user_turn"))
+
+        server._state[sid] = {"human_confirmed": True}
+        confirmed = next(row for row in cli.recent_sessions(since="2026-08-01") if row["id"] == sid)
+        self.assertEqual((confirmed["selection_group"], confirmed["selection_reason"]),
+                         ("primary", "human_confirmed"))
+
+    def test_recent_prefers_the_personal_title_and_filters_by_project(self):
+        server._state["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] = {"title_override": "Billing recovery"}
+        rows = cli.recent_sessions(since="2026-08-01", project="my-app")
+        self.assertEqual([(row["id"], row["title"]) for row in rows],
+                         [("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Billing recovery")])
+
+    def test_recent_subagents_are_opt_in(self):
+        rows = cli.recent_sessions(since="2026-08-01", include_subagents=True)
+        child = next(row for row in rows if row["is_subagent"])
+        self.assertEqual(child["parent_session_id"], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        self.assertFalse(any(row["is_subagent"] for row in cli.recent_sessions(since="2026-08-01")))
+
+    def test_recent_by_user_falls_back_when_a_source_has_no_message_times(self):
+        rows = cli.recent_sessions(since="2026-08-01", by="user", source="codex")
+        self.assertEqual([row["id"] for row in rows], ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"])
+        self.assertIsNone(rows[0]["last_user_at_iso"])
 
     def test_known_id_resolves_without_dashboard_server(self):
         path = cli.resolve_target("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -185,6 +293,21 @@ class SessionLogbookCliTests(unittest.TestCase):
         self.assertEqual(status["explicit_terminal"], "complete")
         self.assertEqual(status["liveness"], "unknown")
 
+    def test_codex_title_search_uses_external_index_metadata(self):
+        hits = cli.search_sessions("Codex Launch Review", source="codex")
+        self.assertEqual([hit["id"] for hit in hits],
+                         ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"])
+        self.assertEqual(hits[0]["snippets"][0]["role"], "title")
+
+    def test_user_defined_title_is_searchable(self):
+        server._state["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] = {
+            "title_override": "Billing recovery",
+        }
+        hits = cli.search_sessions("billing retry")
+        self.assertEqual([hit["id"] for hit in hits],
+                         ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"])
+        self.assertEqual(hits[0]["snippets"][0]["text"], "Billing recovery")
+
     def test_kimi_search_status_and_context(self):
         hits = cli.search_sessions("rotation scheduled", source="kimi")
         self.assertEqual([hit["id"] for hit in hits], ["session_cccccccc-cccc-cccc-cccc-cccccccccccc"])
@@ -207,6 +330,79 @@ class SessionLogbookCliTests(unittest.TestCase):
 
         resolved = cli.resolve_target("session_cccccccc-cccc-cccc-cccc-cccccccccccc")
         self.assertEqual(resolved, self.kimi.resolve())
+
+    def test_antigravity_locate_status_context_and_evidence(self):
+        resolved = cli.resolve_target(AG_ID)
+        self.assertEqual(resolved, self.antigravity.resolve())
+
+        status = cli.status_for(self.antigravity)
+        self.assertEqual(status["source"], "antigravity")
+        self.assertEqual(status["project_path"], "/Users/alice/deploy-app")
+        # The cursor is the raw file end, so the abandoned rows stay countable and readable.
+        self.assertEqual(status["next_cursor"], "L6")
+        self.assertEqual(status["rewind_abandoned_rows"], 2)
+        self.assertEqual(status["rewind_abandoned_lines"], "L1-L2")
+        self.assertEqual(status["rewinds"], [{"line": 3, "step": 0, "abandoned_rows": 2}])
+        self.assertEqual(status["explicit_terminal"], "unknown")
+
+        rendered = cli.render_context(self.antigravity)
+        self.assertIn("Navigable transcript of a Antigravity session", rendered)
+        self.assertIn("Abandoned by rewind: 2 raw lines at L1-L2", rendered)
+        self.assertIn("[U1] [L3] USER 2026-08-20T09:00:02", rendered)
+        self.assertIn("[L4]   💭 THINK: weighing a stale cache against a bad tag", rendered)
+        self.assertIn("[L4]   🔧 run_command: run the deploy check", rendered)
+        self.assertIn("[L5]   ⮑ RESULT OK run_command:", rendered)
+        self.assertIn("[L6] ASSISTANT: The deploy failed on a stale cache.", rendered)
+        self.assertIn("# NEXT_CURSOR: L6", rendered)
+        # Only one user turn survives the rewind, and no abandoned row is rendered.
+        self.assertNotIn("[U2]", rendered)
+        self.assertNotIn("Abandoned draft answer.", rendered)
+        self.assertNotIn("review the deploy script", rendered)
+
+        # Hiding a row from the reading must not make its source unreachable.
+        evidence = cli.read_evidence(self.antigravity, line=2, context=0)
+        self.assertTrue(evidence.startswith("[L2] "), evidence[:40])
+        self.assertIn("Abandoned draft answer.", evidence)
+
+    def test_antigravity_search_matches_live_history_only(self):
+        hits = cli.search_sessions("deploy failure", source="antigravity")
+        self.assertEqual([hit["id"] for hit in hits], [AG_ID])
+        self.assertEqual(hits[0]["snippets"][0]["role"], "user")
+        self.assertEqual(hits[0]["snippets"][0]["line"], 3)
+        self.assertEqual(cli.search_sessions("abandoned draft", source="antigravity"), [])
+        self.assertEqual(
+            cli.search_sessions("trace the deploy failure", role="assistant",
+                                source="antigravity"), [])
+
+    def test_antigravity_follow_names_the_lines_a_rewind_took_back(self):
+        # A follower that read the opening branch keeps cursor L2; the rewind on L3 then
+        # retracts everything it was given.
+        text = cli.render_context(self.antigravity, after_line=2)
+        self.assertIn("# REMOVED_BEFORE_CURSOR: L1-L2", text)
+        self.assertIn("# FOLLOW_MODE: live history after in-file rewinds", text)
+        self.assertIn("Retire anything derived from REMOVED_BEFORE_CURSOR anchors", text)
+        self.assertNotIn("Abandoned draft answer.", text)
+        self.assertIn("[L6] ASSISTANT: The deploy failed on a stale cache.", text)
+
+    def test_antigravity_follow_emits_from_the_cursor_and_repeats_its_line_once(self):
+        text = cli.render_context(self.antigravity, after_line=5)
+        # The cursor line comes back once, in case its record was half-written last time.
+        self.assertIn("[L5]   ⮑ RESULT OK run_command:", text)
+        self.assertIn("[L6] ASSISTANT: The deploy failed on a stale cache.", text)
+        self.assertNotIn("[L4]", text)
+        self.assertIn("# REPEATED_CURSOR_LINE: L5", text)
+
+    def test_antigravity_context_has_no_removed_before_cursor_line(self):
+        # With no cursor there is no "before", so the field would be meaningless.
+        self.assertNotIn("# REMOVED_BEFORE_CURSOR:", cli.render_context(self.antigravity))
+
+    def test_antigravity_detected_by_content_outside_its_root(self):
+        path = _write_jsonl(Path(self.tmp.name) / "loose-transcript.jsonl", [
+            {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+             "status": "DONE", "created_at": "2026-08-20T10:00:00Z",
+             "content": "<USER_REQUEST>copied out of the brain root</USER_REQUEST>"},
+        ])
+        self.assertEqual(cli.detect_source(path), "antigravity")
 
     def test_kimi_subagents_are_opt_in_and_linked_to_parent(self):
         self.assertEqual(cli.search_sessions("hidden token audit"), [])

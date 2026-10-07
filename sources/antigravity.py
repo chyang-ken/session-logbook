@@ -30,6 +30,7 @@ drop a result and drift the pending FIFO (mis-pairing later results with earlier
 Hence the fallback rule: "anything that isn't skip/user/planner is a result."
 """
 import json
+from sources.activity import activity_fields
 import os
 import re
 import urllib.parse
@@ -42,6 +43,25 @@ from typing import Iterator, Optional
 AG_ROOT = Path.home() / ".gemini" / "antigravity"
 AG_BRAIN = AG_ROOT / "brain"
 AG_SUMMARIES = AG_ROOT / "agyhub_summaries_proto.pb"  # plaintext protobuf: id→title index
+
+
+def _under_root(path, root) -> bool:
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def is_antigravity_path(path) -> bool:
+    """Whether path belongs to the Antigravity data source (anything under the brain root).
+
+    The centralized predicate, matching is_codex_path / is_kimi_path. Callers used to write
+    `str(path).startswith(str(AG_BRAIN))`, which has no directory boundary: a sibling such as
+    `<root>/brain-backup/…` matches the prefix and would be misread as an Antigravity
+    transcript. Reading AG_BRAIN at call time also keeps tests that rebind the root working.
+    """
+    return _under_root(path, AG_BRAIN)
 
 # Aligned with the top-of-file constants in server.py
 RECENT_USER_N = 3
@@ -346,19 +366,141 @@ def _project_path(lines) -> str:
     return _common_prefix_root(lines)
 
 
+def _iter_records(jsonl_path: Path):
+    """Parse a transcript into [(physical line number, row)] plus the raw non-blank line count.
+
+    Line numbers are the file's own and are never renumbered, so an anchor or an evidence
+    lookup still resolves after rewound rows are dropped from the reading.
+    """
+    records = []
+    total = 0
+    with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
+        for number, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            total += 1
+            try:
+                records.append((number, json.loads(line)))
+            except Exception:
+                continue
+    return records, total
+
+
 def _read_lines(jsonl_path: Path):
-    out = []
     try:
-        with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        out.append(json.loads(line))
-                    except Exception:
-                        continue
+        return [row for _, row in _iter_records(jsonl_path)[0]]
     except Exception:
-        pass
-    return out
+        return []
+
+
+# ---------- In-file rewind: live history vs abandoned branches ----------
+# An Antigravity rewind stays inside the same transcript. The client re-opens an earlier step
+# and keeps appending, so the abandoned branch and the branch that replaced it sit in one file
+# with no lineage record of any kind. The only signal is `step_index`, which normally rises by
+# one per row.
+#
+# A drop in `step_index` is NOT enough on its own. Rows are also persisted out of order: a
+# context-compaction CHECKPOINT row lands a few rows late, and a planner row that issued
+# parallel tool calls lands after those calls' results. Both lower `step_index` without
+# abandoning anything, and their `created_at` goes backwards by a few seconds. Treating every
+# drop as a rewind deletes live conversation.
+#
+# The guard is structural: a rewind gives one step slot a second occupant, so a drop to step k
+# only counts when k is already held by a row that is still live. See
+# docs/decisions/2026-09-20-antigravity-rewind-history.md.
+
+def _step_index(row) -> Optional[int]:
+    """The row's step slot, or None when it carries no usable one."""
+    if not isinstance(row, dict):
+        return None
+    value = row.get('step_index')
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def rewind_plan(rows) -> dict:
+    """Classify transcript rows into the live history and the branches a rewind abandoned.
+
+    `rows` are the file's parsed rows in physical order; they are never reordered. Rows that
+    carry no step slot inherit the slot of the row above them, so they share its fate.
+
+    Returns {'live': [bool, one per row], 'abandoned_rows': int,
+             'rewinds': [{'index': int, 'step': int, 'abandoned_rows': int}]}.
+    """
+    live = [True] * len(rows)
+    slots = []        # each row's step slot, carried forward over rows that have none
+    held = set()      # step slots occupied by rows that are still live
+    highest = None    # the furthest step the live history has reached
+    carried = None
+    rewinds = []
+    for index, row in enumerate(rows):
+        step = _step_index(row)
+        if step is None:
+            slots.append(carried)
+            continue
+        slots.append(step)
+        if highest is not None and step < highest and step in held:
+            # A real rewind: step `step` is getting a second occupant. Everything the live
+            # history had recorded at or beyond that step is abandoned. The comparison is on
+            # step slots rather than on file position, so a row persisted out of order but
+            # numbered below the rewind target survives, as the client's own count requires.
+            abandoned = 0
+            for earlier in range(index):
+                if live[earlier] and slots[earlier] is not None and slots[earlier] >= step:
+                    live[earlier] = False
+                    abandoned += 1
+            held = {slot for slot in held if slot < step}
+            rewinds.append({'index': index, 'step': step, 'abandoned_rows': abandoned})
+        held.add(step)
+        highest = max(held)
+        carried = step
+    return {'live': live,
+            'abandoned_rows': sum(1 for keep in live if not keep),
+            'rewinds': rewinds}
+
+
+def live_records(records):
+    """Select the live (line, row) pairs and report what the rewinds abandoned."""
+    plan = rewind_plan([row for _, row in records])
+    live = [pair for pair, keep in zip(records, plan['live']) if keep]
+    report = {
+        'abandoned_rows': plan['abandoned_rows'],
+        # The abandoned rows' own physical lines, so a reader can name them as evidence
+        # instead of only counting them.
+        'abandoned_lines': [number for (number, _), keep in zip(records, plan['live'])
+                            if not keep],
+        'rewinds': [{'line': records[item['index']][0], 'step': item['step'],
+                     'abandoned_rows': item['abandoned_rows']} for item in plan['rewinds']],
+    }
+    return live, report
+
+
+def live_history(jsonl_path):
+    """Parse a transcript once: (live [(line, row)], rewind report, raw line count).
+
+    The public entry point for anything that presents Antigravity content outside this
+    module. Keeping it here means the anchored renderer and the Agent CLI never restate
+    the row classification or the rewind rule; they format what this returns.
+    """
+    records, total = _iter_records(Path(jsonl_path))
+    live, report = live_records(records)
+    return live, report, total
+
+
+def live_lines(rows):
+    """The rows of the live history, in physical order."""
+    plan = rewind_plan(rows)
+    return [row for row, keep in zip(rows, plan['live']) if keep]
+
+
+def abandoned_line_numbers(jsonl_path) -> set:
+    """Physical line numbers that a later in-file rewind abandoned; empty when none were."""
+    try:
+        _live, report, _total = live_history(jsonl_path)
+    except Exception:
+        return set()
+    return set(report['abandoned_lines'])
 
 
 def _truncate(text: str, n: int) -> str:
@@ -379,12 +521,93 @@ def search_text_from_line(d: dict) -> str:
     return ""
 
 
+_MESSAGE_ROLES = {'USER_INPUT': 'user', 'PLANNER_RESPONSE': 'assistant'}
+
+
+def iter_messages(jsonl_path):
+    """Yield (physical line, role, text) for real messages in the live history.
+
+    The Agent CLI's search reads this rather than the raw file, so an abandoned branch can
+    no more answer a CLI search than it can answer the dashboard's.
+    """
+    live, _report, _total = live_history(jsonl_path)
+    for number, row in live:
+        role = _MESSAGE_ROLES.get(row.get('type'))
+        text = search_text_from_line(row)
+        if role and text:
+            yield number, role, text
+
+
+def collect_turns(jsonl_path):
+    """Normalized live-history rows for a renderer, in physical file order.
+
+    Mirrors sources/pi.collect_turns: every Antigravity-specific decision stays in this
+    adapter (which rows are live, the <USER_REQUEST> wrapper, what counts as a tool result,
+    which tool call a result belongs to), and the caller only formats. Rows keep their own
+    physical `line`, so an anchor still resolves in the raw file after the abandoned rows
+    are dropped from the reading.
+
+    Yielded dicts carry 'line', 'ts', 'type' and that type's fields:
+      user / think / assistant  -> 'text'
+      tool                      -> 'name', 'summary'
+      result                    -> 'name' (the call it pairs with), 'text', 'is_error'
+      compacted                 -> nothing more (Antigravity's CHECKPOINT row)
+
+    Tool calls ride on a PLANNER_RESPONSE row and their results arrive on later rows, so a
+    call and its result are emitted at their own lines rather than adjacent: physical order
+    is what keeps `[L#]` ascending for cursor-based readers.
+    """
+    pending = []   # names of tool calls awaiting their result (FIFO, as the reader pairs them)
+    live, _report, _total = live_history(jsonl_path)
+    for number, row in live:
+        kind = row.get('type')
+        ts = (row.get('created_at') or '')[:19]
+        if kind == 'CHECKPOINT':
+            # Antigravity's context compaction. The reader drops it as noise; a navigable
+            # transcript keeps it, because it tells a reader earlier content is gone.
+            yield {'line': number, 'ts': ts, 'type': 'compacted'}
+        elif kind in _SKIP_TYPES:
+            continue
+        elif kind == 'USER_INPUT':
+            text = _clean_user_input(row.get('content', ''))
+            # A settings-change or metadata-only row cleans to nothing and is not a turn;
+            # skipping it keeps the [U#] count equal to the reader's user turns.
+            if text.strip():
+                yield {'line': number, 'ts': ts, 'type': 'user', 'text': text}
+        elif kind == 'PLANNER_RESPONSE':
+            think = (row.get('thinking') or '').strip()
+            if think:
+                yield {'line': number, 'ts': ts, 'type': 'think', 'text': think}
+            content = (row.get('content') or '').strip()
+            if content:
+                yield {'line': number, 'ts': ts, 'type': 'assistant', 'text': content}
+            for call in (row.get('tool_calls') or []):
+                if not isinstance(call, dict):
+                    continue
+                name = call.get('name', '?')
+                pending.append(name)
+                yield {'line': number, 'ts': ts, 'type': 'tool', 'name': name,
+                       'summary': _tool_summary(name, call.get('args'))}
+        else:
+            # Same fallback as extract_conversation: anything that is not skip/user/planner
+            # is a tool result. A whitelist that missed a new type would drift the FIFO.
+            name = pending.pop(0) if pending else (
+                'error' if kind == 'ERROR_MESSAGE' else str(kind).lower())
+            yield {'line': number, 'ts': ts, 'type': 'result', 'name': name,
+                   'text': row.get('error') or _strip_result_header(row.get('content', '')),
+                   'is_error': _is_error(row)}
+
+
 # ---------- Main interface ----------
-def scan_sessions(root: Path = AG_BRAIN) -> Iterator[Path]:
+def scan_sessions(root: Optional[Path] = None) -> Iterator[Path]:
     """Yield each conversation's transcript.jsonl path.
 
     Directory layout: brain/<conversation_id>/.system_generated/logs/transcript.jsonl
+
+    The default root is read at call time, not bound at import: a test that repoints
+    AG_BRAIN at a fixture directory would otherwise still scan the real one.
     """
+    root = AG_BRAIN if root is None else Path(root)
     if not root.exists():
         return
     for conv_dir in root.iterdir():
@@ -402,7 +625,12 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
     except FileNotFoundError:
         return None
     cid = _conv_id(jsonl_path)
-    lines = _read_lines(jsonl_path)
+    all_lines = _read_lines(jsonl_path)
+    # Previews, the first user message and the turn count describe the conversation as it
+    # stands, so they read the live history only. The project path is a property of the file
+    # (the IDE workspace the conversation ran in), which a rewind does not move, so it is
+    # still inferred from every row.
+    lines = live_lines(all_lines)
 
     users = [d for d in lines if d.get('type') == 'USER_INPUT']
     asts = [d for d in lines
@@ -433,10 +661,11 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
 
     return {
         "id": cid,
-        "project_path": _project_path(lines),
+        "project_path": _project_path(all_lines),
         "jsonl_path": str(jsonl_path),
         "mtime": stat.st_mtime,
         "mtime_iso": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        **activity_fields((ts for ts, _, text in raw if text), stat.st_mtime),
         "size": stat.st_size,
         "source": "antigravity",
         "model": model,
@@ -461,77 +690,77 @@ def extract_conversation(jsonl_path: Path) -> Optional[dict]:
     cid = _conv_id(jsonl_path)
     turns = []
     pending = []   # tool calls awaiting their result to be paired (FIFO)
-    total_lines = 0
-    all_lines = []
 
-    with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            if not line.strip():
-                continue
-            total_lines += 1
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            all_lines.append(d)
-            t = d.get('type')
-            ts = d.get('created_at', '')
-            if t in _SKIP_TYPES:
-                continue
-            if t == 'USER_INPUT':
-                txt = _clean_user_input(d.get('content', ''))
-                if txt:
-                    turns.append({
-                        "type": "user",
-                        "text": _truncate(txt, CONV_USER_MAX),
-                        "ts": ts,
-                    })
-            elif t == 'PLANNER_RESPONSE':
-                content = (d.get('content') or '').strip()
-                if content:
-                    turns.append({
-                        "type": "assistant",
-                        "text": _truncate(content, CONV_ASSISTANT_MAX),
-                        "ts": ts,
-                    })
-                for tc in (d.get('tool_calls') or []):
-                    nm = tc.get('name', '?')
-                    pending.append({
-                        "type": "tool",
-                        "name": nm,
-                        "summary": _truncate(
-                            _tool_summary(nm, tc.get('args')), CONV_TOOL_INPUT_MAX),
-                        "ts": ts,
-                    })
+    records, total_lines = _iter_records(jsonl_path)
+    all_lines = [row for _, row in records]
+    # Read the live history only. Pairing runs over the live rows alone, so an abandoned
+    # tool call can never swallow a live result and drift the FIFO.
+    live, rewind = live_records(records)
+
+    for _number, d in live:
+        t = d.get('type')
+        ts = d.get('created_at', '')
+        if t in _SKIP_TYPES:
+            continue
+        if t == 'USER_INPUT':
+            txt = _clean_user_input(d.get('content', ''))
+            if txt:
+                turns.append({
+                    "type": "user",
+                    "text": _truncate(txt, CONV_USER_MAX),
+                    "ts": ts,
+                })
+        elif t == 'PLANNER_RESPONSE':
+            content = (d.get('content') or '').strip()
+            if content:
+                turns.append({
+                    "type": "assistant",
+                    "text": _truncate(content, CONV_ASSISTANT_MAX),
+                    "ts": ts,
+                })
+            for tc in (d.get('tool_calls') or []):
+                nm = tc.get('name', '?')
+                pending.append({
+                    "type": "tool",
+                    "name": nm,
+                    "summary": _truncate(
+                        _tool_summary(nm, tc.get('args')), CONV_TOOL_INPUT_MAX),
+                    "ts": ts,
+                })
+        else:
+            # Anything that isn't skip/user/planner is a tool result (including ERROR_MESSAGE /
+            # GENERIC / SEARCH_WEB / MCP_TOOL / future new types). FIFO-pair with the pending
+            # tool_call — measured to be exactly 1 result line per tool_call, no double results,
+            # no concurrency.
+            is_err = _is_error(d)
+            res = d.get('error') or _strip_result_header(d.get('content', ''))
+            if pending:
+                tc = pending.pop(0)
+                tc["result"] = _truncate(res, CONV_TOOL_RESULT_MAX)
+                tc["is_error"] = is_err
+                turns.append(tc)
             else:
-                # Anything that isn't skip/user/planner is a tool result (including ERROR_MESSAGE /
-                # GENERIC / SEARCH_WEB / MCP_TOOL / future new types). FIFO-pair with the pending
-                # tool_call — measured to be exactly 1 result line per tool_call, no double results,
-                # no concurrency.
-                is_err = _is_error(d)
-                res = d.get('error') or _strip_result_header(d.get('content', ''))
-                if pending:
-                    tc = pending.pop(0)
-                    tc["result"] = _truncate(res, CONV_TOOL_RESULT_MAX)
-                    tc["is_error"] = is_err
-                    turns.append(tc)
-                else:
-                    # No tool_call awaiting pairing (e.g. a planner-level error) → a standalone result turn
-                    turns.append({
-                        "type": "tool",
-                        "name": "error" if t == 'ERROR_MESSAGE' else t.lower(),
-                        "summary": "",
-                        "result": _truncate(res, CONV_TOOL_RESULT_MAX),
-                        "is_error": is_err, "ts": ts,
-                    })
+                # No tool_call awaiting pairing (e.g. a planner-level error) → a standalone result turn
+                turns.append({
+                    "type": "tool",
+                    "name": "error" if t == 'ERROR_MESSAGE' else t.lower(),
+                    "summary": "",
+                    "result": _truncate(res, CONV_TOOL_RESULT_MAX),
+                    "is_error": is_err, "ts": ts,
+                })
     turns.extend(pending)  # append any unpaired tool calls (cut off by truncation) as-is
 
     return {
         "id": cid,
         "project_path": _project_path(all_lines),
         "custom_title": _load_titles().get(cid, ""),
+        # total_lines stays the file's raw line count, and rewind_abandoned_rows says how
+        # many of those a rewind removed, so the hidden branch is countable rather than
+        # silently missing. rewinds carries each rewind's physical line and target step.
         "total_lines": total_lines,
         "source": "antigravity",
+        "rewind_abandoned_rows": rewind["abandoned_rows"],
+        "rewinds": rewind["rewinds"],
         "turns": turns,
     }
 
@@ -549,8 +778,6 @@ def extract_transcript(jsonl_path: Path) -> str:
     cid = _conv_id(jsonl_path)
     out_blocks = []
     pending = []
-    total_lines = 0
-    all_lines = []
 
     def trunc_result(result: str) -> str:
         result = (result or "").strip()
@@ -568,47 +795,47 @@ def extract_transcript(jsonl_path: Path) -> str:
         r = trunc_result(result)
         out_blocks.append(head + ("\n" + r + "\n" if r else "\n"))
 
-    with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            if not line.strip():
-                continue
-            total_lines += 1
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            all_lines.append(d)
-            t = d.get('type')
-            if t in _SKIP_TYPES:
-                continue
-            if t == 'USER_INPUT':
-                txt = _clean_user_input(d.get('content', ''))
-                if txt:
-                    out_blocks.append(f"## USER\n{txt}\n")
-            elif t == 'PLANNER_RESPONSE':
-                content = (d.get('content') or '').strip()
-                if content:
-                    out_blocks.append(f"## ASSISTANT\n{content}\n")
-                for tc in (d.get('tool_calls') or []):
-                    nm = tc.get('name', '?')
-                    pending.append({
-                        "name": nm,
-                        "summary": _tool_summary(nm, tc.get('args')),
-                    })
+    records, total_lines = _iter_records(jsonl_path)
+    all_lines = [row for _, row in records]
+    live, rewind = live_records(records)
+
+    for _number, d in live:
+        t = d.get('type')
+        if t in _SKIP_TYPES:
+            continue
+        if t == 'USER_INPUT':
+            txt = _clean_user_input(d.get('content', ''))
+            if txt:
+                out_blocks.append(f"## USER\n{txt}\n")
+        elif t == 'PLANNER_RESPONSE':
+            content = (d.get('content') or '').strip()
+            if content:
+                out_blocks.append(f"## ASSISTANT\n{content}\n")
+            for tc in (d.get('tool_calls') or []):
+                nm = tc.get('name', '?')
+                pending.append({
+                    "name": nm,
+                    "summary": _tool_summary(nm, tc.get('args')),
+                })
+        else:
+            # Same as extract_conversation: anything that isn't skip/user/planner is treated as a
+            # tool result, FIFO-paired with pending; ERROR_MESSAGE / GENERIC / SEARCH_WEB etc. all go here.
+            res = d.get('error') or _strip_result_header(d.get('content', ''))
+            if pending:
+                flush_tool(pending.pop(0), res)
             else:
-                # Same as extract_conversation: anything that isn't skip/user/planner is treated as a
-                # tool result, FIFO-paired with pending; ERROR_MESSAGE / GENERIC / SEARCH_WEB etc. all go here.
-                res = d.get('error') or _strip_result_header(d.get('content', ''))
-                if pending:
-                    flush_tool(pending.pop(0), res)
-                else:
-                    name = "error" if t == 'ERROR_MESSAGE' else t.lower()
-                    out_blocks.append(f"[tool: {name}]\n{trunc_result(res)}\n")
+                name = "error" if t == 'ERROR_MESSAGE' else t.lower()
+                out_blocks.append(f"[tool: {name}]\n{trunc_result(res)}\n")
     for tc in pending:
         flush_tool(tc, "")
 
     project_path = _project_path(all_lines)
+    # Only conversations that were actually rewound carry the extra header line, so every
+    # other export stays byte-identical.
+    abandoned = (f"Abandoned by rewind: {rewind['abandoned_rows']} raw lines\n"
+                 if rewind["abandoned_rows"] else "")
     header = (f"# Session {cid}\n"
               f"Project: {project_path}\n"
-              f"Raw lines: {total_lines}\n\n")
+              f"Raw lines: {total_lines}\n"
+              f"{abandoned}\n")
     return header + "\n".join(out_blocks)

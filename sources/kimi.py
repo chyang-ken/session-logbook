@@ -29,6 +29,7 @@ Rows this adapter reads (protocol_version 1.4 and 1.5 both observed):
 Everything else (usage.record, llm.tools_snapshot, permission.*, task.*, tools.*) is skipped.
 """
 import json
+from sources.activity import activity_fields
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -609,6 +610,7 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
                     if not step_text:
                         step_ts = _ts(d)
                     step_text.append(part_text)
+                    step_ts = _ts(d)
     flush()
 
     raw = [(ts, "user", text) for ts, text in users[-RECENT_USER_N:]]
@@ -622,6 +624,7 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
         "jsonl_path": str(jsonl_path),
         "mtime": stat.st_mtime,
         "mtime_iso": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        **activity_fields((ts for ts, _, text in raw if text), stat.st_mtime),
         "size": stat.st_size,
         "source": "kimi",
         "model": facts["model"],

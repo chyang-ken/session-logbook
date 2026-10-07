@@ -131,8 +131,15 @@
     backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
     padding: 10px 28px;
-    display: flex; align-items: center; gap: 16px;
+    display: flex; flex-direction: column; gap: 10px;
   }
+  .head-search-row, .head-filter-row {
+    display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0;
+  }
+  .head-filter-row { flex-wrap: wrap; }
+  .head-status { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .head-search-row .refresh-btn { flex-shrink: 0; background: none; border-color: transparent; }
+  .head-search-row .refresh-btn:hover { background: var(--bg-hover); }
   /* Source filter dropdown: replaces the original title, showing the current filter state + ▾.
      Semantics: which side's sessions are currently shown (All/Claude/Codex). */
   .source-filter {
@@ -141,9 +148,9 @@
   .source-filter-trigger {
     display: flex; align-items: center; gap: 5px;
     background: none; border: none;
-    padding: 3px 9px; margin-left: -9px;  /* negative margin offsets the padding so the label's left edge aligns with the all state and doesn't jump */
+    padding: 6px 8px;
     border-radius: 7px;
-    font-size: 15px; font-weight: 700; color: var(--text-1);
+    font-size: 11px; font-weight: 500; color: var(--text-1);
     cursor: pointer; user-select: none;
     font-family: var(--font-mono);  /* top-bar filter trigger uses the mono chrome language (consistent with count / recent-days chip) */
     white-space: nowrap;
@@ -253,7 +260,7 @@
     font-size: 11px;
   }
   .search-wrap {
-    position: relative; flex: 1; min-width: 180px;
+    position: relative; flex: 1; min-width: 0;
   }
   .search {
     width: 100%;
@@ -262,7 +269,7 @@
     border-radius: 6px;
     color: var(--text-1);
     font: inherit; font-size: 13px;
-    padding: 6px 28px 6px 12px;
+    height: 36px; padding: 6px 28px 6px 12px;
     outline: none;
     transition: border-color 0.2s;
   }
@@ -314,18 +321,33 @@
     letter-spacing: 0.06em;
     white-space: nowrap;
   }
+  .view-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .view-toggle button {
+    border: 0; border-right: 1px solid var(--border);
+    background: var(--bg-card); color: var(--text-3);
+    padding: 5px 9px;
+    font-family: var(--font-mono); font-size: 11px;
+    cursor: pointer;
+  }
+  .view-toggle button:last-child { border-right: 0; }
+  .view-toggle button:hover { color: var(--text-1); background: var(--bg-hover); }
+  .view-toggle button.active { color: var(--text-1); background: var(--bg-hover); font-weight: 600; }
   .oneshot-toggle {
     display: inline-flex; align-items: center; gap: 6px;
     font-family: var(--font-mono);  /* control label uses the mono chrome language (consistent with the adjacent count) */
-    font-size: 12px; color: var(--text-3);
+    font-size: 11px; color: var(--text-2);
     white-space: nowrap; user-select: none; cursor: pointer;
   }
   .oneshot-toggle input { margin: 0; cursor: pointer; }
   .oneshot-toggle:hover { color: var(--text-1); }
-  /* When checked (currently hiding one-shots) the label turns accent, consistent with .files-toggle.on — visually unifying the active state of similar toggles,
-     while also hinting that "some sessions are currently hidden". */
-  .oneshot-toggle:has(input:checked) { color: var(--accent); }
-  .oneshot-toggle:has(input:checked):hover { color: var(--text-1); }
+  /* The checkbox carries selection; the explicit label stays quiet and readable. */
+  .oneshot-toggle input { accent-color: var(--accent); }
   /* Top-bar icon-only square buttons (collapse all / refresh): flex-centered + square, ensuring the SVG is strictly centered and both buttons are the same size.
      Previously used padding:5px 12px (set for buttons with text) + display:block + inline SVG → icon sat too high, looked crooked. */
   .refresh-btn {
@@ -356,13 +378,18 @@
   }
 
   /* ---------- Two-column layout ---------- */
+  body:not(.standalone) { display: flex; flex-direction: column; height: 100vh; }
+  .page-head { flex-shrink: 0; }
   main {
     display: flex;
     gap: 0;
     padding: 20px 28px 60px;
-    height: calc(100vh - 49px);
+    flex: 1; min-height: 0;
     --col-left-pct: 57.5%;
   }
+  main.timeline { display: block; overflow-y: auto; }
+  .timeline-list { max-width: 920px; margin: 0 auto; }
+  .timeline-list .card { margin-bottom: 10px; }
   .col {
     overflow-y: auto;
     min-width: 0;
@@ -773,14 +800,18 @@
     background: var(--source-claude-chip-bg);
     color: var(--source-claude-chip-fg);
   }
-  /* Devin uses existing neutral tokens; its text label carries source identity. */
+  /* Devin and Pi use neutral tokens; text labels carry source identity. */
+  .source-chip.source-pi, .conv-source-pill.source-pi,
+  .source-filter[data-source="pi"] .source-filter-trigger,
   .source-chip.source-devin, .conv-source-pill.source-devin,
   .source-filter[data-source="devin"] .source-filter-trigger {
     background: var(--bg-hover);
     color: var(--text-1);
     box-shadow: inset 0 0 0 1px var(--border);
   }
+  .source-filter-option[data-value="pi"]::before,
   .source-filter-option[data-value="devin"]::before { background: var(--text-3); }
+  .card[data-source="pi"]:hover,
   .card[data-source="devin"]:hover { border-color: var(--text-3); }
   .source-chip.source-codex {
     background: var(--source-codex-chip-bg);
@@ -804,6 +835,15 @@
     -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden; word-break: break-word;
   }
+  .suspected-badge, .conv-identity-label {
+    display: inline-flex; align-items: center;
+    font-family: var(--font-mono); font-size: 9px; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-3); background: var(--bg-hover);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 6px;
+  }
+  .suspected-badge { margin-bottom: 6px; }
   /* worktree suffix on its own row: appears only for worktree sessions; main-repo sessions don't render this element */
   .card-pathrow {
     display: flex; align-items: center; gap: 8px;
@@ -951,7 +991,7 @@
     display: flex; flex-direction: column; gap: 10px;
     font-family: var(--font-mono);
   }
-  .note-dialog textarea, .note-dialog button {
+  .note-dialog textarea, .note-dialog input, .note-dialog button {
     font-family: inherit;
   }
   .note-dialog-title {
@@ -960,9 +1000,8 @@
     letter-spacing: 0.1em; text-transform: uppercase;
     color: var(--text-3);
   }
-  .note-dialog textarea {
+  .note-dialog textarea, .note-dialog input {
     width: 100%; box-sizing: border-box;
-    min-height: 90px; resize: vertical;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -972,7 +1011,9 @@
     outline: none;
     transition: border-color 0.15s;
   }
-  .note-dialog textarea:focus { border-color: var(--accent); }
+  .note-dialog textarea { min-height: 90px; resize: vertical; }
+  .note-dialog input { height: 38px; }
+  .note-dialog textarea:focus, .note-dialog input:focus { border-color: var(--accent); }
   .note-dialog-foot {
     display: flex; justify-content: flex-end; gap: 8px;
   }
@@ -1494,6 +1535,13 @@
   .conv-meta {
     font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
   }
+  .conv-identity { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
+  .conv-identity button {
+    border: 0; background: none; color: var(--accent);
+    padding: 0; font-family: var(--font-mono); font-size: 10px;
+    cursor: pointer;
+  }
+  .conv-identity button:hover { text-decoration: underline; }
   .conv-actions {
     display: flex; gap: 0; flex-shrink: 0;
   }
@@ -1885,6 +1933,89 @@
     padding-top: 2px;
   }
   .conv-detail span { margin-right: 16px; }
+  .conv-sources { overflow-wrap: anywhere; }
+  .conv-rewind { margin-top: 8px; font-size: 12px; color: var(--text-2); line-height: 1.7; }
+  .conv-rewind:empty { display: none; }
+  .conv-rewind summary { cursor: pointer; }
+  .conv-rewind summary:hover, .conv-rewind a:hover { color: var(--accent); }
+  .conv-rewind a { color: var(--text-2); text-decoration: underline; }
+  .conv-rewind-record { padding: 2px 0; }
+  .conv-abandoned { margin-top: 6px; font-size: 12px; color: var(--text-3); }
+  .conv-rewind-relation { color: var(--text-3); }
+  .conv-rewind-current { color: var(--text-1); }
+  /* Conversation records on a card: chrome, so mono and quiet (design-system §3). */
+  .card-records { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); margin: 4px 0 0; }
+  .card-records summary { cursor: pointer; list-style: none; }
+  .card-records summary::-webkit-details-marker { display: none; }
+  .card-records summary:hover { color: var(--accent); }
+  .card-records-row { padding: 2px 0 2px 10px; overflow-wrap: anywhere; }
+  .card-records-row a { color: var(--text-2); text-decoration: underline; }
+  .card-records-row a:hover { color: var(--accent); }
+  .card-records-relation { color: var(--text-3); }
+  .card-records-current { color: var(--text-1); }
+  .card-lineage { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); margin: 4px 0 0; }
+  .card-lineage a { color: var(--text-2); text-decoration: underline; }
+  .card-lineage a:hover { color: var(--accent); }
+  /* Notes written on a superseded record: shown under the conversation's own note, never
+     merged into it, so nothing the user typed is concatenated away or hidden. */
+  .card-older-notes {
+    margin: 4px -8px 4px; padding: 8px 10px;
+    background: rgba(var(--sage-rgb), 0.05);
+    border-radius: 4px;
+    font-size: 12px; color: var(--text-2);
+    white-space: pre-wrap;
+  }
+  .card-older-notes::before {
+    content: 'EARLIER NOTES · ';
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; color: var(--sage);
+    margin-right: 4px;
+  }
+  .card-older-note { margin: 2px 0; overflow-wrap: anywhere; }
+  .card-older-note-id { font-family: var(--font-mono); font-size: 9px; color: var(--text-4); margin-right: 4px; }
+  .card.collapsed .card-older-notes, .card.collapsed .card-records { display: none; }
+  /* The same note, in the reader. Per design-system §5.5 a component that appears on more
+     than one surface looks the same on all of them, so this reuses the card's geometry and
+     the same sage tint; only the outer margins adapt to the header. */
+  .conv-note { margin-top: 6px; }
+  .conv-note-text {
+    margin: 4px 0; padding: 8px 10px;
+    background: rgba(var(--sage-rgb), 0.08);
+    border-radius: 4px;
+    font-size: 12px; color: var(--text-2);
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .conv-note-text::before {
+    content: 'NOTE · ';
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; color: var(--sage);
+    margin-right: 4px;
+  }
+  .conv-older-notes {
+    margin: 4px 0; padding: 8px 10px;
+    background: rgba(var(--sage-rgb), 0.05);
+    border-radius: 4px;
+    font-size: 12px; color: var(--text-2);
+    white-space: pre-wrap;
+  }
+  .conv-older-notes::before {
+    content: 'EARLIER NOTES · ';
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; color: var(--sage);
+    margin-right: 4px;
+  }
+  .conv-older-note { margin: 2px 0; overflow-wrap: anywhere; }
+  .conv-older-note-id { font-family: var(--font-mono); font-size: 9px; color: var(--text-4); margin-right: 4px; }
+  .search-match-record {
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--text-4);
+    margin-right: 4px;
+  }
   /* session id row: same style as the card's .card-sid-wrap —— the id text itself is click-to-copy (no separate button),
      icon button is borderless ghost. No more bordered "copy" pill / bordered icon (violates the no-border rule in design-system §7,
      and would diverge from the card version). Same component stays consistent across surfaces. */
@@ -1930,6 +2061,9 @@
   .conv-skill { background: rgba(var(--role-skill-rgb), 0.07); }
   .conv-skill .conv-role { color: var(--role-skill-fg); }
   .conv-skill .conv-text { color: var(--text-3); font-size: 12px; }
+  /* The client's compaction summary: a skill-shaped block (folded reference text nobody said),
+     on the system-event gray rather than the external-content orange. No new token. */
+  .conv-compact-summary { background: rgba(var(--role-system-rgb), 0.07); }
   .conv-user .conv-role { color: var(--text-1); }
 
   /* Subagent spawn — the inline signal at the moment "the main agent dispatches a subagent" (phase one doesn't expand the content)
@@ -1995,6 +2129,18 @@
     flex-shrink: 0;
   }
   /* Simplification: system-event subtypes are no longer distinguished by left-bar color (the side bar is gone)—identified by sysev-icon + role label. */
+  /* The one qualifier a system event may carry: "this never reached the model". It is the
+     exception the §1.2 rule reserves colour for, so it borrows the error red rather than a
+     new token, and stays a small inline label so the row is still one quiet line. */
+  .conv-system-event .sysev-note {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .conv-system-event.conv-queued-input .sysev-text { color: var(--text-2); }
+  .conv-system-event.conv-api-error .sysev-text { color: var(--rust); }
 
   /* Long-text soft fold: .conv-foldable is collapsed by default (shows only fold-summary); adding .open
      switches it to fold-full. .fold-hint is the middle-hint style for "⋯ N chars hidden ⋯".
@@ -2206,22 +2352,31 @@
      where the card footer row (sid+time+actions) and group-header buttons no longer fit and get clipped.
      960px guarantees the narrow column is ≥ ~370px in two-column mode; any narrower switches to single-column full width. */
   @media (max-width: 960px) {
+    body:not(.standalone) { height: auto; min-height: 100vh; }
     main { flex-direction: column; gap: 24px; height: auto; }
     .col-left, .col-right { flex: 1 1 auto; overflow-y: visible; }
     .col-left { flex-basis: auto; }
     .col-divider { display: none; }
-    .page-head { padding: 10px 16px; flex-wrap: wrap; }
+    .page-head { padding: 10px 16px; }
   }
-  /* The top bar doesn't fit below ~656px (search has hit its min-width yet still pushes out refresh).
-     Promote search to a full-width input on its own row, leaving filter/toggles/count/refresh on another row. */
   @media (max-width: 680px) {
-    .page-head { row-gap: 10px; column-gap: 12px; }
-    .search-wrap { order: -1; flex-basis: 100%; min-width: 0; }
+    .head-filter-row { gap: 8px 12px; }
+    .head-status { margin-left: 0; }
   }
 </style>
 </head>
 <body>
 <header class="page-head">
+  <div class="head-search-row">
+    <div class="search-wrap" id="search-wrap">
+      <input class="search" id="search" aria-label="Search sessions" placeholder="Search sessions" title="Search titles, messages, or session IDs. Multiple words must all match.">
+      <span class="search-spinner" aria-hidden="true"></span>
+      <button class="search-clear" id="search-clear" type="button" title="Clear search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <button class="refresh-btn" id="collapse-all" type="button" title="Collapse all cards" aria-label="Collapse all cards"></button>
+    <button class="refresh-btn" id="refresh" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+  </div>
+  <div class="head-filter-row">
   <div class="source-filter" id="source-filter" data-open="false">
     <button class="source-filter-trigger" id="source-filter-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
       <span id="source-filter-label">All Sessions</span>
@@ -2234,21 +2389,22 @@
       <div class="source-filter-option" role="option" data-value="antigravity">Antigravity only</div>
       <div class="source-filter-option" role="option" data-value="kimi">Kimi Code only</div>
       <div class="source-filter-option" role="option" data-value="devin">Devin Local only</div>
+      <div class="source-filter-option" role="option" data-value="pi">Pi only</div>
     </div>
   </div>
-  <div class="search-wrap" id="search-wrap">
-    <input class="search" id="search" placeholder="Full-text search · multiple words = AND · supports session ID">
-    <span class="search-spinner" aria-hidden="true"></span>
-    <button class="search-clear" id="search-clear" type="button" title="Clear search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+  <div class="view-toggle" id="view-toggle" aria-label="Session view">
+    <button type="button" data-view="timeline">Timeline</button>
+    <button type="button" data-view="projects">Projects</button>
   </div>
-  <label class="oneshot-toggle" title="Hide single-turn sessions (typical claude -p noise)">
+  <label class="oneshot-toggle" title="Single-turn sessions are treated as suspected automated runs until you confirm otherwise">
     <input type="checkbox" id="hide-oneshot">
-    <span>Hide 1-round</span>
+    <span id="suspected-filter-label">Suspected runs hidden</span>
   </label>
-  <span class="live-dot" id="live-dot" data-tooltip="Live — auto-refreshing"></span>
-  <span class="count" id="count">—</span>
-  <button class="refresh-btn" id="collapse-all" type="button" title="Collapse all cards" aria-label="Collapse all cards"></button>
-  <button class="refresh-btn" id="refresh" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+    <div class="head-status">
+      <span class="live-dot" id="live-dot" data-tooltip="Live — auto-refreshing"></span>
+      <span class="count" id="count">—</span>
+    </div>
+  </div>
 </header>
 <main id="list"></main>
 <div class="toast" id="toast"></div>
@@ -2290,15 +2446,19 @@ function saveUIState() {
       sourceFilter: state.sourceFilter,
       colLeftPct: state.colLeftPct,
       hideOneshot: state.hideOneshot,
+      viewMode: state.viewMode,
     }));
   } catch {}
 }
 
 // Prune session ids that no longer exist from the two collapse-override Sets (after a session is deleted/archived its id still lingers,
 // otherwise the Sets only grow and localStorage accumulates dead ids forever). Calling it once after the initial load is enough.
+// Both kinds of key stay alive: the conversation key written now, and the record key written
+// by an older build — dropping the latter would silently discard the user's choice once.
 function pruneCardCollapsed() {
   if (!state.items.length) return;
-  const live = new Set(state.items.map(m => m.id));
+  const live = new Set();
+  for (const m of state.items) { live.add(m.id); live.add(conversationId(m)); }
   let changed = false;
   for (const set of [state.cardCollapsed, state.cardExpanded]) {
     for (const id of [...set]) {
@@ -2314,7 +2474,8 @@ const _saved = loadUIState();
 const RECENT_DAYS_OPTIONS = [7, 14, 21, 'all'];
 const recentDaysChipLabel = d => d === 'all' ? 'All time' : `Last ${d} days`;
 const recentDaysOptionLabel = d => d === 'all' ? 'All time' : `${d} days`;
-const SOURCE_FILTER_VALUES = ['all', 'claude', 'codex', 'antigravity', 'kimi', 'devin'];
+const SOURCE_FILTER_VALUES = ['all', 'claude', 'codex', 'antigravity', 'kimi', 'devin', 'pi'];
+const VIEW_MODES = ['timeline', 'projects'];
 
 const state = {
   q: _saved?.q || '',
@@ -2334,11 +2495,81 @@ const state = {
   recentDays: RECENT_DAYS_OPTIONS.includes(_saved?.recentDays) ? _saved.recentDays : 7,
   // Left column width percentage; null means follow the CSS default (57.5%); a number is written after the user drags
   colLeftPct: typeof _saved?.colLeftPct === 'number' ? _saved.colLeftPct : null,
-  // Hide single-turn sessions (typical claude -p noise), default true
+  // Hide suspected automated runs (currently: single-turn and not human-confirmed), default true
   hideOneshot: typeof _saved?.hideOneshot === 'boolean' ? _saved.hideOneshot : true,
+  // Cross-project reverse chronology is the primary view; the old project layout remains available.
+  viewMode: VIEW_MODES.includes(_saved?.viewMode) ? _saved.viewMode : 'timeline',
   // Source filter (all | claude | codex | antigravity | kimi)
   sourceFilter: SOURCE_FILTER_VALUES.includes(_saved?.sourceFilter) ? _saved.sourceFilter : 'all',
 };
+
+// ---------- Conversation identity ----------
+// The API serves two levels of identity. A *record* is one transcript file: its id, its path
+// and its line anchors mean what they always meant. A *conversation* is the ordered set of
+// records a rewind, a resume or a compaction left behind, and every item carries
+// conversation_id / conversation_current_id / conversation_records for it. A backend that
+// does not send those fields (or one whose scan cache is still cold) makes every helper here
+// fall back to the record id, which is exactly the behaviour before conversations existed.
+const _byRecord = new Map();
+const _byConversation = new Map();
+
+function conversationId(m) { return (m && (m.conversation_id || m.id)) || ''; }
+function conversationCurrentId(m) { return (m && (m.conversation_current_id || m.id)) || ''; }
+// The current record is the one new work lands in; every other member is superseded.
+function isCurrentRecord(m) { return !!m && conversationCurrentId(m) === m.id; }
+function conversationRecords(m) {
+  const records = m && m.conversation_records;
+  return Array.isArray(records) ? records : [];
+}
+function isMultiRecord(m) { return conversationRecords(m).length > 1; }
+
+// The one place state.items is replaced, so the two indexes can never drift from the array.
+function setItems(items) {
+  state.items = Array.isArray(items) ? items : [];
+  _byRecord.clear();
+  _byConversation.clear();
+  for (const m of state.items) {
+    if (!m || !m.id) continue;
+    _byRecord.set(m.id, m);
+    if (isCurrentRecord(m)) _byConversation.set(conversationId(m), m);
+  }
+}
+
+// Resolve either kind of id to the item that owns it. A record id is tried first and is never
+// overridden: it addresses exactly one transcript, and keeping that true is the whole contract.
+function findItem(id) {
+  if (!id) return undefined;
+  return _byRecord.get(id) || _byConversation.get(id);
+}
+
+// The entry a conversation is shown as, for any id belonging to it: its current record's item.
+// This is what a star, an archive, a note or a title applies to.
+function currentItemFor(id) {
+  const item = findItem(id);
+  if (!item) return undefined;
+  return _byRecord.get(conversationCurrentId(item)) || item;
+}
+
+// Only current records are entries; superseded ones are reachable from their conversation.
+function conversationItems() { return state.items.filter(isCurrentRecord); }
+
+// The id to put in a link the UI generates for an entry. A single-record conversation keeps
+// the record id it has always had; a multi-record one uses the conversation id, so the link
+// still opens the right transcript after the next rewind.
+function shareId(m) { return isMultiRecord(m) ? conversationId(m) : (m ? m.id : ''); }
+
+const RECORD_RELATION_LABELS = {
+  rewind: 'Rewound from the previous record',
+  continuation: 'Continued from the previous record',
+  'compaction-continuation': 'Continued after a compaction',
+};
+function recordRelationLabel(relation) {
+  return RECORD_RELATION_LABELS[relation] || (relation ? String(relation) : 'First record');
+}
+function shortId(id) {
+  const text = String(id || '');
+  return text.length > 12 ? text.slice(0, 8) + '…' : text;
+}
 
 // Column width bounds and default value
 const COL_LEFT_PCT_MIN = 25;
@@ -2498,8 +2729,8 @@ function groupItems(items) {
     const g = groups.get(key);
     g.paths.add(m.project_path || NO_WORKSPACE_KEY);
     g.items.push(m);
-    if (m.mtime > g.mostRecent) g.mostRecent = m.mtime;
-    if (m.mtime >= dayAgo) g.recentCount += 1;
+    if (activityTime(m) > g.mostRecent) g.mostRecent = activityTime(m);
+    if (activityTime(m) >= dayAgo) g.recentCount += 1;
   }
   return [...groups.values()].sort((a, b) => b.mostRecent - a.mostRecent);
 }
@@ -2517,16 +2748,23 @@ function shouldAutoExpand(scope, g) {
 function cardDefaultCollapsed(scope) {
   return (scope || 'recent') !== 'recent';
 }
+// Keyed by the conversation, so the choice survives a rewind minting a new record id.
+// Keys an older build wrote are record ids; they are still read, and written keys replace them.
+function cardKey(m) { return conversationId(m) || (m ? m.id : ''); }
 function cardIsCollapsed(m) {
-  if (state.cardCollapsed.has(m.id)) return true;
-  if (state.cardExpanded.has(m.id)) return false;
+  const key = cardKey(m);
+  if (state.cardCollapsed.has(key) || state.cardCollapsed.has(m.id)) return true;
+  if (state.cardExpanded.has(key) || state.cardExpanded.has(m.id)) return false;
   return cardDefaultCollapsed(m.scope);
 }
-function setCardCollapsed(id, scope, collapsed) {
-  state.cardCollapsed.delete(id);
-  state.cardExpanded.delete(id);
-  if (collapsed !== cardDefaultCollapsed(scope)) {
-    (collapsed ? state.cardCollapsed : state.cardExpanded).add(id);
+function setCardCollapsed(m, collapsed) {
+  const key = cardKey(m);
+  for (const set of [state.cardCollapsed, state.cardExpanded]) {
+    set.delete(key);
+    set.delete(m.id);
+  }
+  if (collapsed !== cardDefaultCollapsed(m.scope)) {
+    (collapsed ? state.cardCollapsed : state.cardExpanded).add(key);
   }
 }
 
@@ -2548,11 +2786,14 @@ function bucketByScope(items) {
 
 // The frontend re-derives scope from state.recentDays, overriding the value the backend sent.
 // The priority matches the backend's compute_scope: archived > starred > mtime-based.
+function activityTime(m) { return m.activity_at || m.mtime || 0; }
+function activityISO(m) { return m.activity_at_iso || m.mtime_iso || ''; }
+
 function computeScope(m) {
   if (m.archived) return 'archived';
   if (m.starred) return 'starred';
   if (state.recentDays === 'all') return 'recent';
-  const ageDays = (Date.now() / 1000 - m.mtime) / 86400;
+  const ageDays = (Date.now() / 1000 - activityTime(m)) / 86400;
   return ageDays < state.recentDays ? 'recent' : 'dusty';
 }
 
@@ -2574,16 +2815,28 @@ function renderRecentDaysSelector() {
   </div>`;
 }
 
-// The set of sessions the dashboard actually displays right now: source filter → search → hideOneshot, the same pipeline as render.
+function isSuspected(m) {
+  return m.user_turn_count === 1 && !m.human_confirmed;
+}
+
+// The set of sessions the dashboard actually displays right now: one entry per conversation,
+// then source filter → search → suspected-run filter.
 // Extracted so "collapse all" can operate over the full dataset — including cards inside unexpanded groups that aren't currently rendered to the DOM.
+// Superseded records are dropped first, so every count downstream counts conversations and
+// agrees with the list. Their content is still reachable: search hits fold onto the
+// conversation's entry, and each entry lists its records.
 function displayedItems() {
+  const entries = conversationItems();
   const scopedItems = state.sourceFilter === 'all'
-    ? state.items
-    : state.items.filter(m => (m.source || 'claude') === state.sourceFilter);
+    ? entries
+    : entries.filter(m => (m.source || 'claude') === state.sourceFilter);
   const q = state.q.toLowerCase();
-  let filtered = q ? scopedItems.filter(m => m.id in state.searchHits) : scopedItems;
-  if (state.hideOneshot) filtered = filtered.filter(m => m.user_turn_count !== 1);
-  return { scopedItems, filtered };
+  const matched = q ? scopedItems.filter(m => m.id in state.searchHits) : scopedItems;
+  const hiddenSuspected = state.hideOneshot ? matched.filter(isSuspected) : [];
+  let filtered = state.hideOneshot ? matched.filter(m => !isSuspected(m)) : matched;
+  // Archive remains a deliberate hide action in the primary timeline, but search can still retrieve it.
+  if (state.viewMode === 'timeline' && !q) filtered = filtered.filter(m => !m.archived);
+  return { scopedItems, filtered, hiddenSuspected };
 }
 
 let _hasRendered = false;  // The entrance animation runs only once: true on the first frame, after which all renders (including live polling) no longer replay it
@@ -2593,9 +2846,9 @@ function render() {
   $list.classList.toggle('anim-in', !_hasRendered);
   _hasRendered = true;
 
-  // The unified filtering pipeline for source filter / search / hideOneshot (see displayedItems).
+  // The unified filtering pipeline for source filter / search / suspected runs (see displayedItems).
   // state.items stays unchanged (still everything the backend returned), avoiding data loss when switching.
-  const { scopedItems, filtered } = displayedItems();
+  const { scopedItems, filtered, hiddenSuspected } = displayedItems();
 
   if (scopedItems.length === 0) {
     $count.textContent = '0 sessions';
@@ -2620,10 +2873,30 @@ function render() {
   // No search results: a dedicated empty state, echoing the query term + one-click clear (distinguishing "nothing found" from "didn't search")
   if (state.q && filtered.length === 0) {
     $count.textContent = '0 / ' + scopedItems.length + ' sessions';
-    $list.innerHTML = `<div class="empty"><div class="empty-title">No matches for “${escapeHtml(state.q)}”</div><button class="empty-action" id="empty-clear-search">Clear search</button></div>`;
-    document.getElementById('empty-clear-search')?.addEventListener('click', () => {
-      $search.value = ''; syncSearchClear(); $search.dispatchEvent(new Event('input')); $search.focus();
-    });
+    if (hiddenSuspected.length) {
+      $list.innerHTML = `<div class="empty"><div class="empty-title">No visible matches for “${escapeHtml(state.q)}”</div><div class="empty-hint">${hiddenSuspected.length} matching suspected ${hiddenSuspected.length === 1 ? 'run is' : 'runs are'} hidden.</div><button class="empty-action" id="empty-show-suspected">Search suspected runs</button></div>`;
+      document.getElementById('empty-show-suspected')?.addEventListener('click', () => {
+        state.hideOneshot = false; syncSuspectedFilterUI(); saveUIState(); render();
+      });
+    } else {
+      $list.innerHTML = `<div class="empty"><div class="empty-title">No matches for “${escapeHtml(state.q)}”</div><button class="empty-action" id="empty-clear-search">Clear search</button></div>`;
+      document.getElementById('empty-clear-search')?.addEventListener('click', () => {
+        $search.value = ''; syncSearchClear(); $search.dispatchEvent(new Event('input')); $search.focus();
+      });
+    }
+    return;
+  }
+
+  if (!state.q && filtered.length === 0) {
+    $count.textContent = '0 / ' + scopedItems.length + ' sessions';
+    if (hiddenSuspected.length) {
+      $list.innerHTML = `<div class="empty"><div class="empty-title">No visible sessions</div><div class="empty-hint">${hiddenSuspected.length} suspected ${hiddenSuspected.length === 1 ? 'run is' : 'runs are'} hidden.</div><button class="empty-action" id="empty-show-suspected">Show suspected runs</button></div>`;
+      document.getElementById('empty-show-suspected')?.addEventListener('click', () => {
+        state.hideOneshot = false; syncSuspectedFilterUI(); saveUIState(); render();
+      });
+    } else {
+      $list.innerHTML = `<div class="empty"><div class="empty-title">No active sessions</div></div>`;
+    }
     return;
   }
 
@@ -2633,6 +2906,18 @@ function render() {
     $count.textContent = filtered.length + ' / ' + scopedItems.length + ' sessions';
   }
 
+  if (state.viewMode === 'timeline') {
+    const scrollTop = $list.scrollTop;
+    $list.classList.add('timeline');
+    $list.innerHTML = `<div class="timeline-list">${filtered
+      .slice().sort((a, b) => activityTime(b) - activityTime(a)).map(renderCard).join('')}</div>`;
+    $list.scrollTop = scrollTop;
+    bindCardEvents();
+    syncCollapseAllBtn();
+    return;
+  }
+
+  $list.classList.remove('timeline');
   const buckets = bucketByScope(filtered);
   const searching = q.length > 0;
 
@@ -2698,7 +2983,7 @@ function bindCollapseAllBtn() {
     const collapsed = !expand;
     // Expand/collapse all: explicitly set an override on every displayed card (including cards inside collapsed groups that aren't rendered into the DOM).
     // Goes through setCardCollapsed to maintain the dual Sets, consistent with the section default (cards that exactly match the default write no override, auto-pruning id buildup).
-    for (const m of displayedItems().filtered) setCardCollapsed(m.id, m.scope, collapsed);
+    for (const m of displayedItems().filtered) setCardCollapsed(m, collapsed);
     // Don't go through render() — same feel as single-card collapse, avoids full-column reflow / scroll jump.
     // Directly toggle the class on rendered cards; the state of unrendered cards is already written to state, and render() applies it when their group expands.
     document.querySelectorAll('.card[data-id]').forEach(card => {
@@ -2922,7 +3207,9 @@ function bindGroupEvents() {
         // Find all unarchived sessions under this group.
         // scope is computed on the fly via computeScope(m) rather than reading the cached m.scope — just like projectKey, computed live,
         // upholding the "frontend scope is the source of truth" contract and avoiding stale cached values causing missed/wrong archiving.
-        const toArchive = state.items.filter(m =>
+        // One entry per conversation: archiving is the current record's state, so a superseded
+        // record is never addressed separately here.
+        const toArchive = conversationItems().filter(m =>
           !m.archived && computeScope(m) === gkScope && projectKey(m.project_path) === gkProjectKey
         );
         if (toArchive.length === 0) { toast('Nothing to archive'); return; }
@@ -2999,6 +3286,7 @@ function bindGroupEvents() {
 // ---------- Inline SVG icons (feathericons style, 24x24 viewBox) ----------
 // stroke uses currentColor, driven by the button's text color; the filled state (e.g. starred) is controlled by CSS
 const ICONS = {
+  externalLink: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg>',
   // Five-pointed star: when starred, CSS sets fill: currentColor; when not lit, only the outline is drawn
   star: '<svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
   // archive: box + down arrow (feather archive)
@@ -3044,31 +3332,45 @@ function renderCard(m) {
     ? `<div class="note">${escapeHtml(m.note)}</div>`
     : '';
   // A2 freshness: mtime within the last 1 hour → add fresh to time-tag (more eye-catching, scannable at a glance for "which are still hot")
-  const _mt = m.mtime_iso ? new Date(m.mtime_iso).getTime() : 0;
+  const _mt = activityTime(m) * 1000;
   const isFresh = _mt && (Date.now() - _mt) < 3600 * 1000;
   // D2 persistent "has a note" micro-marker (shown even in the collapsed state, not dependent on hover)
   const noteIndicator = m.note
     ? `<span class="card-has-note" data-tooltip="Has a note">${ICONS.note}</span>`
     : '';
-  // Search match snippets
+  // Search match snippets. A hit found in a superseded record surfaces on this entry and
+  // names the record it came from, so the evidence still points at one physical file.
   const matchSnippets = state.searchHits[m.id];
   const matchBlock = matchSnippets && matchSnippets.length > 0
     ? `<div class="search-matches">${matchSnippets.map(s => {
         const role = s.role ? `<span class="search-match-role">${escapeHtml(s.role)}</span>` : '';
-        return `<div class="search-match">${role}${highlightTerms(escapeHtml(s.text), state.q)}</div>`;
+        const record = s.from_older_record
+          ? `<span class="search-match-record" title="Matched in earlier record ${escapeHtml(s.record_id || '')}">EARLIER RECORD ${escapeHtml(shortId(s.record_id))}</span>`
+          : '';
+        return `<div class="search-match">${record}${role}${highlightTerms(escapeHtml(s.text), state.q)}</div>`;
       }).join('')}</div>`
     : '';
   const archiveLabel = m.archived ? 'unarchive' : 'archive';
   const archiveClass = m.archived ? '' : 'btn-danger';
   const archiveIcon = m.archived ? ICONS.unarchive : ICONS.archive;
   const starLabel = m.starred ? 'unstar' : 'star';
-  const titleBlock = m.custom_title
-    ? `<div class="card-title" title="${escapeHtml(m.custom_title)}">${escapeHtml(m.custom_title)}</div>`
+  const displayTitle = m.display_title || m.custom_title || '';
+  const titleBlock = displayTitle
+    ? `<div class="card-title" title="${escapeHtml(displayTitle)}">${escapeHtml(displayTitle)}</div>`
+    : '';
+  const suspectedBadge = isSuspected(m)
+    ? `<div class="suspected-badge" title="Suspected because this session has one user turn">Suspected automated run · single-turn</div>`
     : '';
   // The group header already shows the main repo name; the card only shows the .worktrees/<branch> suffix for worktree sessions,
   // and the main-repo card doesn't render this row (project identity is read from the group header). Unknown paths still show a placeholder.
   let pathLabel = '';
-  if (!m.project_path) {
+  if (state.viewMode === 'timeline') {
+    pathLabel = projectKey(m.project_path);
+    const trunk = stripWorktree(m.project_path);
+    if (trunk && m.project_path && m.project_path.length > trunk.length) {
+      pathLabel += ` · ${m.project_path.slice(trunk.length).replace(/^\//, '')}`;
+    }
+  } else if (!m.project_path) {
     pathLabel = NO_WORKSPACE_KEY;
   } else {
     const trunk = stripWorktree(m.project_path);
@@ -3097,6 +3399,7 @@ function renderCard(m) {
     : '';
   const SRC_CHIP = {
     devin: ['DEV', 'source-devin', 'Devin Local'],
+    pi: ['PI', 'source-pi', 'Pi'],
     codex: ['CDX', 'source-codex', 'Codex'],
     antigravity: ['AGY', 'source-antigravity', 'Antigravity'],
     kimi: ['KMI', 'source-kimi', 'Kimi Code'],
@@ -3105,20 +3408,46 @@ function renderCard(m) {
   const sourceChip = `<span class="source-chip ${sourceClass}" title="${sourceTitle}">${sourceCode}</span>`;
   const collapsed = cardIsCollapsed(m);
   const collapseBtn = `<button class="card-collapse-btn" data-act="collapse" data-tooltip="${collapsed ? 'Expand card' : 'Collapse card'}" aria-label="Toggle card collapse">${ICONS.chevron}</button>`;
+  // One conversation is one entry. Its earlier records are listed here, collapsed, each with
+  // how it follows the one before it, and each still openable at its own id.
+  const records = conversationRecords(m);
+  const recordsBlock = records.length > 1
+    ? `<details class="card-records" data-act="records"><summary>${records.length} records in this conversation</summary>${
+        records.map(r => {
+          // Every record says how it follows the one before it; the current one is also marked,
+          // because that is the transcript still being written to.
+          const label = recordRelationLabel(r.relation) + (r.is_current ? ' · current' : '');
+          const cls = r.is_current ? 'card-records-relation card-records-current' : 'card-records-relation';
+          return `<div class="card-records-row"><span class="${cls}">${escapeHtml(label)}</span> · <a href="/?session=${encodeURIComponent(r.id)}" target="_blank" rel="noopener" title="${escapeHtml(r.id)}">${escapeHtml(r.id)}</a></div>`;
+        }).join('')
+      }</details>`
+    : '';
+  // A fork is a separate conversation; it only says where it came from.
+  const forkedFrom = m.forked_from_record_id || m.forked_from_conversation_id || '';
+  const lineageBlock = forkedFrom
+    ? `<div class="card-lineage" data-act="lineage">Forked from <a href="/?session=${encodeURIComponent(forkedFrom)}" target="_blank" rel="noopener" title="${escapeHtml(forkedFrom)}">${escapeHtml(shortId(forkedFrom))}</a></div>`
+    : '';
+  const olderNotes = Array.isArray(m.older_notes) ? m.older_notes.filter(n => n && n.note) : [];
+  const olderNotesBlock = olderNotes.length
+    ? `<div class="card-older-notes">${olderNotes.map(n =>
+        `<div class="card-older-note"><span class="card-older-note-id" title="${escapeHtml(n.record_id || '')}">${escapeHtml(shortId(n.record_id))}</span>${escapeHtml(n.note)}</div>`
+      ).join('')}</div>`
+    : '';
   return `
     <div class="card ${m.archived ? 'archived' : ''}${collapsed ? ' collapsed' : ''}" data-id="${escapeHtml(m.id)}" data-source="${m.source || 'claude'}" data-scope="${m.scope || 'recent'}">
       ${collapseBtn}
       ${filesAbsBtn}
       ${titleBlock}
+      ${suspectedBadge}
       ${pathrow}
       <div class="card-foot">
         <span class="card-sid-wrap">
           ${sourceChip}
           <span class="card-sid" data-act="copy-id" data-tooltip="Click to copy session ID">${escapeHtml(m.id)}</span>
-          <button class="sid-link-btn" data-act="copy-path" data-tooltip="Copy source reference" aria-label="Copy source reference">${ICONS.link}</button>
+          <button class="sid-link-btn" data-act="copy-path" data-tooltip="${m.source === 'codex' ? 'Copy latest segment path' : 'Copy source reference'}" aria-label="${m.source === 'codex' ? 'Copy latest segment path' : 'Copy source reference'}">${ICONS.link}</button>
           <button class="sid-link-btn" data-act="copy-link" data-tooltip="Copy shareable link" aria-label="Copy shareable link">${ICONS.share}</button>
         </span>
-        <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(m.mtime_iso || '')}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(m.mtime_iso)}</span>
+        <span class="time-tag ${stopClass}${isFresh ? ' fresh' : ''}" title="${escapeHtml(activityISO(m))}${stopTitle ? ' · ' + escapeHtml(stopTitle) : ''}">${relTime(activityISO(m))}</span>
         ${noteIndicator}
         <div class="card-actions">
           <button class="btn" data-act="note" data-tooltip="Edit note" aria-label="Edit note">${ICONS.note}</button>
@@ -3127,9 +3456,12 @@ function renderCard(m) {
           ${filesInlineBtn}
         </div>
       </div>
+      ${recordsBlock}
+      ${lineageBlock}
       ${msgsBlock}
       ${matchBlock}
       ${noteBlock}
+      ${olderNotesBlock}
     </div>`;
 }
 
@@ -3158,9 +3490,12 @@ async function mutatingFetch(url, opts) {
   }
 }
 
-async function toggleArchive(id, opts = {}) {
-  const m = state.items.find(x => x.id === id);
+// Personal state belongs to the conversation, so every write resolves to its current record
+// first — the same record the backend would write to for any member id it was handed.
+async function toggleArchive(addressedId, opts = {}) {
+  const m = currentItemFor(addressedId);
   if (!m) return;
+  const id = m.id;
   const newArchived = !m.archived;
   const oldArchived = m.archived;
   const oldScope = m.scope;
@@ -3191,7 +3526,9 @@ async function toggleArchive(id, opts = {}) {
 // After a modal archive: make the corresponding card on the dashboard flash for 0.6s to indicate its new position.
 // Note: toggleArchive has already called render() internally, so the DOM is currently being rebuilt,
 // and we need to wait until the next frame to get the new .card node.
-function flashCard(id) {
+function flashCard(addressedId) {
+  // The card carries the conversation's current record id, which is what any member resolves to.
+  const id = currentItemFor(addressedId)?.id || addressedId;
   requestAnimationFrame(() => {
     const card = document.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
     if (card) {
@@ -3200,16 +3537,17 @@ function flashCard(id) {
       card.addEventListener('animationend', () => card.classList.remove('card-flash'), {once: true});
     } else {
       // Fallback: after the scope switch the card got collapsed away, so tell the user where it went
-      const m = state.items.find(x => x.id === id);
+      const m = currentItemFor(id);
       const scopeName = m ? (SECTION_LABELS[m.scope]?.title || m.scope) : '';
       toast(scopeName ? `Moved to ${scopeName}` : 'Moved');
     }
   });
 }
 
-async function toggleStar(id) {
-  const m = state.items.find(x => x.id === id);
+async function toggleStar(addressedId) {
+  const m = currentItemFor(addressedId);
   if (!m) return;
+  const id = m.id;
   const newStarred = !m.starred;
   const oldStarred = m.starred;
   const oldScope = m.scope;
@@ -3244,7 +3582,7 @@ function bindCardEvents() {
     card.querySelector('[data-act="collapse"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
       const nowCollapsed = card.classList.toggle('collapsed');
-      setCardCollapsed(id, card.dataset.scope, nowCollapsed);
+      setCardCollapsed(findItem(id) || {id, scope: card.dataset.scope}, nowCollapsed);
       const btn = e.currentTarget;
       btn.dataset.tooltip = nowCollapsed ? 'Expand card' : 'Collapse card';
       saveUIState();
@@ -3258,22 +3596,25 @@ function bindCardEvents() {
     // Copy source reference (link icon), needs stopPropagation to avoid triggering the card's whole-card open
     card.querySelector('[data-act="copy-path"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
-      const m = state.items.find(x => x.id === id);
+      const m = findItem(id);
       const path = m?.jsonl_path;
       if (!path) { toast('No source reference'); return; }
       navigator.clipboard.writeText(path).then(() => toast('Copied source reference'), () => toast('Copy failed'));
     });
-    // Copy a shareable direct link (/?session=<id>), using location.origin to capture the current host:port
+    // Copy a shareable direct link (/?session=<id>), using location.origin to capture the current host:port.
+    // A conversation made of several records is linked by its conversation id, so the link keeps
+    // opening the right transcript after the next rewind; a single record keeps its own id.
     card.querySelector('[data-act="copy-link"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
-      const url = `${location.origin}/?session=${encodeURIComponent(id)}`;
+      const m = findItem(id);
+      const url = `${location.origin}/?session=${encodeURIComponent(m ? shareId(m) : id)}`;
       navigator.clipboard.writeText(url).then(() => toast('Copied session link'), () => toast('Copy failed'));
     });
     // Files shortcut entry: uses this card's project_path as current, and all paths with the same projectKey as tabs,
     // matching the behavior of the folder header's Files btn (the modal can still switch worktree tabs).
     card.querySelector('[data-act="files"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
-      const m = state.items.find(x => x.id === id);
+      const m = findItem(id);
       if (!m?.project_path) { toast('No project path'); return; }
       const key = projectKey(m.project_path);
       const pathSet = new Set();
@@ -3296,7 +3637,7 @@ function bindCardEvents() {
     }
     card.querySelector('[data-act="note"]').addEventListener('click', async (e) => {
       e.stopPropagation();
-      const m = state.items.find(x => x.id === id);
+      const m = currentItemFor(id);
       if (!m) return;
       const current = m.note || '';
       const next = await window.openNoteModal(current);
@@ -3305,7 +3646,7 @@ function bindCardEvents() {
       m.note = next;
       render();
       try {
-        const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(id)}/note`, {
+        const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(m.id)}/note`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({note: next}),
@@ -3343,10 +3684,13 @@ function ensureConvOverlay() {
 
 function openConversation(sessionId, opts = {}) {
   ensureConvOverlay();
+  stopConvLive();
+  const generation = _convLiveGeneration;
   _convStandalone = !!opts.standalone;
+  _convIncludeRewound = !!opts.includeRewound;
   const meta = opts.standalone
     ? null  // in standalone mode the dashboard isn't loaded, so meta is inferred from the conv data after fetch
-    : state.items.find(x => x.id === sessionId);
+    : findItem(sessionId);
   $conv.classList.add('open');
   $conv.innerHTML = `
     <div class="conv-modal">
@@ -3370,14 +3714,16 @@ function openConversation(sessionId, opts = {}) {
   $conv.querySelector('#conv-close').addEventListener('click', closeConversation);
   $convNav = null;
 
-  fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`)
+  fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation${_convIncludeRewound ? '?include_rewound=1' : ''}`)
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(data => {
+      if (generation !== _convLiveGeneration) return;
       renderConv(data, meta);
-      // Standalone reader: start following this session's file so a running session updates in place
-      if (_convStandalone) startConvLive(sessionId, data.fingerprint);
+      // Both the overlay and standalone reader follow the open session.
+      startConvLive(sessionId, data.fingerprint, data);
     })
     .catch(err => {
+      if (generation !== _convLiveGeneration) return;
       // C4 error state: explain + offer retry, not a dead end
       $conv.querySelector('.conv-body').innerHTML =
         `<div class="empty"><div class="empty-title">Couldn't load conversation</div><div class="empty-hint">${escapeHtml(err.message)}</div><button class="empty-action" id="conv-retry">Retry</button></div>`;
@@ -3387,6 +3733,7 @@ function openConversation(sessionId, opts = {}) {
 
 function closeConversation() {
   if (_convStandalone) return;  // standalone mode: close the tab via the browser
+  stopConvLive();
   if ($conv) $conv.classList.remove('open');
   $convNav = null;
 }
@@ -3703,21 +4050,124 @@ async function openFileInSystem(filePath) {
   }
 }
 
+// Every object the change has to land on so it survives a redraw: the loaded transcript, the
+// card this reader was opened from, the record's own entry, and — when a rewind or compaction
+// made this one record of several — the conversation's current entry, which is where the
+// backend writes and which the list draws.
+function sessionMetadataTargets(data, meta) {
+  return [...new Set([data, meta, findItem(data.id), currentItemFor(data.id)].filter(Boolean))];
+}
+
+function redrawSessionMetadata(data, meta) {
+  const scrollTop = $conv?.querySelector('.conv-body')?.scrollTop || 0;
+  if (!_convStandalone) render();
+  renderConv(data, findItem(data.id) || meta);
+  const body = $conv?.querySelector('.conv-body');
+  if (body) body.scrollTop = scrollTop;
+}
+
+async function editSessionTitle(data, meta) {
+  const targets = sessionMetadataTargets(data, meta);
+  const current = targets.find(item => item.title_override)?.title_override || '';
+  const nextValue = await window.openTextModal(current, {
+    title: 'Personal Session Title',
+    placeholder: 'Name this Session… (save empty to clear)',
+    multiline: false,
+  });
+  if (nextValue === null) return;
+  const next = nextValue.trim();
+  const previous = targets.map(item => ({item, title_override: item.title_override, display_title: item.display_title}));
+  for (const item of targets) {
+    item.title_override = next;
+    item.display_title = next || item.custom_title || '';
+  }
+  redrawSessionMetadata(data, meta);
+  try {
+    const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(data.id)}/title`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title_override: next}),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    toast(next ? 'Title saved' : 'Personal title cleared');
+  } catch (err) {
+    for (const old of previous) {
+      old.item.title_override = old.title_override;
+      old.item.display_title = old.display_title;
+    }
+    redrawSessionMetadata(data, meta);
+    toast('Title failed: ' + err.message);
+  }
+}
+
+// The note belongs to the conversation, so the reader edits exactly what the card edits and
+// both surfaces update together. The backend lands the write on the conversation's current
+// record whichever member id is addressed, so this stays correct on an earlier record too.
+async function editSessionNote(data, meta) {
+  const targets = sessionMetadataTargets(data, meta);
+  const current = String(targets.find(item => typeof item.note === 'string' && item.note)?.note ?? '');
+  const nextValue = await window.openNoteModal(current);
+  if (nextValue === null) return;
+  const previous = targets.map(item => ({item, note: item.note}));
+  for (const item of targets) item.note = nextValue;
+  redrawSessionMetadata(data, meta);
+  try {
+    const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(data.id)}/note`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({note: nextValue}),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    toast(nextValue.trim() ? 'Note saved' : 'Note cleared');
+  } catch (err) {
+    for (const old of previous) old.item.note = old.note;
+    redrawSessionMetadata(data, meta);
+    toast('Note failed: ' + err.message);
+  }
+}
+
+async function setSessionHumanConfirmation(data, meta, confirmed) {
+  const targets = sessionMetadataTargets(data, meta);
+  const previous = targets.map(item => ({item, human_confirmed: item.human_confirmed}));
+  for (const item of targets) item.human_confirmed = confirmed;
+  redrawSessionMetadata(data, meta);
+  try {
+    const res = await mutatingFetch(`/api/sessions/${encodeURIComponent(data.id)}/human`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({human_confirmed: confirmed}),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    toast(confirmed ? 'Marked as human Session' : 'Human confirmation removed');
+  } catch (err) {
+    for (const old of previous) old.item.human_confirmed = old.human_confirmed;
+    redrawSessionMetadata(data, meta);
+    toast('Update failed: ' + err.message);
+  }
+}
+
 function renderConv(data, meta) {
   const head = $conv.querySelector('.conv-head');
   const body = $conv.querySelector('.conv-body');
   // Set data-source so the overlay switches the source glow (radial gradient around the modal)
   // meta may be empty (standalone cold start); fall back to data.source, then to claude
   const _src = (meta?.source || data.source || 'claude');
-  $conv.setAttribute('data-source', ['codex', 'antigravity', 'kimi', 'devin'].includes(_src) ? _src : 'claude');
+  $conv.setAttribute('data-source', ['codex', 'antigravity', 'kimi', 'devin', 'pi'].includes(_src) ? _src : 'claude');
 
   const userCount = data.turns.filter(t => t.type === 'user').length;
   const toolTurns = data.turns.filter(t => t.type === 'tool').length;
   const hasMeta = !!meta;
-  const starLabel = meta?.starred ? 'unstar' : 'star';
-  const archiveLabel = meta?.archived ? 'unarchive' : 'archive';
-  const archiveClass = meta?.archived ? '' : 'btn-danger';
-  const archiveIcon = meta?.archived ? ICONS.unarchive : ICONS.archive;
+  // Two different things, deliberately kept apart. `meta` is this *record*: its size, its
+  // modification time, its source. `stateMeta` is the *conversation*: the star, the archive,
+  // the note and the personal title, which are one answer for all of a conversation's records
+  // and which the backend writes to the current one. On an ordinary single-record session the
+  // two are the same object, so nothing about that case changes.
+  const stateMeta = currentItemFor(data.id) || meta;
+  const starLabel = stateMeta?.starred ? 'unstar' : 'star';
+  const archiveLabel = stateMeta?.archived ? 'unarchive' : 'archive';
+  const archiveClass = stateMeta?.archived ? '' : 'btn-danger';
+  const archiveIcon = stateMeta?.archived ? ICONS.unarchive : ICONS.archive;
+  const humanConfirmed = Boolean(stateMeta?.human_confirmed ?? data.human_confirmed);
   // Raw toggle: shown in all modes (including standalone), independent of meta. Highlighted accent when active.
   const rawBtnHtml = `<button class="btn conv-raw-btn ${_convRaw ? 'active' : ''}" id="conv-raw" aria-pressed="${_convRaw}" data-tooltip="${_convRaw ? 'Showing raw text in this view — click for rendered markdown' : 'Show raw text for this view'}">${ICONS.code}${_convRaw ? 'raw on' : 'raw'}</button>`;
   // Export submenu: three export actions (shown in all modes, independent of meta) collected into one menu.
@@ -3727,7 +4177,7 @@ function renderConv(data, meta) {
   //   · Download for an agent = download a reduced transcript with [L#] original line-number anchors, so another agent can expand back to the source on demand
   //     (this is a different reduction for a different consumer than the "copy for people to read"; see docs/philosophy.md "context reduction (for whom)";
   //      uses browser download, and the dual-source backend /anchored auto-routes by source between Claude / Codex)
-  const exportMenuHtml = `<div class="conv-export-wrap">
+  const exportMenuHtml = data.include_rewound ? '' : `<div class="conv-export-wrap">
       <button class="btn conv-export-trigger" id="conv-export-trigger" aria-haspopup="true" aria-expanded="false" data-tooltip="Export this conversation">${ICONS.download}export<span class="conv-export-caret">${ICONS.chevronDown}</span></button>
       <div class="conv-export-menu" id="conv-export-menu" role="menu" hidden>
         <button class="conv-export-item" id="conv-export-copy" role="menuitem">
@@ -3745,29 +4195,59 @@ function renderConv(data, meta) {
       </div>
     </div>`;
   const metaBtnsHtml = hasMeta ? `
-      <button class="btn btn-star ${meta?.starred ? 'starred' : ''}" id="conv-star" data-tooltip="${meta?.starred ? 'Unstar' : 'Star'}">${ICONS.star}${starLabel}</button>
-      <button class="btn ${archiveClass}" id="conv-archive" data-tooltip="${meta?.archived ? 'Unarchive' : 'Archive'}">${archiveIcon}${archiveLabel}</button>` : '';
+      <button class="btn btn-star ${stateMeta?.starred ? 'starred' : ''}" id="conv-star" data-tooltip="${stateMeta?.starred ? 'Unstar' : 'Star'}">${ICONS.star}${starLabel}</button>
+      <button class="btn ${archiveClass}" id="conv-archive" data-tooltip="${stateMeta?.archived ? 'Unarchive' : 'Archive'}">${archiveIcon}${archiveLabel}</button>` : '';
   const actionsHtml = `
     <div class="conv-actions">
       ${rawBtnHtml}${exportMenuHtml}${metaBtnsHtml}
     </div>`;
   const popoutHtml = _convStandalone ? '' :
-    `<button class="conv-popout" id="conv-popout" data-tooltip="Open in new tab" aria-label="Open in new tab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></svg></button>`;
+    `<button class="conv-popout" id="conv-popout" data-tooltip="Open in new tab" aria-label="Open in new tab">${ICONS.externalLink}</button>`;
   // Share button: shown in both modes (in standalone the popout is hidden, but copying the URL from the address bar is annoying, so we keep this)
   const shareHtml =
     `<button class="conv-share" id="conv-share" data-tooltip="Copy link to this session" aria-label="Copy link to this session">${ICONS.share}</button>`;
   const closeHtml = _convStandalone ? '' :
     `<button class="conv-close" id="conv-close">${ICONS.close}</button>`;
 
-  // /title custom title takes priority; otherwise fall back to project_path / id
-  const headTitle = data.custom_title || data.project_path || data.id;
-  const subtitleHtml = data.custom_title && data.project_path
-    ? `<div class="conv-subtitle" title="${escapeHtml(data.project_path)}">${escapeHtml(data.project_path)}</div>`
+  const titleOverride = stateMeta?.title_override ?? data.title_override ?? '';
+  const sourceTitle = data.custom_title || meta?.custom_title || '';
+  const headTitle = titleOverride || sourceTitle || data.project_path || data.id;
+  const subtitleParts = [];
+  if (titleOverride && sourceTitle) subtitleParts.push(`Source: ${sourceTitle}`);
+  if ((titleOverride || sourceTitle) && data.project_path) subtitleParts.push(data.project_path);
+  const subtitle = subtitleParts.join(' · ');
+  const subtitleHtml = subtitle
+    ? `<div class="conv-subtitle" title="${escapeHtml(subtitle)}">${escapeHtml(subtitle)}</div>`
     : '';
+  const humanIdentityHtml = userCount === 1
+    ? `<span class="conv-identity-label">${humanConfirmed ? 'Human-confirmed · single-turn' : 'Suspected automated run · single-turn'}</span><button type="button" id="conv-human">${humanConfirmed ? 'Undo' : 'I participated in this Session'}</button>`
+    : '';
+  // A personal title set on a record a rewind later superseded still names the conversation;
+  // say so, so "I never named this one" does not read as a bug.
+  const titleSourceId = stateMeta?.title_override_source_id ?? data.title_override_source_id ?? null;
+  const titleSourceHtml = titleOverride && titleSourceId && titleSourceId !== data.id
+    ? `<span class="conv-identity-label" title="${escapeHtml(titleSourceId)}">Title set on an earlier record</span>`
+    : '';
+  const localMetadataHtml = `<div class="conv-identity">${humanIdentityHtml}${titleSourceHtml}<button type="button" id="conv-title-edit">${titleOverride ? 'Edit personal title' : 'Add personal title'}</button></div>`;
+  // The note a person left on this conversation. It was only ever on the list card, which
+  // meant the one place you actually re-read the work was the one place your own note about
+  // it was invisible. `data` answers first so the standalone page, which has no card, shows
+  // the same thing the modal does. Older records' notes are listed beside it, each labelled
+  // with the record it was written on and never merged into the current one.
+  const noteText = String(stateMeta?.note ?? data.note ?? '');
+  const olderNotes = (stateMeta?.older_notes ?? data.older_notes ?? []).filter(n => n && n.note);
+  const olderNotesHtml = olderNotes.length
+    ? `<div class="conv-older-notes">${olderNotes.map(n =>
+        `<div class="conv-older-note"><span class="conv-older-note-id" title="${escapeHtml(n.record_id || '')}">${escapeHtml(shortId(n.record_id))}</span>${escapeHtml(n.note)}</div>`
+      ).join('')}</div>`
+    : '';
+  const noteHtml = `<div class="conv-note">${noteText
+      ? `<div class="conv-note-text">${escapeHtml(noteText)}</div>` : ''}${olderNotesHtml}<div class="conv-identity"><button type="button" id="conv-note-edit">${noteText ? 'Edit note' : 'Add note'}</button></div></div>`;
   // Source pill: modal identity tag, on the same line as conv-title
   const sourceVal = (meta?.source || data.source || 'claude');
   const SRC_PILL = {
     devin: ['Devin Local', 'source-devin'],
+    pi: ['Pi', 'source-pi'],
     codex: ['Codex', 'source-codex'],
     antigravity: ['Antigravity', 'source-antigravity'],
     kimi: ['Kimi Code', 'source-kimi'],
@@ -3776,16 +4256,71 @@ function renderConv(data, meta) {
   const sourcePillHtml = `<span class="conv-source-pill ${sourceClass}" title="${sourceLabel} session">${sourceLabel}</span>`;
   // Metadata row (ID + size + mtime + jsonl_path) — placed in head as the sticky last line
   // Historically this section sat at the top of body and scrolled away with the turns, so the user lost sight of the ID once scrolled into the middle
-  const sizeKB = meta ? (meta.size / 1024).toFixed(1) + ' KB' : '';
-  const pathBtnHtml = meta?.jsonl_path
-    ? `<button class="conv-link-btn" data-copy-path="${escapeHtml(meta.jsonl_path)}" data-tooltip="Copy source reference" aria-label="Copy source reference">${ICONS.link}</button>`
+  const sizeKB = sourceVal === 'codex' ? (Number.isFinite(data.segment_size) ? (data.segment_size / 1024).toFixed(1) + ' KB latest segment' : '') : meta ? (meta.size / 1024).toFixed(1) + ' KB' : '';
+  const sourcePath = data.jsonl_path || meta?.jsonl_path;
+  const pathLabel = sourceVal === 'codex' ? 'Copy latest segment path' : 'Copy source reference';
+  const sourceFilesHtml = data.source_files?.length ? `<details class="conv-sources"><summary>Source file details (${data.source_files.length})</summary>${data.history_semantics === 'selected_file_only' ? '<div>Selected file only. Other source branches are not merged.</div>' : ''}${data.source_files.map(f => {
+    const relation = f.relation === 'shared_history' ? (f.relationship_kind === 'same_id_copy' ? 'Same-ID history copy; select source explicitly' : 'Shared history; continuation or fork undetermined')
+      : f.relation === 'unlinked' ? 'Earlier page of this session; the record carries no link to it'
+      : f.relation;
+    const openSource = f.relation === 'shared_history' && f.session_id ? `<a class="conv-link-btn" href="/?session=${encodeURIComponent(f.session_id)}" target="_blank" rel="noopener" data-tooltip="Open this source session" aria-label="Open this source session">${ICONS.externalLink}</a>` : '';
+    return `<div>${escapeHtml(relation)} · Session <span class="conv-copy-id" data-copy-id="${escapeHtml(f.session_id)}" data-tooltip="Click to copy session ID">${escapeHtml(f.session_id)}</span>${openSource} · L${f.first_line}–L${f.last_line}<br><span>${escapeHtml(f.path)}</span><button class="conv-link-btn" data-copy-path="${escapeHtml(f.path)}" data-tooltip="Copy this source path" aria-label="Copy this source path">${ICONS.link}</button></div>`;
+  }).join('')}</details>` : '';
+  // Conversation identity in the reader. Both entry points render this same block: the modal
+  // has `meta`, standalone does not, so every field is read from `data` first and only falls
+  // back to `meta`. When the backend serves no conversation fields at all — an older build, or
+  // a scan cache too cold to answer — `records` is empty and this collapses to nothing.
+  const convRecords = conversationRecords(data).length ? conversationRecords(data) : conversationRecords(meta);
+  const convCurrentId = data.conversation_current_id || meta?.conversation_current_id || data.id;
+  const isEarlierRecord = convRecords.length > 1 && convCurrentId !== data.id;
+  const forkedFrom = data.forked_from_record_id || data.forked_from_conversation_id
+    || meta?.forked_from_record_id || meta?.forked_from_conversation_id || '';
+  // A Codex user fork is its own conversation. Name the parent instead of letting the
+  // inherited pre-fork turns read as this session's own. This is Codex's own lineage, read
+  // from the rollout's session_meta, and stays separate from the conversation-identity
+  // fields above, which only ever describe Claude records — so the two never both fire.
+  const codexFork = data.forked_from;
+  const codexForkHtml = codexFork?.session_id ? `<div class="conv-rewind-record">Forked from <a href="/?session=${encodeURIComponent(codexFork.session_id)}" target="_blank" rel="noopener">${escapeHtml(codexFork.session_id)}</a>${Number.isInteger(codexFork.ordinal_exclusive) ? ` at record ${codexFork.ordinal_exclusive}` : ''}. Earlier turns belong to that session.</div>` : '';
+  // A Codex sub-agent is a session Codex started for another session, not a branch of it:
+  // this file is its whole record. Name the session that spawned it so the relationship is
+  // visible, and never as a warning — nothing is missing here.
+  const codexSpawn = data.spawned_from;
+  const codexSpawnHtml = codexSpawn ? `<div class="conv-rewind-record">Sub-agent session started by ${codexSpawn.parent_session_id ? `<a href="/?session=${encodeURIComponent(codexSpawn.parent_session_id)}" target="_blank" rel="noopener">${escapeHtml(codexSpawn.parent_session_id)}</a>` : 'a session Codex did not record'}. It is a session of its own and this is its full transcript.</div>` : '';
+  const historicalView = !!data.include_rewound;
+  const currentUrl = `/?session=${encodeURIComponent(convCurrentId || data.id)}`;
+  const recordLinks = convRecords.length > 1 ? convRecords.map(r => {
+    const label = recordRelationLabel(r.relation) + (r.is_current ? ' · current' : '');
+    const cls = r.is_current ? 'conv-rewind-relation conv-rewind-current' : 'conv-rewind-relation';
+    return r.id === data.id
+      ? `<div class="conv-rewind-record"><span class="${cls}">${escapeHtml(label)}</span> · ${escapeHtml(r.id)} (reading this one)</div>`
+      : `<div class="conv-rewind-record"><span class="${cls}">${escapeHtml(label)}</span> · <a href="/?session=${encodeURIComponent(r.id)}" target="_blank" rel="noopener">${escapeHtml(r.id)}</a></div>`;
+  }).join('') : '';
+  const forkHtml = forkedFrom
+    ? `<div class="conv-rewind-record">Forked from <a href="/?session=${encodeURIComponent(forkedFrom)}" target="_blank" rel="noopener">${escapeHtml(forkedFrom)}</a>. It stays a separate conversation.</div>`
+    : '';
+  // Rows an in-file rewind abandoned are excluded from the turns by the backend. Say how many,
+  // so a shorter transcript is never silently shorter. Absent or zero renders nothing at all.
+  const abandonedRows = Number(data.rewind_abandoned_rows) || 0;
+  const abandonedHtml = abandonedRows > 0
+    ? `<div class="conv-abandoned">${abandonedRows} ${abandonedRows === 1 ? 'record was' : 'records were'} abandoned by a rewind and ${abandonedRows === 1 ? 'is' : 'are'} not shown.</div>`
+    : '';
+  const sameFileHistory = data.rewind?.status === 'selected' && data.rewind.hidden_message_count > 0
+    ? `<div class="conv-rewind-record"><a href="/?session=${encodeURIComponent(data.id)}&include_rewound=1" target="_blank" rel="noopener">View saved records in this session</a></div>` : '';
+  const rewindHtml = `<div class="conv-rewind">${historicalView
+    ? `All saved records, including earlier history. This is not the current conversation. <a href="${currentUrl}">Back to current conversation</a>`
+    : isEarlierRecord
+      ? `This is an earlier record of a conversation that continued elsewhere. <a href="${currentUrl}">Open the current one</a>` : ''}${forkHtml}${!historicalView && (recordLinks || sameFileHistory)
+    ? `<details><summary>${recordLinks ? `Records in this conversation (${convRecords.length})` : 'View earlier saved records'}</summary>${recordLinks}${sameFileHistory}</details>` : ''}</div>`;
+  const pathBtnHtml = sourcePath
+    ? `<button class="conv-link-btn" data-copy-path="${escapeHtml(sourcePath)}" data-tooltip="${pathLabel}" aria-label="${pathLabel}">${ICONS.link}</button>`
     : '';
   const detailHtml = `
     <div class="conv-detail">
       <span class="conv-sid-wrap"><span class="conv-copy-id" data-copy-id="${escapeHtml(data.id)}" data-tooltip="Click to copy session ID">${escapeHtml(data.id)}</span>${pathBtnHtml}</span>
       ${sizeKB ? `<span>${sizeKB}</span>` : ''}
-      ${meta?.mtime_iso ? `<span>${escapeHtml(fmtAbsTime(meta.mtime_iso))}</span>` : ''}
-      ${meta?.jsonl_path ? `<div style="margin-top:2px">${escapeHtml(meta.jsonl_path)}</div>` : ''}
+      ${meta ? `<span>${escapeHtml(fmtAbsTime(activityISO(meta)))}</span>` : ''}
+      ${sourcePath ? `<div style="margin-top:2px">${sourceVal === 'codex' ? 'Latest segment: ' : ''}${escapeHtml(sourcePath)}</div>` : ''}
+      ${sourceFilesHtml}
     </div>`;
 
   head.innerHTML = `
@@ -3797,6 +4332,13 @@ function renderConv(data, meta) {
         </div>
         ${subtitleHtml}
         <div class="conv-meta">${userCount} msgs · ${toolTurns} tool calls · ${data.total_lines} ${data.source === 'devin' ? 'database nodes' : 'raw lines'}</div>
+        ${abandonedHtml}
+        ${localMetadataHtml}
+        ${noteHtml}
+        ${codexForkHtml}
+        ${codexSpawnHtml}
+        ${rewindHtml}
+        ${data.context_complete === false ? `<details class="conv-meta"><summary role="alert">Conversation history is incomplete — some earlier context is unavailable.</summary><pre>${escapeHtml(JSON.stringify(data.history_issues || [], null, 2))}</pre></details>` : ''}
       </div>
       ${actionsHtml}
       ${shareHtml}
@@ -3827,15 +4369,21 @@ function renderConv(data, meta) {
     </div>
     ${detailHtml}`;
 
+  // A link out of the reader names the conversation only when the reader is showing its current
+  // record. A deliberately opened earlier record keeps its own id: retargeting someone's link
+  // to a different transcript behind their back is exactly what must never happen.
+  const linkId = (convRecords.length > 1 && !isEarlierRecord && !historicalView)
+    ? (data.conversation_id || meta?.conversation_id || data.id)
+    : data.id;
   if (!_convStandalone) {
     head.querySelector('#conv-close').addEventListener('click', closeConversation);
     head.querySelector('#conv-popout').addEventListener('click', () => {
-      window.open(`/?session=${encodeURIComponent(data.id)}`, '_blank', 'noopener');
+      window.open(`/?session=${encodeURIComponent(linkId)}${data.include_rewound ? '&include_rewound=1' : ''}`, '_blank', 'noopener');
     });
   }
   // The share button exists in both modes, so its binding sits outside the standalone gate
   head.querySelector('#conv-share')?.addEventListener('click', () => {
-    const url = `${location.origin}/?session=${encodeURIComponent(data.id)}`;
+    const url = `${location.origin}/?session=${encodeURIComponent(linkId)}${data.include_rewound ? '&include_rewound=1' : ''}`;
     navigator.clipboard.writeText(url).then(() => toast('Copied session link'), () => toast('Copy failed'));
   });
   // Raw toggle: flip mode for the current view + re-render the same session/meta. Preserve scroll position (raw/rendered heights
@@ -3846,12 +4394,21 @@ function renderConv(data, meta) {
     renderConv(data, meta);
     $conv.querySelector('.conv-body').scrollTop = scrollTop;
   });
+  head.querySelector('#conv-title-edit')?.addEventListener('click', () => {
+    editSessionTitle(data, meta);
+  });
+  head.querySelector('#conv-note-edit')?.addEventListener('click', () => {
+    editSessionNote(data, meta);
+  });
+  head.querySelector('#conv-human')?.addEventListener('click', () => {
+    setSessionHumanConfirmation(data, meta, !humanConfirmed);
+  });
   if (hasMeta) {
     head.querySelector('#conv-star').addEventListener('click', () => {
       // star is a "keep viewing" state, so don't close the modal
       toggleStar(data.id);
       // Fallback meta: in extreme cases live polling may remove this entry from state.items, so find returns undefined → the meta section disappears
-      renderConv(data, state.items.find(x => x.id === data.id) || meta);
+      renderConv(data, findItem(data.id) || meta);
     });
     head.querySelector('#conv-archive').addEventListener('click', () => {
       // archive / unarchive both close the modal and flash the dashboard to locate the card
@@ -3999,15 +4556,15 @@ function renderConv(data, meta) {
   });
 
   // Bind the session ID copy button (detail has moved to the head sticky area)
-  head.querySelector('[data-copy-id]')?.addEventListener('click', (e) => {
+  head.querySelectorAll('[data-copy-id]').forEach(button => button.addEventListener('click', (e) => {
     e.stopPropagation();
     navigator.clipboard.writeText(e.currentTarget.dataset.copyId).then(() => toast('Copied session ID'), () => toast('Copy failed'));
-  });
+  }));
   // Bind the JSONL path copy button
-  head.querySelector('[data-copy-path]')?.addEventListener('click', (e) => {
+  head.querySelectorAll('[data-copy-path]').forEach(button => button.addEventListener('click', (e) => {
     e.stopPropagation();
     navigator.clipboard.writeText(e.currentTarget.dataset.copyPath).then(() => toast('Copied source reference'), () => toast('Copy failed'));
-  });
+  }));
 
   // Bind tool collapse events
   body.querySelectorAll('.conv-tool-head').forEach(el => {
@@ -4036,7 +4593,7 @@ function renderConv(data, meta) {
 
   // standalone: set page title so the browser tab shows it
   if (_convStandalone) {
-    document.title = (data.custom_title || data.project_path || data.id) + ' · Sessions';
+    document.title = (data.display_title || data.custom_title || data.project_path || data.id) + ' · Sessions';
   }
 }
 
@@ -4401,6 +4958,7 @@ const FOLD_LIMITS = {
   user: [300, 300],     // typical user paste = long text/paths/error logs; 300 on each side is enough for a quick scan
   assistant: [500, 400], // AI replies are information-dense; the head summary has high value, leave a bit less for the tail
   skill: [180, 80],     // skill body is system-injected reference; just need to see "which skill is loaded" + the ending
+  summary: [180, 200],  // the client's compaction summary: the head is boilerplate, the end says what was still pending
 };
 
 function renderConvTurn(turn) {
@@ -4433,6 +4991,21 @@ function renderConvTurn(turn) {
         ${renderFoldableText(turn.text, h, t, true)}
       </div>`;
   }
+  // What the client wrote when it compacted the conversation. It keeps the skill block's
+  // classes on purpose: the scope filter, in-conversation search and the standalone font
+  // size all key on .conv-skill, and this is the same kind of thing - reference text the
+  // model received and nobody typed.
+  if (turn.type === 'compact_summary') {
+    const [h, t] = FOLD_LIMITS.summary;
+    return `
+      <div class="conv-turn conv-skill conv-compact-summary conv-foldable">
+        <div class="conv-turn-head">
+          <span class="conv-role">summary</span>
+          <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
+        </div>
+        ${renderFoldableText(turn.text, h, t, true)}
+      </div>`;
+  }
   if (turn.type === 'qa') {
     return `
       <div class="conv-turn conv-qa">
@@ -4460,10 +5033,40 @@ function renderConvTurn(turn) {
   // task notification is a background task report, bash output is !command output, teammate is a teammate agent's report.
   // Single-line compact render (consistent with tool turn style), not counted as user input.
   if (turn.type === 'system_notification') {
+    // A notification the client only queued never reached the model. Say so on the row:
+    // a reader deciding why the agent missed something needs that difference.
+    const undelivered = turn.delivered === false;
     return `
       <div class="conv-turn conv-system-event conv-system-notification">
         <span class="sysev-icon">🛎️</span>
         <span class="sysev-role">notif</span>
+        <span class="sysev-text">${escapeHtml(turn.text || '')}${undelivered
+          ? ' <span class="sysev-note">delivery not confirmed</span>' : ''}</span>
+        <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
+      </div>`;
+  }
+  // Text the person typed while the agent was busy, with nothing in the file showing it
+  // was ever handed over. It is theirs, so it is shown in full -- but as an event, never
+  // as a user turn, because presenting it as a delivered message would be a claim the
+  // evidence does not support.
+  if (turn.type === 'queued_input') {
+    return `
+      <div class="conv-turn conv-system-event conv-queued-input">
+        <span class="sysev-icon">⏳</span>
+        <span class="sysev-role">queued</span>
+        <span class="sysev-text"><span class="sysev-note">Queued input — delivery not confirmed</span>
+${escapeHtml(turn.text || '')}</span>
+        <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
+      </div>`;
+  }
+  // A request that failed and was retried. The text already carries the count and the span
+  // for a run; the error's own wording is kept rather than relabelled, because "connection
+  // error" would be wrong for the server-side overload that produces most of these.
+  if (turn.type === 'api_error') {
+    return `
+      <div class="conv-turn conv-system-event conv-api-error">
+        <span class="sysev-icon">⚠</span>
+        <span class="sysev-role">error</span>
         <span class="sysev-text">${escapeHtml(turn.text || '')}</span>
         <span class="conv-ts">${escapeHtml(turn.ts || '')}</span>
       </div>`;
@@ -4582,20 +5185,36 @@ document.addEventListener('keydown', (e) => {
   target.select();  // select existing content so typing overwrites it directly
 }, true);
 
+// Fold search hits onto the entry the list actually draws. A hit in a record that a rewind, a
+// resume or a compaction superseded belongs to the conversation that continued, so it surfaces
+// on that conversation's entry and says which record it came from. The snippet keeps its own
+// text, role and record, so the evidence still points at one physical file.
+function applySearchHits(hits) {
+  const merged = {};
+  for (const h of (Array.isArray(hits) ? hits : [])) {
+    if (!h || !h.id) continue;
+    const entryId = h.conversation_current_id || h.id;
+    const fromOlder = entryId !== h.id;
+    const list = merged[entryId] || (merged[entryId] = []);
+    for (const s of (h.snippets || [])) {
+      list.push(fromOlder ? {...s, record_id: h.id, from_older_record: true} : s);
+    }
+  }
+  state.searchHits = merged;
+}
+
 async function load() {
   $count.textContent = 'loading…';
   try {
     const res = await fetch('/api/sessions');
-    state.items = await res.json();
+    setItems(await res.json());
     pruneCardCollapsed();  // clear fold records for sessions that no longer exist
 
     // When restoring a persisted search term, fire a backend search once more
     if (state.q) {
       try {
         const sr = await fetch('/api/search?q=' + encodeURIComponent(state.q));
-        const hits = await sr.json();
-        state.searchHits = {};
-        for (const h of hits) state.searchHits[h.id] = h.snippets;
+        applySearchHits(await sr.json());
       } catch { state.searchHits = {}; }
     }
 
@@ -4652,15 +5271,11 @@ $search.addEventListener('input', () => {
       const sessRes = await fetch('/api/sessions');
       if (seq !== searchSeq) return;  // a newer request has taken over, keep searching
       const items = await sessRes.json();
-      state.items = items;
+      setItems(items);
       _liveSig = sessionsSignature(items);  // align the live baseline, avoiding an empty redraw on the first poll after clearing the search
       const res = await fetch('/api/search?q=' + encodeURIComponent(newQ));
       if (seq !== searchSeq) return;
-      const hits = await res.json();
-      state.searchHits = {};
-      for (const h of hits) {
-        state.searchHits[h.id] = h.snippets;
-      }
+      applySearchHits(await res.json());
     } catch {
       if (seq !== searchSeq) return;
       state.searchHits = {};
@@ -4685,6 +5300,7 @@ const SOURCE_FILTER_LABELS = {
   all: 'All Sessions',
   claude: 'Claude only',
   devin: 'Devin Local only',
+  pi: 'Pi only',
   codex: 'Codex only',
   antigravity: 'Antigravity only',
   kimi: 'Kimi Code only',
@@ -4755,11 +5371,32 @@ document.addEventListener('keydown', (e) => {
 // On startup, sync the UI to state (when restoring from localStorage)
 syncSourceFilterUI();
 
-// Hide one-shot (claude -p) toggle
+// Primary timeline / legacy project view.
+const $viewToggle = document.getElementById('view-toggle');
+function syncViewUI() {
+  $viewToggle.querySelectorAll('[data-view]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === state.viewMode);
+  });
+}
+$viewToggle.addEventListener('click', e => {
+  const btn = e.target.closest('[data-view]');
+  if (!btn || !VIEW_MODES.includes(btn.dataset.view)) return;
+  state.viewMode = btn.dataset.view;
+  syncViewUI(); saveUIState(); render();
+});
+syncViewUI();
+
+// Suspected automated-run filter. The checkbox keeps the old hideOneshot storage key for compatibility.
 const $hideOneshot = document.getElementById('hide-oneshot');
-$hideOneshot.checked = state.hideOneshot;
+const $suspectedFilterLabel = document.getElementById('suspected-filter-label');
+function syncSuspectedFilterUI() {
+  $hideOneshot.checked = state.hideOneshot;
+  $suspectedFilterLabel.textContent = state.hideOneshot ? 'Suspected runs hidden' : 'Showing suspected runs';
+}
+syncSuspectedFilterUI();
 $hideOneshot.addEventListener('change', () => {
   state.hideOneshot = $hideOneshot.checked;
+  syncSuspectedFilterUI();
   saveUIState();
   render();
 });
@@ -4788,11 +5425,14 @@ const LIVE_SLOW_MS = 20000;     // idle: no interaction for a long time
 const LIVE_ACTIVE_WINDOW_MS = 60000;  // how long after an interaction still counts as "active"
 
 // Cheap fingerprint: only include fields that affect display and are backend-authoritative (scope is a frontend-derived value, not in the fingerprint).
-// star/archive don't change the jsonl mtime, so they must be included explicitly — otherwise a state change made elsewhere wouldn't be visible.
+// Local metadata doesn't change the transcript mtime, so include it explicitly.
 function sessionsSignature(items) {
   let s = items.length + '|';
   for (const m of items) {
-    s += m.id + ':' + m.mtime + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0) + ',';
+    s += m.id + ':' + m.mtime + ':' + activityTime(m) + ':' + (m.starred ? 1 : 0) + ':' + (m.archived ? 1 : 0)
+      + ':' + (m.human_confirmed ? 1 : 0) + ':' + (m.title_override || '')
+      + ':' + (m.note || '') + ':' + JSON.stringify(m.older_notes || [])
+      + ':' + conversationCurrentId(m) + ':' + JSON.stringify(conversationRecords(m)) + ',';
   }
   return s;
 }
@@ -4820,8 +5460,10 @@ function beatLive() {
 // No scrollIntoView — a background update shouldn't hijack the user's viewport; just give a subtle flash in place to signal "this changed here".
 function flashLiveCards(ids) {
   if (!ids || !ids.length) return;
+  // A record that moved may be a superseded member; the card that shows it is its conversation's.
+  const cardIds = [...new Set(ids.map(id => currentItemFor(id)?.id || id))];
   requestAnimationFrame(() => {
-    ids.slice(0, 10).forEach(id => {
+    cardIds.slice(0, 10).forEach(id => {
       const card = document.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
       if (card) {
         card.classList.add('card-flash');
@@ -4854,10 +5496,10 @@ async function livePoll() {
     const sig = sessionsSignature(items);
     if (sig !== _liveSig) {
       // B2 compute the ids that are new/advanced (old mtime vs new), and after render flash only these
-      const prev = new Map(state.items.map(m => [m.id, m.mtime]));
-      const changedIds = items.filter(m => !prev.has(m.id) || prev.get(m.id) !== m.mtime).map(m => m.id);
+      const prev = new Map(state.items.map(m => [m.id, activityTime(m)]));
+      const changedIds = items.filter(m => !prev.has(m.id) || activityTime(m) > prev.get(m.id)).map(m => m.id);
       _liveSig = sig;
-      state.items = items;
+      setItems(items);
       _lastInteractionAt = Date.now();  // a real change → enter active cadence, ask more frequently next round
       render();
       flashLiveCards(changedIds);
@@ -4876,25 +5518,62 @@ async function livePoll() {
   window.addEventListener(ev, () => { _lastInteractionAt = Date.now(); }, {passive: true});
 });
 
-// ---------- Standalone single-session live refresh ----------
+// ---------- Open conversation live refresh (overlay and standalone) ----------
 // The dashboard loop above polls the session *list*; it has nothing to say about the transcript
-// open in a standalone tab (?session=<id>). This loop follows exactly one session file instead:
+// open in an overlay or standalone tab. This loop follows exactly one session file instead:
 // same visibility gating and adaptive cadence, but the change signal is the file fingerprint
 // (mtime + size) the /conversation endpoint returns — the backend skips re-parsing when it matches.
 // A finished session never changes its fingerprint, so a historical transcript is never redrawn.
-let _convLiveId = null;          // session being followed (null = not in standalone mode)
+let _convIncludeRewound = false;
+let _convLiveId = null;          // session being followed (null = no loaded conversation)
 let _convLiveFingerprint = null; // last fingerprint rendered
 let _convLiveTimer = null;
 let _convLivePolling = false;
+let _convLiveGeneration = 0;    // invalidates requests when closing or switching readers
+// Was the record on screen the conversation's current one when it was opened? If a rewind or a
+// compaction happens while the page is open, that flips, and the file being followed stops
+// growing. The reader then offers the new current record instead of quietly following a dead
+// file — it never navigates on its own, because a record id must always open that record.
+let _convLiveWasCurrent = false;
 
-function startConvLive(sessionId, fingerprint) {
+function stopConvLive() {
+  clearTimeout(_convLiveTimer);
+  _convLiveTimer = null;
+  _convLiveId = null;
+  _convLiveFingerprint = null;
+  _convLivePolling = false;
+  _convLiveWasCurrent = false;
+  _convLiveGeneration++;
+}
+
+function startConvLive(sessionId, fingerprint, data) {
   _convLiveId = sessionId;
   _convLiveFingerprint = fingerprint || null;
+  _convLiveWasCurrent = !data || (data.conversation_current_id || data.id) === data.id;
+  _lastInteractionAt = Date.now();
   scheduleConvLive();
+}
+
+// The record on screen was the current one and no longer is: a rewind, a resume or a compaction
+// started a new file. Say so once and offer the new record; the reader stays where the user put
+// it, and the banner renderConv already drew keeps the way forward visible afterwards.
+function noticeConversationMoved(data) {
+  const current = data.conversation_current_id || data.id;
+  const stillCurrent = current === data.id;
+  if (_convLiveWasCurrent && !stillCurrent) {
+    toast('This conversation continued in a new record', {
+      action: {label: 'Open it', fn: () => {
+        if (_convStandalone) location.href = `/?session=${encodeURIComponent(current)}`;
+        else openConversation(current);
+      }},
+    });
+  }
+  _convLiveWasCurrent = stillCurrent;
 }
 
 function scheduleConvLive() {
   clearTimeout(_convLiveTimer);
+  if (!_convLiveId) return;
   _convLiveTimer = setTimeout(convLivePoll, liveInterval());
 }
 
@@ -4924,46 +5603,60 @@ function restoreConvUiState(body, snap) {
   body.scrollTop = snap.nearBottom ? body.scrollHeight : snap.scrollTop;
 }
 
-async function convLivePoll() {
-  if (!_convLiveId) return;
-  if (_convLivePolling) { scheduleConvLive(); return; }
+function convLivePaused() {
   const body = $conv?.querySelector('.conv-body');
   const findInput = $conv?.querySelector('#conv-find');
   // Skip (but keep scheduling) when the tab is hidden, an in-conversation find is active
   // (a redraw would wipe the highlights), or the user is selecting text to copy.
-  const skip = document.visibilityState !== 'visible'
+  return document.visibilityState !== 'visible'
+            || !$conv?.classList.contains('open')
             || !body
+            || _inflightMutations > 0
             || (findInput && findInput.value.trim())
             || (window.getSelection()?.toString().length > 0);
-  if (skip) { scheduleConvLive(); return; }
+}
+
+async function convLivePoll() {
+  if (!_convLiveId) return;
+  if (_convLivePolling) { scheduleConvLive(); return; }
+  if (convLivePaused()) { scheduleConvLive(); return; }
+  const generation = _convLiveGeneration;
+  const sessionId = _convLiveId;
   _convLivePolling = true;
   try {
-    const fp = _convLiveFingerprint ? `?fingerprint=${encodeURIComponent(_convLiveFingerprint)}` : '';
-    const res = await fetch(`/api/sessions/${encodeURIComponent(_convLiveId)}/conversation${fp}`);
+    const params = new URLSearchParams();
+    if (_convLiveFingerprint) params.set('fingerprint', _convLiveFingerprint);
+    if (_convIncludeRewound) params.set('include_rewound', '1');
+    const fp = params.toString() ? '?' + params.toString() : '';
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation${fp}`);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+    // The user may close, switch, search, or select text while the request is in flight.
+    if (generation !== _convLiveGeneration || convLivePaused()) return;
     if (!data.unchanged && data.fingerprint !== _convLiveFingerprint) {
-      const snap = captureConvUiState(body);
-      renderConv(data, null);
+      const snap = captureConvUiState($conv.querySelector('.conv-body'));
+      renderConv(data, _convStandalone ? null : findItem(data.id));
       restoreConvUiState($conv.querySelector('.conv-body'), snap);
+      noticeConversationMoved(data);
       _convLiveFingerprint = data.fingerprint;
       _lastInteractionAt = Date.now();  // the session is moving → stay on the fast cadence
     }
   } catch {
     // Network jitter / service restart: ignore, retry next round
   } finally {
-    _convLivePolling = false;
+    if (generation === _convLiveGeneration) {
+      _convLivePolling = false;
+      scheduleConvLive();
+    }
   }
-  scheduleConvLive();
 }
 
 // Tab refocus: pull immediately (don't wait for the next tick), so the first glance on return is up to date
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   _lastInteractionAt = Date.now();
-  if (document.body.classList.contains('standalone')) {
-    if (_convLiveId) convLivePoll();  // it reschedules itself internally
-  } else {
+  if (_convLiveId) convLivePoll();  // includes an overlay above the dashboard
+  if (!document.body.classList.contains('standalone')) {
     livePoll();  // it reschedules itself internally
   }
 });
@@ -4974,7 +5667,7 @@ applyColLeftPct();
   const sid = new URLSearchParams(location.search).get('session');
   if (sid) {
     document.body.classList.add('standalone');
-    openConversation(sid, {standalone: true});  // starts the single-session live loop once loaded
+    openConversation(sid, {standalone: true, includeRewound: new URLSearchParams(location.search).get('include_rewound') === '1'});  // starts the single-session live loop once loaded
   } else {
     load();
     scheduleLive();  // start the dashboard live heartbeat (standalone has its own loop, see startConvLive)
@@ -4991,6 +5684,7 @@ applyColLeftPct();
     <div class="note-dialog">
       <div class="note-dialog-title">Session Note</div>
       <textarea id="note-textarea" name="note" aria-label="Session note" placeholder="Add a note… (save empty to clear)"></textarea>
+      <input id="note-input" name="title" aria-label="Personal Session title" hidden>
       <div class="note-dialog-foot">
         <button class="btn-cancel">Cancel</button>
         <button class="btn-save">Save</button>
@@ -4998,19 +5692,32 @@ applyColLeftPct();
     </div>`;
   document.body.appendChild(overlay);
 
+  const dialogTitle = overlay.querySelector('.note-dialog-title');
   const ta = overlay.querySelector('textarea');
+  const input = overlay.querySelector('input');
   const btnSave = overlay.querySelector('.btn-save');
   const btnCancel = overlay.querySelector('.btn-cancel');
   let _resolve = null;
+  let activeField = ta;
 
-  function openNoteModal(current) {
+  function openTextModal(current, options = {}) {
     return new Promise(resolve => {
       _resolve = resolve;
-      ta.value = current || '';
+      const multiline = options.multiline !== false;
+      activeField = multiline ? ta : input;
+      ta.hidden = !multiline;
+      input.hidden = multiline;
+      dialogTitle.textContent = options.title || 'Session Note';
+      activeField.placeholder = options.placeholder || 'Add a note… (save empty to clear)';
+      activeField.value = current || '';
       overlay.style.display = 'flex';
       // Wait until render is done before focusing, to avoid a Safari issue
-      requestAnimationFrame(() => { ta.focus(); ta.select(); });
+      requestAnimationFrame(() => { activeField.focus(); activeField.select(); });
     });
+  }
+
+  function openNoteModal(current) {
+    return openTextModal(current, {multiline: true});
   }
 
   function close(value) {
@@ -5018,17 +5725,20 @@ applyColLeftPct();
     if (_resolve) { _resolve(value); _resolve = null; }
   }
 
-  btnSave.addEventListener('click', () => close(ta.value));
+  btnSave.addEventListener('click', () => close(activeField.value));
   btnCancel.addEventListener('click', () => close(null));
   overlay.addEventListener('click', e => { if (e.target === overlay) close(null); });
   document.addEventListener('keydown', e => {
     if (overlay.style.display === 'none') return;
     if (e.key === 'Escape') { e.preventDefault(); close(null); }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); close(ta.value); }
+    if (e.key === 'Enter' && (activeField === input || e.metaKey || e.ctrlKey)) {
+      e.preventDefault(); close(activeField.value);
+    }
   });
 
   // Attach to global scope so bindCardEvents can call it
   window.openNoteModal = openNoteModal;
+  window.openTextModal = openTextModal;
 })();
 
 // PWA service worker registration — to satisfy Chrome's heuristic check for the install prompt

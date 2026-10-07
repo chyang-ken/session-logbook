@@ -13,7 +13,7 @@ What are you trying to do that's hard or impossible today?
 What you'd like to see.
 
 **Scope check**
-This is a deliberately small, read-only tool. Please skim [`docs/philosophy.md`](../../docs/philosophy.md) first — features like "send a message", "spawn a session", "multi-user auth", and "live push" are explicit non-goals. If your idea touches those, explain why it's worth reconsidering.
+This is a deliberately small, read-only retrieval tool. Please skim [`docs/philosophy.md`](../../docs/philosophy.md) first — features like "send a message", "spawn a Session", "manage client Session state", "multi-user auth", and "live push" are explicit non-goals. If your idea touches those, explain why it's worth reconsidering.
 
 **Alternatives considered**
 Any workarounds you've tried.

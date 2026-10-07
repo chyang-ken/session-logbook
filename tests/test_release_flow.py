@@ -11,6 +11,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,20 @@ def sh(args, cwd, env=None):
 
 class _OK(BaseHTTPRequestHandler):
     def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *a):
+        pass
+
+
+class _SlowOK(BaseHTTPRequestHandler):
+    """Answers 200, but only after `delay` -- a service still scanning when first asked."""
+    delay = 2.0
+
+    def do_GET(self):
+        time.sleep(self.delay)
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"{}")
@@ -164,8 +179,19 @@ class ReleaseFlowTests(unittest.TestCase):
         self.addCleanup(httpd.shutdown)
         return f"http://127.0.0.1:{httpd.server_address[1]}/api/stats"
 
-    def _config(self, restart, url):
-        (self.clone / "_private" / "deploy.json").write_text(json.dumps({"restart": restart, "health_url": url}))
+    def _serve_slow(self, delay):
+        handler = type("_Slow", (_SlowOK,), {"delay": delay})
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        return f"http://127.0.0.1:{httpd.server_address[1]}/api/stats"
+
+    def _config(self, restart, url, timeout=None):
+        cfg = {"restart": restart, "health_url": url}
+        if timeout is not None:
+            cfg["health_timeout_s"] = timeout
+        (self.clone / "_private" / "deploy.json").write_text(json.dumps(cfg))
         sh(["git", "checkout", "--quiet", "--", "."], cwd=self.clone)
         # _private is untracked in this throwaway repo; ignore it so the clean-tree check passes
         (self.clone / ".git" / "info" / "exclude").write_text("_private/\n")
@@ -194,15 +220,88 @@ class ReleaseFlowTests(unittest.TestCase):
     def test_deploy_refuses_when_service_stays_down(self):
         self.commit("f1", "feature one")
         self.push_staging()
-        self._config(["true"], "http://127.0.0.1:9/never")
-        old = rf.HEALTH_TIMEOUT_S
-        rf.HEALTH_TIMEOUT_S = 2.0
-        try:
-            with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()):
-                rf.main(["--repo", str(self.clone), "deploy"])
-        finally:
-            rf.HEALTH_TIMEOUT_S = old
+        # A tiny configured limit keeps the test instant; the refusal path is the same one.
+        self._config(["true"], "http://127.0.0.1:9/never", timeout=0.01)
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(io.StringIO()):
+            rf.main(["--repo", str(self.clone), "deploy"])
         self.assertEqual(rf.list_deployed(self.clone), [])
+        # The refusal has to name the usual cause and say that repeating deploy is safe,
+        # or the reader concludes the deploy itself broke.
+        message = str(raised.exception)
+        self.assertIn("scan-cache schema", message)
+        self.assertIn("run `deploy` again", message)
+        self.assertIn("health_timeout_s", message)
+
+    def test_the_health_wait_is_long_enough_for_a_cold_rescan(self):
+        # A schema bump makes the restarted service re-read the whole library before it answers;
+        # that took between 60 and 120 s on the maintainer's history and used to be refused at 30.
+        self.assertGreaterEqual(rf.HEALTH_TIMEOUT_S, 120.0)
+
+    def test_the_deploy_config_can_override_the_health_wait(self):
+        self._config(["true"], "http://127.0.0.1:9/never")
+        self.assertEqual(rf.load_config(self.clone, None)["health_timeout_s"], rf.HEALTH_TIMEOUT_S)
+        self._config(["true"], "http://127.0.0.1:9/never", timeout=45)
+        self.assertEqual(rf.load_config(self.clone, None)["health_timeout_s"], 45.0)
+        for bad in (0, -1, "soon", True):
+            self._config(["true"], "http://127.0.0.1:9/never", timeout=bad)
+            with self.assertRaises(SystemExit):
+                rf.load_config(self.clone, None)
+        # An explicit null is a malformed value, not an omission: it must not read as the default.
+        (self.clone / "_private" / "deploy.json").write_text(json.dumps(
+            {"restart": ["true"], "health_url": "http://127.0.0.1:9/never",
+             "health_timeout_s": None}))
+        with self.assertRaises(SystemExit):
+            rf.load_config(self.clone, None)
+
+    def test_each_attempt_is_given_the_whole_remaining_budget(self):
+        # The bug this covers: a fixed per-attempt slice silently caps how slow a *healthy*
+        # answer may be, and no health_timeout_s can lift that cap -- it only buys more
+        # attempts, each cut off at the same place. On the maintainer's machine /api/stats
+        # needed ~18 s over ~4800 sessions against a 3 s slice, so deploy could never tag.
+        # Asserting the timeout passed to each attempt, rather than a delay some fixed slice
+        # happens to exceed, is what makes this fail for any such cap rather than only for 3 s.
+        seen = []
+
+        def refuse(url, timeout):
+            seen.append(timeout)
+            raise OSError("connection refused")
+
+        with mock.patch.object(rf.urllib.request, "urlopen", refuse):
+            self.assertFalse(rf.wait_healthy("http://127.0.0.1:9/never", 5.0))
+        self.assertTrue(seen)
+        self.assertGreater(seen[0], 3.5, f"first attempt was capped at {seen[0]}s")
+        # And never so small that an attempt cannot even open a connection.
+        self.assertTrue(all(t >= 1.0 for t in seen), seen)
+
+    def test_a_slow_but_healthy_service_is_waited_for(self):
+        # End to end over real HTTP, with a delay longer than the slice that used to be
+        # hardcoded, so the whole path -- not just the timeout arithmetic -- is covered.
+        started = time.time()
+        self.assertTrue(rf.wait_healthy(self._serve_slow(4.0), 30.0))
+        self.assertGreaterEqual(time.time() - started, 4.0)
+
+    def test_an_answer_slower_than_the_budget_still_gives_up_on_time(self):
+        # Waiting longer per attempt must not become waiting forever.
+        started = time.time()
+        self.assertFalse(rf.wait_healthy(self._serve_slow(30.0), 2.0))
+        self.assertLess(time.time() - started, 15.0)
+
+    def test_deploy_waits_for_the_configured_limit(self):
+        self.commit("f1", "feature one")
+        self.push_staging()
+        self._config(["true"], "http://127.0.0.1:9/never", timeout=45)
+        seen = []
+        with mock.patch.object(rf, "wait_healthy",
+                               lambda url, timeout_s=None: seen.append(timeout_s) or True):
+            with redirect_stdout(io.StringIO()):
+                rf.main(["--repo", str(self.clone), "deploy"])
+        self.assertEqual(seen, [45.0])
+
+    def test_the_health_wait_stops_at_its_deadline(self):
+        started = time.monotonic()
+        self.assertFalse(rf.wait_healthy("http://127.0.0.1:9/never", 0.05))
+        # The poll used to sleep a whole second after the deadline had passed.
+        self.assertLess(time.monotonic() - started, 0.9)
 
     def test_deploy_refuses_dirty_tree(self):
         self._config(["true"], "http://127.0.0.1:9/never")
