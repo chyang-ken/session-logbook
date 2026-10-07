@@ -22,7 +22,8 @@ from sources.activity import activity_time
 from sources import anchored_transcript, session_identity, codex_history, claude_history
 from sources import antigravity as ag_source
 from sources import claude_events
-from sources.claude_text import assistant_search_words, human_turn_words, project_wake_words
+from sources.claude_text import (assistant_search_words, human_turn_words, matches_project_id,
+                                 project_message_ids, project_wake_words)
 from sources import codex as codex_source
 from sources import devin as devin_source
 from sources import kimi as kimi_source
@@ -305,6 +306,28 @@ def _candidate_paths(source: Optional[str], include_subagents: bool) -> list[Pat
     return codex_history.canonical_paths(list(iter_session_paths(source=source, include_subagents=include_subagents)))
 
 
+def _project_id_terms(path: Path, terms: list[str]) -> set:
+    """The Project thread or message ids in this file's envelopes that a search term names.
+
+    Every Project id starts with cmsg_, so a file is read only for terms of that shape.
+    """
+    wanted = [term for term in terms if term.startswith("cmsg_")]
+    if not wanted:
+        return set()
+    ids = set()
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if any(term in line.lower() for term in wanted):
+                    try:
+                        ids |= project_message_ids(json.loads(line))
+                    except ValueError:
+                        continue
+    except OSError:
+        return set()
+    return {value for value in ids if any(matches_project_id(term, [value]) for term in wanted)}
+
+
 def search_sessions(
     query: str,
     *,
@@ -388,6 +411,12 @@ def search_sessions(
 
         found = set(metadata_terms)
         snippets = []
+        if role == "any" and item['source'] == 'claude':
+            project_ids = _project_id_terms(path, terms)
+            if project_ids:
+                found |= {term for term in terms if matches_project_id(term, project_ids)}
+                snippets.append({"role": "metadata", "line": None,
+                                 "text": "Project id: " + ", ".join(sorted(project_ids))})
         custom_title = str(item.get("custom_title") or "")
         display_title = title_override or custom_title
         if role == "any" and any(term in f"{custom_title} {title_override}".lower() for term in terms):

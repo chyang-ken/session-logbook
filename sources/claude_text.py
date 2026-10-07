@@ -11,6 +11,8 @@ _LEADING_REMINDERS = re.compile(r"^(?:\s*<system-reminder>.*?</system-reminder>\
 # user input.
 #   <command-*> / <local-command-*>   slash command injection + hook stdout
 #   <system-reminder>                 system prompt
+#   <session-context ...>             the context block a cloud session opens with; in a
+#                                     Claude Project thread it also carries the spawn brief
 #   <task-notification>               background-task completion notice
 #   <bash-stdout> / <bash-stderr>     bash-mode output from `!command`; unlike <bash-input>
 #   <teammate-message ...>            teammate agent report with variable attributes
@@ -20,7 +22,7 @@ _LEADING_REMINDERS = re.compile(r"^(?:\s*<system-reminder>.*?</system-reminder>\
 # These live here rather than in server.py because the anchored transcript, the history
 # index and the HTTP layer all have to agree on what counts as a human turn; two copies
 # of this list is how [U#] came to disagree with user_turn_count.
-SYSTEM_USER_PREFIXES_SKIP = ("<local-command-", "<command-", "<system-reminder>")
+SYSTEM_USER_PREFIXES_SKIP = ("<local-command-", "<command-", "<system-reminder>", "<session-context")
 
 # A Claude Project's coordinator is another Claude session. When it writes into a worker's
 # thread, the note reaches the worker as a user record wrapped as
@@ -167,6 +169,48 @@ def project_wake_words(text):
     bodies = [html.unescape(body).strip() for body in _WAKE_MESSAGE.findall(text)]
     bodies = [body for body in bodies if body]
     return '\n\n'.join(bodies) if bodies else text
+
+
+# Each envelope names the Project thread and messages it belongs to, as attributes such as
+# <thread ts="cmsg_..."> or <project_claude_message thread_id="cmsg_...">. Those ids are what
+# a Project link carries (#cmsg_...), so a person who pastes one expects to find the worker
+# session that thread ran in. They are attributes, so project_wake_words() drops them.
+_PROJECT_ID_ATTRIBUTE = re.compile(r'\b(?:ts|id|thread_id)="(cmsg_[A-Za-z0-9]+)"')
+
+
+def project_message_ids(row):
+    """The Project thread and message ids named by the envelope of one user record.
+
+    Only a wake envelope or a coordinator relay counts; a person who types an id into an
+    ordinary prompt is already found by the words they typed.
+    """
+    row = normalize_record(row)
+    if not isinstance(row, dict) or row.get('type') != 'user':
+        return set()
+    text = user_record_text(row).lstrip()
+    if not (_WAKE_ENVELOPE.match(text) or text.startswith(PROJECT_RELAY_PREFIXES)):
+        return set()
+    return set(_PROJECT_ID_ATTRIBUTE.findall(text))
+
+
+def matches_project_id(term, ids):
+    """Whether a search term is one of these ids, whole.
+
+    A whole id only: every Project id starts with cmsg_, so a partial match would turn
+    "cmsg" into a hit on every worker session.
+    """
+    term = (term or '').lower()
+    return bool(term) and any(term == value.lower() for value in ids)
+
+
+def is_project_status_wake(text):
+    """Whether text is a Project wake envelope that carries no message from anyone.
+
+    The channel also wakes a worker to report its own state, for example that a device
+    folder is now connected: <wake reason="device-folder-thread-status"> holding only
+    <system-note> lines. Nobody typed it.
+    """
+    return bool(_WAKE_ENVELOPE.match(text or '')) and not _WAKE_MESSAGE.search(text)
 
 
 def is_project_checkin(row):
