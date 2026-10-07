@@ -423,10 +423,13 @@ feature branch ──PR──► staging ──deploy──► maintainer's mach
   `scripts/release_flow.py check --quiet` whenever an agent session starts here, so "is anything
   ready for `main`?" is asked automatically when work resumes. It prints only when something is
   actionable: undeployed `staging` commits, a soaked commit `main` is behind, or a broken river.
-- **Releasing to `main` = a pull request, merged by a human.** `python3 scripts/release_flow.py release`
-  creates `release/<date>` at the newest deploy that has soaked ≥ 14 days and opens a PR into
-  `main`. Commits deployed later stay on `staging` and keep soaking. The script never merges;
-  `main` is branch-protected and merging it is a separate decision.
+- **Releasing to `main` = a pull request, merged only on the maintainer's explicit go-ahead.**
+  `python3 scripts/release_flow.py release` creates `release/<date>` at the newest deploy that has
+  soaked ≥ 14 days and opens a PR into `main`. Commits deployed later stay on `staging` and keep
+  soaking. The script never merges; `main` is branch-protected and merging it is a separate
+  decision. That decision is the maintainer's: an agent may perform the merge, but only after the
+  maintainer has said yes to that specific release in the conversation. Checks passing, the soak
+  period ending or the hook printing READY is not a go-ahead.
 - **Versioned GitHub releases** (`vX.Y.Z`, see CONTRIBUTING "Maintainer releases") remain a
   separate, optional step taken from `main` after a promotion.
 - **Planning is a local human-decision overlay.** Before proposing or taking a release action,
