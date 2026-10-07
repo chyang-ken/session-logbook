@@ -33,7 +33,7 @@ import re
 from datetime import datetime, timezone
 from sources import claude_events
 from sources.claude_text import (strip_leading_reminders, anchored_user_text, project_wake_words,
-                                 user_record_text)
+                                 user_record_text, PROJECT_RELAY_PREFIXES)
 
 
 def trunc(s, n):
@@ -386,6 +386,13 @@ def render_claude(path, records=None) -> str:
         ts = (o.get('timestamp') or '')[:19]
         side = ' (subagent)' if o.get('isSidechain') else ''
         if o.get('isMeta'):
+            # The brief a Project coordinator hands a worker it spawns is filed as the
+            # client's own record, yet it is the job the session was started for; the reader
+            # and the export show it, so the transcript an Agent reads must too. No [U#].
+            raw = user_record_text(o).lstrip() if t == 'user' else ''
+            if raw.startswith(PROJECT_RELAY_PREFIXES):
+                o_lines.append(f"[L{ln}]   ⚠ EVENT{side} TEAMMATE_MESSAGE: "
+                               + trunc(claude_events.parse_project_relay(raw), 300))
             continue
 
         handed_over = claude_events.delivered_text(o)

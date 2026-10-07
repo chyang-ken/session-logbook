@@ -271,6 +271,15 @@ class CheckInTests(Fixture):
         self.assertEqual(server.extract_conversation(path)['turns'][0],
                          {'type': 'teammate_message', 'text': '[coordinator] Own the pricing page.',
                           'ts': '2026-01-01T00:00:01Z'})
+        # So does the export and the transcript an Agent reads: it is the job the worker
+        # was started for. It keeps its own anchor and takes no [U#].
+        self.assertIn('## TEAMMATE\n[coordinator] Own the pricing page.\n',
+                      server.extract_transcript(path))
+        rendered = anchored_transcript.render_claude(path)
+        self.assertIn('[L1]   ⚠ EVENT TEAMMATE_MESSAGE: [coordinator] Own the pricing page.',
+                      rendered)
+        self.assertEqual([m.groups() for m in BANNER.finditer(rendered)], [('1', '2')])
+        self.assertNotIn('not by your user', rendered)
 
     def test_a_check_in_before_the_tail_is_found_in_a_large_file(self):
         filler = [reply(n, 'Working through item %d.' % n) for n in range(3, 40)]
