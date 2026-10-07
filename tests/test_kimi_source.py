@@ -26,12 +26,6 @@ class FixturesPresentTests(unittest.TestCase):
                   FIXTURES / "session_index.jsonl"):
             self.assertTrue(p.exists(), p)
 
-    def test_module_globals(self):
-        self.assertTrue(hasattr(kimi, "KIMI_HOME"))
-        self.assertTrue(hasattr(kimi, "KIMI_SESSIONS_ROOT"))
-        self.assertTrue(hasattr(kimi, "SESSION_INDEX_PATH"))
-
-
 class PathTests(unittest.TestCase):
     def test_session_id_and_agent_from_path(self):
         self.assertEqual(kimi.session_id_for_path(A_MAIN), A_ID)

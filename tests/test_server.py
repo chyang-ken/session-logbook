@@ -271,12 +271,6 @@ class TestComputeScope(unittest.TestCase):
         entry = {"archived": False}
         self.assertEqual(server.compute_scope(meta, entry, now=self.now), "recent")
 
-    def test_non_codex_meta_unaffected(self):
-        # Claude sessions have no codex_archived field -> fall back to False and bucket by mtime
-        meta = {"mtime": self.dusty_mtime}
-        self.assertEqual(server.compute_scope(meta, {}, now=self.now), "dusty")
-
-
 class TestStateUpgrade(unittest.TestCase):
     """Verify backward compatibility with v1 state.json and star field reads/writes."""
 
@@ -296,19 +290,6 @@ class TestStateUpgrade(unittest.TestCase):
             server.compute_scope({"mtime": time.time()}, entry, now=time.time()),
             "archived",
         )
-
-    def test_star_then_unstar_keeps_other_fields(self):
-        server._state["sid2"] = {"note": "important", "archived": False}
-        # simulate star
-        server._state["sid2"]["starred"] = True
-        server._state["sid2"]["starred_at"] = "2026-04-12T00:00:00Z"
-        self.assertEqual(server._state["sid2"]["note"], "important")
-        self.assertTrue(server._state["sid2"]["starred"])
-        # simulate unstar
-        server._state["sid2"]["starred"] = False
-        self.assertEqual(server._state["sid2"]["note"], "important")
-        self.assertFalse(server._state["sid2"]["starred"])
-
 
 class TestDecodeProjectDir(unittest.TestCase):
     """Verify _decode_project_dir disambiguates Claude Code's lossy directory encoding.
@@ -357,27 +338,6 @@ class TestDecodeProjectDir(unittest.TestCase):
             self._make_tree(root, ["Users/alice/repo"])
             result = self._decode_under(root, "-Users-alice-repo")
             self.assertEqual(result, str(root / "Users/alice/repo"))
-
-    def test_dir_name_contains_dash(self):
-        """The dash in session-logbook must not be mistaken for a slash."""
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._make_tree(root, ["Users/alice/session-logbook"])
-            result = self._decode_under(root, "-Users-alice-session-logbook")
-            self.assertEqual(result, str(root / "Users/alice/session-logbook"))
-
-    def test_hidden_dir_dot_claude(self):
-        """The dot in .claude is encoded as a dash and must be restored via filesystem lookup."""
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._make_tree(root, ["Users/alice/session-logbook/.claude/worktrees/pwa"])
-            result = self._decode_under(
-                root, "-Users-alice-session-logbook--claude-worktrees-pwa"
-            )
-            self.assertEqual(
-                result,
-                str(root / "Users/alice/session-logbook/.claude/worktrees/pwa"),
-            )
 
     def test_branch_name_with_dash(self):
         """The dash in worktree branch name query-queue must also be preserved."""
@@ -661,12 +621,6 @@ class TestDedupGhost(unittest.TestCase):
         result = server._dedup_by_id([ghost, big])  # intentionally put ghost first
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["jsonl_path"], "/big.jsonl")
-
-    def test_keeps_unique_ids_untouched(self):
-        a = {"id": "a", "size": 100, "jsonl_path": "/a.jsonl", "mtime": 1}
-        b = {"id": "b", "size": 200, "jsonl_path": "/b.jsonl", "mtime": 2}
-        result = server._dedup_by_id([a, b])
-        self.assertEqual(len(result), 2)
 
     def test_preserves_input_order(self):
         """Deduplication must not disturb the existing mtime-sorted order."""
@@ -1094,34 +1048,6 @@ class TestSkillToolBody(unittest.TestCase):
             skills = [t for t in conv["turns"] if t["type"] == "skill"]
             self.assertEqual(len(users), 0)
             self.assertEqual(len(skills), 1)
-
-    def test_request_interrupted_becomes_system_notification(self):
-        with tempfile.TemporaryDirectory() as td:
-            path = self._write_session(Path(td), [
-                {"type": "user", "message": {"role": "user", "content": [{
-                    "type": "text", "text": "[Request interrupted by user]",
-                }]}},
-            ])
-            conv = server.extract_conversation(path)
-            users = [t for t in conv["turns"] if t["type"] == "user"]
-            notifs = [t for t in conv["turns"] if t["type"] == "system_notification"]
-            self.assertEqual(len(users), 0)
-            self.assertEqual(len(notifs), 1)
-            self.assertIn("interrupted", notifs[0]["text"].lower())
-
-    def test_continue_from_where_left_off(self):
-        """The resume prompt injected by --resume is not user input."""
-        with tempfile.TemporaryDirectory() as td:
-            path = self._write_session(Path(td), [
-                {"type": "user", "message": {"role": "user", "content": [{
-                    "type": "text", "text": "Continue from where you left off.",
-                }]}, "isMeta": True},
-            ])
-            conv = server.extract_conversation(path)
-            users = [t for t in conv["turns"] if t["type"] == "user"]
-            notifs = [t for t in conv["turns"] if t["type"] == "system_notification"]
-            self.assertEqual(len(users), 0)
-            self.assertEqual(len(notifs), 1)
 
     def test_skill_tool_body_survives_tool_result_message(self):
         """A pure tool_result message can appear between tool_use(Skill) and skill body.

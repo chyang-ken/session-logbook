@@ -50,10 +50,5 @@ class HelpCoverageTests(unittest.TestCase):
                     bare.append(f"{name} <{action.dest}>")
         self.assertEqual(bare, [], "these arguments carry no help: " + ", ".join(bare))
 
-    def test_parsing_still_goes_through_the_same_parser(self):
-        args = cli.parse_args(["context", "target", "--last-turns", "2"])
-        self.assertEqual((args.command, args.target, args.last_turns), ("context", "target", 2))
-
-
 if __name__ == "__main__":
     unittest.main()

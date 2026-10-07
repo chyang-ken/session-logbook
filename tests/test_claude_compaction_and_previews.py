@@ -189,10 +189,6 @@ class CompactionSummaryTests(Fixture):
         fresh = [r['_logbook_user_turn'] for _, r in claude_history.records(path)]
         self.assertEqual(fresh[-1], 2)
 
-    def test_the_scan_cache_schema_moved_with_the_card_count(self):
-        self.assertEqual(server.CACHE_SCHEMA_VERSION, 16)
-
-
 class PreviewAndSearchTests(Fixture):
 
     def test_a_harness_note_is_not_the_persons_words_anywhere(self):

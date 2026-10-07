@@ -161,6 +161,8 @@ class ConversationIdentityTests(Fixture):
         self.assertEqual(items[R4]['conversation_id'], R4)
 
     def test_rule_2_a_record_no_descriptor_covers_is_its_own_conversation(self):
+        # Copied records are what rewind, resume and fork all look like inside the file.
+        # Without a descriptor there is nothing to tell them apart, so nothing merges.
         self.assert_all_separate([self.card(R1), self.card(R2)])
 
     def test_rule_3_fork_by_file_head_stays_separate(self):
@@ -277,11 +279,6 @@ class ConversationIdentityTests(Fixture):
                             self.card(R2, custom_title='Completely different')])
         self.assertEqual(after[R1]['conversation_id'], CONVERSATION)
         self.assertEqual(after[R2]['conversation_id'], CONVERSATION)
-
-    def test_shared_history_alone_never_merges(self):
-        # Copied records are what rewind, resume and fork all look like inside the file.
-        # Without a descriptor there is nothing to tell them apart, so nothing merges.
-        self.assert_all_separate([self.card(R1), self.card(R2)])
 
     def test_identity_is_recomputed_not_retained(self):
         self.descriptor(priorCliSessionIds=[R1], cliSessionId=R2)
