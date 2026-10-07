@@ -22,7 +22,7 @@ from sources import claude_events
 from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
                                  anchored_user_text, assistant_search_words, human_turn_text,
                                  human_turn_words, is_project_checkin, is_system_user_string,
-                                 project_wake_words,
+                                 matches_project_id, project_message_ids, project_wake_words,
                                  normalize_record, strip_leading_reminders)
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
@@ -2507,6 +2507,8 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     # they would drown real matches in sessions that retried a hundred times.
     queued_hits = {}  # exact enqueued string -> pending snippets, in queue order
     queued_delivered = {}
+    # A Project worker is also known by its thread's id, which only its envelopes carry.
+    project_ids = set()
 
     try:
         with contextlib.ExitStack() as stack:
@@ -2536,6 +2538,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                         _record_queued_hit(queued, terms, term_found, queued_hits)
                     continue
                 if t == "user":
+                    project_ids |= project_message_ids(d)
                     text = human_turn_words(d)
                 elif t == "assistant":
                     text = assistant_search_words(d.get("message", {}).get("content"))
@@ -2595,6 +2598,13 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
         for snippet in parked:
             if id(snippet) not in confirmed and len(snippets) < SEARCH_MAX_SNIPPETS:
                 snippets.append(snippet)
+
+    project_terms = {term for term in terms if matches_project_id(term, project_ids)}
+    if project_terms:
+        matched = sorted(value for value in project_ids
+                         if any(matches_project_id(term, [value]) for term in project_terms))
+        snippets.insert(0, {"text": "Project id: " + ", ".join(matched), "role": "", "term": ""})
+        term_found |= project_terms
 
     # AND semantics: unless the ID matched, every term must appear in text
     if id_hit:

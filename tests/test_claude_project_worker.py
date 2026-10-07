@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import server
 import session_logbook_cli as cli
+from sources import claude_events
 from sources.claude_text import assistant_search_words, human_turn_words, project_wake_words
 
 SID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
@@ -130,3 +131,105 @@ class ProjectWorkerSearchTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+THREAD = 'cmsg_0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
+
+class ProjectThreadIdSearchTests(unittest.TestCase):
+    """A Project thread's id lives only in envelope attributes, yet it names the worker."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / (SID + '.jsonl')
+        env = patch.dict('os.environ', {'SESSION_LOGBOOK_HISTORY_INDEX': str(self.path.parent / 'index.sqlite')})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def write(self, *rows):
+        self.path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+
+    def user(self, content):
+        return {'type': 'user', 'uuid': 'u', 'sessionId': SID, 'cwd': '/Users/alice/my-app',
+                'timestamp': '2026-01-01T00:00:00Z', 'message': {'role': 'user', 'content': content}}
+
+    def threaded_wake(self, body):
+        return wake(body).replace('<project id="chan_0" type="project">\n',
+                                  f'<project id="chan_0" type="project">\n  <thread ts="{THREAD}">\n', 1)
+
+    def search(self, query):
+        return server._search_session(self.path, query.lower().split())
+
+    def test_thread_id_in_a_wake_finds_the_worker(self):
+        self.write(self.user(self.threaded_wake(ASK.replace('&', '&amp;'))),
+                   assistant(tool('mcp__hearthbot__reply', text=REPLY)))
+        hits = self.search(THREAD)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]['text'], 'Project id: ' + THREAD)
+        # Case does not matter, and the id combines with words like any other term.
+        self.assertTrue(self.search(THREAD.upper() + ' billing'))
+        self.assertEqual(self.search(THREAD + ' papaya'), [])
+
+    def test_message_id_in_a_wake_finds_the_worker(self):
+        self.write(self.user(wake('hello there')))
+        self.assertTrue(self.search('cmsg_0'))
+
+    def test_thread_id_in_a_coordinator_relay_finds_the_worker(self):
+        relay = (f'<project_claude_message session="s" thread_id="{THREAD}">\n'
+                 '<relay from="coordinator" session="s" current-time="2026-01-01T00:00:00Z">\n'
+                 'The note below was written by the coordinator session, a Claude session, not by your user.\n'
+                 '<note>check in</note>\n</relay>\n</project_claude_message>')
+        self.write(self.user(relay))
+        self.assertTrue(self.search(THREAD))
+
+    def test_partial_id_or_typed_id_is_not_an_id_hit(self):
+        self.write(self.user(self.threaded_wake('hello there')))
+        # Every Project id starts with cmsg_; a prefix must not match every worker.
+        self.assertEqual(self.search('cmsg'), [])
+        self.assertEqual(self.search(THREAD[:-3]), [])
+        # An id typed into an ordinary prompt is found as typed words, not as an envelope id.
+        self.write(self.user(f'please look at <thread ts="{THREAD}"> later'))
+        hits = self.search(THREAD)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]['role'], 'you')
+
+    def test_cli_search_finds_the_thread_id(self):
+        self.write(self.user(self.threaded_wake('hello there')))
+        self.assertEqual(cli._project_id_terms(self.path, [THREAD.upper().lower(), 'hello']), {THREAD})
+        self.assertEqual(cli._project_id_terms(self.path, ['cmsg']), set())
+
+
+class ProjectHarnessQueueTests(unittest.TestCase):
+    """What the channel queues for a worker without anyone typing it is not the person's text."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / (SID + '.jsonl')
+        env = patch.dict('os.environ', {'SESSION_LOGBOOK_HISTORY_INDEX': str(self.path.parent / 'index.sqlite')})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def queue_then_meta(self, content):
+        rows = [{'type': 'queue-operation', 'operation': 'enqueue', 'sessionId': SID,
+                 'timestamp': '2026-01-01T00:00:00Z', 'content': content},
+                {'type': 'queue-operation', 'operation': 'dequeue', 'sessionId': SID,
+                 'timestamp': '2026-01-01T00:00:01Z'},
+                {'type': 'user', 'uuid': 'u', 'sessionId': SID, 'isMeta': True,
+                 'timestamp': '2026-01-01T00:00:01Z', 'message': {'role': 'user', 'content': content}}]
+        self.path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+
+    def test_session_context_block_is_not_queued_text(self):
+        self.queue_then_meta('<session-context nonce="n">\nProject: launch plan\n</session-context>')
+        self.assertEqual(server._search_session(self.path, ['launch']), [])
+
+    def test_status_wake_is_not_queued_text(self):
+        self.queue_then_meta('<wake reason="device-folder-thread-status" current-time="x">\n'
+                             f'  <project id="chan_0" type=""><thread ts="{THREAD}"></thread></project>\n'
+                             '  <system-note>status=ready folder connected</system-note>\n</wake>')
+        self.assertEqual(server._search_session(self.path, ['folder']), [])
+
+    def test_queued_wake_with_a_message_is_still_the_person(self):
+        text = wake('please check the pricing page')
+        self.assertTrue(claude_events.is_queued_human_text(text))

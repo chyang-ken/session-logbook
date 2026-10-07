@@ -43,7 +43,8 @@ import re
 
 from sources.claude_text import (PROJECT_RELAY_PREFIXES, SYSTEM_USER_PREFIXES_EVENT,
                                  SYSTEM_USER_PREFIXES_SKIP, interrupt_marker_text,
-                                 is_compact_summary, is_system_user_string, user_record_text)
+                                 is_compact_summary, is_project_status_wake, is_system_user_string,
+                                 user_record_text)
 
 __all__ = [
     'enqueued_text', 'delivered_text', 'notification_prompt', 'api_error_label',
@@ -90,10 +91,12 @@ def is_queued_human_text(text):
     """Whether queued text is something a person typed rather than an injected block.
 
     Everything the harness injects under the user role is prefixed with its own XML
-    wrapper; anything else in the queue was typed.
+    wrapper; anything else in the queue was typed. A Project wake is a wrapper too, but
+    it can carry what a person wrote, so only a wake with no message is left out.
     """
     return (isinstance(text, str) and bool(text.strip())
-            and not is_system_user_string(text.lstrip()))
+            and not is_system_user_string(text.lstrip())
+            and not is_project_status_wake(text))
 
 
 def delivered_text(row):
