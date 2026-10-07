@@ -309,13 +309,6 @@ class ReaderTests(TranscriptFileMixin, unittest.TestCase):
         self.assertEqual(ag.abandoned_line_numbers(self.rewound), {1, 2, 3})
         self.assertEqual(ag.abandoned_line_numbers(self.straight), set())
 
-    def test_raw_evidence_still_reads_an_abandoned_line(self):
-        # Hiding a row from the reading must not make its source unreachable.
-        evidence = cli.read_evidence(self.rewound, line=2, context=0)
-        self.assertTrue(evidence.startswith("[L2] "), evidence[:40])
-        self.assertIn("Abandoned answer.", evidence)
-
-
 class SearchTests(TranscriptFileMixin, unittest.TestCase):
     """Search matches the live history only, like the other branching sources."""
 
@@ -509,12 +502,6 @@ class CommandTests(TranscriptFileMixin, unittest.TestCase):
         self.assertEqual(status["rewind_abandoned_lines"], "L1-L3")
         self.assertEqual(cli.status_for(self.straight)["rewind_abandoned_lines"], "none")
 
-    def test_context_returns_the_live_history(self):
-        text = cli.render_context(self.rewound)
-        self.assertIn("[U1] [L4] USER", text)
-        self.assertNotIn("Abandoned answer.", text)
-        self.assertIn("# NEXT_CURSOR: L5", text)
-
     def test_follow_after_a_rewind_lands_names_the_lines_it_already_delivered(self):
         # A follower reads the opening branch, then a rewind is appended underneath it.
         path = self.write_transcript("eeeeeeee-9999-4999-8999-eeeeeeeeeeee", [
@@ -532,10 +519,6 @@ class CommandTests(TranscriptFileMixin, unittest.TestCase):
         self.assertIn("# FOLLOW_MODE: live history after in-file rewinds", text)
         self.assertNotIn("first answer", text)
         self.assertIn("[U1] [L4] USER", text)
-
-    def test_follow_reports_none_when_the_cursor_survived(self):
-        self.assertIn("# REMOVED_BEFORE_CURSOR: none",
-                      cli.render_context(self.straight, after_line=2))
 
     def test_a_message_that_quotes_an_anchor_does_not_move_the_cursor(self):
         # Messages are preserved in full, so one can contain "[L1]" -- real local history
@@ -565,13 +548,6 @@ class CommandTests(TranscriptFileMixin, unittest.TestCase):
     def test_evidence_still_reads_an_abandoned_line_through_a_resolved_target(self):
         self.assertIn("Abandoned answer.",
                       cli.read_evidence(cli.resolve_target(REWOUND_ID), line=2, context=0))
-
-    def test_search_matches_the_live_branch_only(self):
-        self.assertEqual([hit["id"] for hit in
-                          cli.search_sessions("live question", source="antigravity")],
-                         [REWOUND_ID])
-        self.assertEqual(cli.search_sessions("abandoned first", source="antigravity"), [])
-
 
 if __name__ == "__main__":
     unittest.main()

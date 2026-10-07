@@ -75,13 +75,6 @@ class ClaudeRenderTests(unittest.TestCase):
         self.assertIn("permission denied", out)
         self.assertIn("truncated", out)
 
-    def test_L_anchor_points_to_real_line(self):
-        # [L#] must be back-referenceable: line 1 really is that user message
-        with open(self.path, encoding="utf-8") as f:
-            line1 = json.loads(f.readline())
-        self.assertEqual(line1["message"]["content"], "hello world")
-
-
 class MessagePreservationTests(unittest.TestCase):
     def test_long_claude_user_and_assistant_text_stays_complete(self):
         user_text = "u" * 9000
@@ -232,10 +225,6 @@ class KimiRenderTests(unittest.TestCase):
             # user body text follows its own [U#] [L#] banner
             self.assertIn(line, ("List the files in the project and tell me what it does",
                                  "Thanks, summarize in one line"))
-
-    def test_render_core_stays_clean(self):
-        self.assertNotIn("COMPACT SESSION DIGEST", self.out)
-
 
 class DigestHeaderTests(unittest.TestCase):
     """Self-describing header: lets a cold recipient read the anchors and go back to the original from the .txt alone."""

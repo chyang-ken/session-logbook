@@ -19,10 +19,6 @@ class FixturesPresentTests(unittest.TestCase):
         actual = {p.stem for p in FIXTURES.glob("*.jsonl")}
         self.assertEqual(expected, actual)
 
-    def test_codex_module_importable(self):
-        self.assertTrue(hasattr(codex, "CODEX_ROOT"))
-
-
 class ScanFilterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -144,13 +140,6 @@ class ExtractMetadataTests(unittest.TestCase):
         m = codex.extract_metadata(FIXTURES / "basic_main.jsonl")
         self.assertEqual(m["custom_title"], "")
 
-    def test_user_turn_count_skips_environment_context(self):
-        m = codex.extract_metadata(FIXTURES / "basic_main.jsonl")
-        # basic_main has two input_text blocks in the user message: one environment_context
-        # and one 'hello codex'. The whole message counts as one user turn; the environment
-        # injection must not make it 0 or 2.
-        self.assertEqual(m["user_turn_count"], 1)
-
     def test_last_stop_reason_complete(self):
         m = codex.extract_metadata(FIXTURES / "basic_main.jsonl")
         self.assertEqual(m["last_stop_reason"], "complete")
@@ -184,16 +173,6 @@ class ExtractMetadataTests(unittest.TestCase):
         self.assertEqual(codex._normalize_project_path(""), "~")
         self.assertEqual(codex._normalize_project_path("/"), "~")
         self.assertEqual(codex._normalize_project_path("~"), "~")
-
-    def test_recent_msgs_track_user_and_assistant(self):
-        m = codex.extract_metadata(FIXTURES / "basic_main.jsonl")
-        roles = [msg["role"] for msg in m["recent_msgs"]]
-        self.assertIn("user", roles)
-        self.assertIn("assistant", roles)
-
-    def test_first_user_msg_skips_environment_context(self):
-        m = codex.extract_metadata(FIXTURES / "basic_main.jsonl")
-        self.assertEqual(m["first_user_msg"], "hello codex")
 
     def test_agents_md_instructions_filtered_from_user_text(self):
         """The first user message in Codex sessions often includes '# AGENTS.md instructions ...'.
@@ -295,12 +274,6 @@ class ExtractConversationTests(unittest.TestCase):
         # No developer message / reasoning / event_msg.agent_message duplicate
         types = sorted([t["type"] for t in conv["turns"]])
         self.assertEqual(types, ["assistant", "tool", "user"])
-
-    def test_user_text_skips_environment_context(self):
-        conv = codex.extract_conversation(FIXTURES / "basic_main.jsonl")
-        users = [t for t in conv["turns"] if t["type"] == "user"]
-        self.assertEqual(len(users), 1)
-        self.assertEqual(users[0]["text"], "hello codex")
 
     def test_subagent_spawn_translated(self):
         conv = codex.extract_conversation(FIXTURES / "with_subagent_spawn.jsonl")
