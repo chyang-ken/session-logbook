@@ -2105,7 +2105,12 @@ def _scan_sessions_locked(force):
     # stale keys under the archived root would never be removed because they are not under CODEX_ROOT.
     projects_root_str = str(PROJECTS_DIR)
     cwd_index_removed = False
+    # A key some source just listed is current; only the rest need the root predicates,
+    # which resolve symlinks on every call (about 5 s for 7,600 keys on a busy machine).
+    seen_now = claude_seen | codex_seen | devin_seen | ag_seen | kimi_seen | pi_seen
     for p in list(_cache.keys()):
+        if p in seen_now:
+            continue
         if p.startswith(projects_root_str) and p not in claude_seen:
             del _cache[p]
             _mark_scan_cache_dirty()

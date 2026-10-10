@@ -663,3 +663,37 @@ class FindJsonlForkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MainlineVerdictMemoTest(unittest.TestCase):
+    """The head of a rollout is read once per file, not on every scan."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        day = self.root / "2026" / "01" / "01"
+        day.mkdir(parents=True)
+        self.path = day / "rollout-2026-01-01T00-00-00-aaaaaaaa-0000-0000-0000-000000000001.jsonl"
+        self.head = json.dumps({"type": "session_meta", "payload": {"id": "aaaaaaaa", "source": "cli"}})
+
+    def write(self, lines):
+        self.path.write_text("\n".join([self.head] + lines) + "\n")
+
+    def test_a_complete_head_is_read_once(self):
+        self.write([json.dumps({"type": "event_msg", "payload": {}})] * 12)
+        self.assertEqual(list(codex.scan_sessions(self.root)), [self.path])
+        real = codex._read_session_meta
+        calls = []
+        codex._read_session_meta = lambda p: calls.append(p) or real(p)
+        try:
+            self.assertEqual(list(codex.scan_sessions(self.root)), [self.path])
+        finally:
+            codex._read_session_meta = real
+        self.assertEqual(calls, [])
+
+    def test_a_young_file_is_asked_again_until_its_head_is_written(self):
+        self.write([])
+        self.assertEqual(list(codex.scan_sessions(self.root)), [self.path])
+        # The turn_context that marks a review run arrives later; it must still count.
+        self.write([json.dumps({"type": "turn_context", "payload": {"model": "codex-auto-review"}})])
+        self.assertEqual(list(codex.scan_sessions(self.root)), [])

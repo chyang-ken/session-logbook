@@ -868,9 +868,42 @@ def scan_sessions(root: Path = None) -> Iterator[Path]:
         if not r.exists():
             continue
         for jsonl_path in r.rglob("rollout-*.jsonl"):
-            meta = _read_session_meta(jsonl_path)
-            if meta is None:
-                continue
-            if _is_subagent(meta, jsonl_path):
-                continue
-            yield jsonl_path
+            if _is_mainline(jsonl_path):
+                yield jsonl_path
+
+
+# Whether a rollout is a mainline session, remembered once the answer can no longer change.
+# Reading the head of every rollout on every scan cost about 8 s for 4,400 files on a busy
+# machine, and the session list is scanned on every page load. The head is written once:
+# the session_meta line and the first turn_context lines never change afterwards.
+_MAINLINE_VERDICTS = {}
+_SUBAGENT_HEAD_LINES = 10  # _is_subagent reads at most this many lines
+
+
+def _is_mainline(jsonl_path: Path) -> bool:
+    key = str(jsonl_path)
+    known = _MAINLINE_VERDICTS.get(key)
+    if known is not None:
+        return known
+    meta = _read_session_meta(jsonl_path)
+    if meta is None:
+        return False  # not written yet, or not a session: ask again next scan
+    verdict = not _is_subagent(meta, jsonl_path)
+    # A mainline verdict is final only once the head _is_subagent reads is complete;
+    # a young file may still gain the turn_context line that marks it as a review run.
+    if not verdict or _head_is_complete(jsonl_path):
+        if len(_MAINLINE_VERDICTS) > 200_000:
+            _MAINLINE_VERDICTS.clear()
+        _MAINLINE_VERDICTS[key] = verdict
+    return verdict
+
+
+def _head_is_complete(jsonl_path: Path) -> bool:
+    try:
+        with open(jsonl_path, "rb") as f:
+            for i, line in enumerate(f):
+                if i + 1 >= _SUBAGENT_HEAD_LINES and line.endswith(b"\n"):
+                    return True
+    except OSError:
+        pass
+    return False

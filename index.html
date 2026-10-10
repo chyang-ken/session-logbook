@@ -390,6 +390,7 @@
   main.timeline { display: block; overflow-y: auto; }
   .timeline-list { max-width: 920px; margin: 0 auto; }
   .timeline-list .card { margin-bottom: 10px; }
+  .timeline-more { max-width: 920px; margin: 0 auto 24px; text-align: center; color: var(--text-4); font-size: 12px; }
   .col {
     overflow-y: auto;
     min-width: 0;
@@ -2939,13 +2940,8 @@ function renderList() {
   if (state.q && state.searchPending) $count.textContent += state.searchHasPage ? ' · searching older…' : ' · searching…';
 
   if (state.viewMode === 'timeline') {
-    const scrollTop = $list.scrollTop;
     $list.classList.add('timeline');
-    $list.innerHTML = `<div class="timeline-list">${filtered
-      .slice().sort((a, b) => activityTime(b) - activityTime(a)).map(renderCard).join('')}</div>`;
-    $list.scrollTop = scrollTop;
-    bindCardEvents();
-    syncCollapseAllBtn();
+    drawTimeline(filtered);
     return;
   }
 
@@ -2985,6 +2981,53 @@ function renderList() {
   bindDividerEvents();
   syncCollapseAllBtn();
 }
+
+// ---------- Timeline drawn in batches ----------
+// Drawing every card at once froze the page for about 3.6 s with 3,600 sessions. The timeline
+// draws TIMELINE_BATCH cards, and the next batch whenever the end of what is drawn comes
+// within TIMELINE_AHEAD_PX of the screen, whichever element is scrolling.
+const TIMELINE_BATCH = 150;
+const TIMELINE_AHEAD_PX = 1500;
+const _timeline = {key: '', shown: 0, rest: []};
+
+function timelineMoreHtml() {
+  const n = _timeline.rest.length;
+  return n ? `<div class="timeline-more" id="timeline-more">${n} older ${n === 1 ? 'session' : 'sessions'}…</div>` : '';
+}
+
+function drawMoreTimelineIfNear() {
+  const more = document.getElementById('timeline-more');
+  if (!more || !_timeline.rest.length) return;
+  if (more.getBoundingClientRect().top > window.innerHeight + TIMELINE_AHEAD_PX) return;
+  const batch = _timeline.rest.splice(0, TIMELINE_BATCH);
+  _timeline.shown += batch.length;
+  const list = $list.querySelector('.timeline-list');
+  const before = list.children.length;
+  list.insertAdjacentHTML('beforeend', batch.map(renderCard).join(''));
+  bindCardEvents([...list.children].slice(before));
+  more.remove();
+  list.insertAdjacentHTML('afterend', timelineMoreHtml());
+}
+
+function drawTimeline(filtered) {
+  const scrollTop = $list.scrollTop;
+  const sorted = filtered.slice().sort((a, b) => activityTime(b) - activityTime(a));
+  // Draw the newest cards first; the rest are drawn as the reader scrolls toward them.
+  // A redraw keeps as many cards as were already drawn, so the scroll position holds.
+  const key = [state.q, state.sourceFilter, state.hideOneshot].join('\u0000');
+  if (key !== _timeline.key) { _timeline.key = key; _timeline.shown = 0; }
+  _timeline.shown = Math.min(sorted.length, Math.max(TIMELINE_BATCH, _timeline.shown));
+  _timeline.rest = sorted.slice(_timeline.shown);
+  $list.innerHTML = `<div class="timeline-list">${sorted.slice(0, _timeline.shown).map(renderCard).join('')}</div>${timelineMoreHtml()}`;
+  $list.scrollTop = scrollTop;
+  bindCardEvents();
+  syncCollapseAllBtn();
+  drawMoreTimelineIfNear();
+}
+
+$list.addEventListener('scroll', drawMoreTimelineIfNear, {passive: true});
+window.addEventListener('scroll', drawMoreTimelineIfNear, {passive: true});
+window.addEventListener('resize', drawMoreTimelineIfNear, {passive: true});
 
 // ---------- Global collapse / expand ----------
 // chevrons-up = collapse all; chevrons-down = expand all (feather)
@@ -3602,8 +3645,8 @@ async function toggleStar(addressedId) {
   }
 }
 
-function bindCardEvents() {
-  document.querySelectorAll('.card').forEach(card => {
+function bindCardEvents(cards = document.querySelectorAll('.card')) {
+  cards.forEach(card => {
     const id = card.dataset.id;
     // Whole card opens conversation, except when clicking action buttons or copy-id
     card.addEventListener('click', (e) => {
