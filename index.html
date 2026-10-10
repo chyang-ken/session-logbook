@@ -2481,6 +2481,7 @@ const state = {
   q: _saved?.q || '',
   items: [],
   searchHits: {},    // session_id -> [{text, role, term}, ...]
+  searchPending: false,  // older pages of the current search are still being fetched
   searchPending: false,
   sectionOpen: _saved
     ? new Set(_saved.sectionOpen)
@@ -2875,7 +2876,10 @@ function render() {
   // No search results: a dedicated empty state, echoing the query term + one-click clear (distinguishing "nothing found" from "didn't search")
   if (state.q && filtered.length === 0) {
     $count.textContent = '0 / ' + scopedItems.length + ' sessions';
-    if (hiddenSuspected.length) {
+    if (state.searchPending) {
+      $count.textContent += ' · searching older…';
+      $list.innerHTML = `<div class="empty"><div class="empty-title">Searching older sessions for “${escapeHtml(state.q)}”…</div></div>`;
+    } else if (hiddenSuspected.length) {
       $list.innerHTML = `<div class="empty"><div class="empty-title">No visible matches for “${escapeHtml(state.q)}”</div><div class="empty-hint">${hiddenSuspected.length} matching suspected ${hiddenSuspected.length === 1 ? 'run is' : 'runs are'} hidden.</div><button class="empty-action" id="empty-show-suspected">Search suspected runs</button></div>`;
       document.getElementById('empty-show-suspected')?.addEventListener('click', () => {
         state.hideOneshot = false; syncSuspectedFilterUI(); saveUIState(); render();
@@ -2907,6 +2911,7 @@ function render() {
   } else {
     $count.textContent = filtered.length + ' / ' + scopedItems.length + ' sessions';
   }
+  if (state.q && state.searchPending) $count.textContent += ' · searching older…';
 
   if (state.viewMode === 'timeline') {
     const scrollTop = $list.scrollTop;
@@ -5191,8 +5196,8 @@ document.addEventListener('keydown', (e) => {
 // resume or a compaction superseded belongs to the conversation that continued, so it surfaces
 // on that conversation's entry and says which record it came from. The snippet keeps its own
 // text, role and record, so the evidence still points at one physical file.
-function applySearchHits(hits) {
-  const merged = {};
+function applySearchHits(hits, append = false) {
+  const merged = append ? state.searchHits : {};
   for (const h of (Array.isArray(hits) ? hits : [])) {
     if (!h || !h.id) continue;
     const entryId = h.conversation_current_id || h.id;
@@ -5205,6 +5210,43 @@ function applySearchHits(hits) {
   state.searchHits = merged;
 }
 
+// Search newest-first, one page at a time: the most recent matches are drawn as soon as the
+// first page arrives, and older pages keep arriving after it. `isStale()` reports that a newer
+// search has taken over, so its pages stop being fetched and applied.
+let searchSeq = 0;  // prevent stale requests from overwriting newer results
+const SEARCH_FIRST_PAGE = 20;
+const SEARCH_NEXT_PAGE = 100;
+async function runPagedSearch(q, isStale) {
+  let cursor = null;
+  let first = true;
+  state.searchPending = true;
+  try {
+    do {
+      const limit = first ? SEARCH_FIRST_PAGE : SEARCH_NEXT_PAGE;
+      const url = '/api/search?q=' + encodeURIComponent(q) + '&limit=' + limit
+        + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+      const res = await fetch(url);
+      if (isStale()) return;
+      if (!res.ok) throw new Error('search failed: ' + res.status);
+      const page = await res.json();
+      if (isStale()) return;
+      applySearchHits(page.hits, !first);
+      cursor = page.next || null;
+      first = false;
+      state.searchPending = !!cursor;
+      $searchWrap.classList.toggle('searching', !!cursor);
+      render();
+    } while (cursor);
+  } catch {
+    if (isStale()) return;
+    // Keep the hits earlier pages drew; only a failed first page leaves nothing to show.
+    if (first) state.searchHits = {};
+    state.searchPending = false;
+    $searchWrap.classList.remove('searching');
+    render();
+  }
+}
+
 async function load() {
   $count.textContent = 'loading…';
   try {
@@ -5214,10 +5256,9 @@ async function load() {
 
     // When restoring a persisted search term, fire a backend search once more
     if (state.q) {
-      try {
-        const sr = await fetch('/api/search?q=' + encodeURIComponent(state.q));
-        applySearchHits(await sr.json());
-      } catch { state.searchHits = {}; }
+      const seq = ++searchSeq;
+      $searchWrap.classList.add('searching');
+      runPagedSearch(state.q, () => seq !== searchSeq);
     }
 
     render();
@@ -5232,7 +5273,6 @@ async function load() {
 
 // Search (debounced, calls backend for full-text search)
 let searchTimer;
-let searchSeq = 0;  // prevent stale requests from overwriting newer results
 function syncSearchClear() {
   $searchWrap.classList.toggle('has-value', $search.value.length > 0);
 }
@@ -5252,6 +5292,8 @@ $search.addEventListener('input', () => {
     saveUIState();
 
     if (!newQ) {
+      ++searchSeq;  // stop the pages of any search still arriving
+      state.searchPending = false;
       $searchWrap.classList.remove('searching');
       state.searchHits = {};
       render();
@@ -5275,15 +5317,14 @@ $search.addEventListener('input', () => {
       const items = await sessRes.json();
       setItems(items);
       _liveSig = sessionsSignature(items);  // align the live baseline, avoiding an empty redraw on the first poll after clearing the search
-      const res = await fetch('/api/search?q=' + encodeURIComponent(newQ));
-      if (seq !== searchSeq) return;
-      applySearchHits(await res.json());
     } catch {
       if (seq !== searchSeq) return;
       state.searchHits = {};
+      $searchWrap.classList.remove('searching');
+      render();
+      return;
     }
-    $searchWrap.classList.remove('searching');
-    render();
+    await runPagedSearch(newQ, () => seq !== searchSeq);
   }, 250);
 });
 

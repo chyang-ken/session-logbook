@@ -98,6 +98,7 @@ BRIEF_TIMEOUT_SEC = 180  # claude -p call timeout; measured ~10-15s, leaving 12x
 # Search
 SEARCH_SNIPPET_CONTEXT = 60   # how many characters to take on each side of a match
 SEARCH_MAX_SNIPPETS = 3       # max snippets returned per session
+SEARCH_PAGE_FIRST_SLICE = 200  # records searched for a page before the slice doubles
 # Keep each ripgrep argv comfortably below macOS ARG_MAX. Session paths can be long, and
 # several thousand of them otherwise make subprocess startup fail with E2BIG.
 MAX_JSON_BODY = 1024 * 1024   # local state updates should never need more than 1 MiB
@@ -2911,41 +2912,169 @@ def _search_by_matching_lines(terms, entries, chains):
     return results
 
 
+def _search_order():
+    """(key, meta) for every searchable record, newest activity first.
+
+    Ties are broken by key so that a paging cursor names one exact position.
+    """
+    # Prefer the known session list in cache, with disk scan fallback
+    if not _cache:
+        scan_sessions()
+    ordered = sorted(_cache.items(), key=lambda kv: (activity_time(kv[1]), kv[0]), reverse=True)
+    from sources import codex_history
+    selected = {str(path) for path in codex_history.canonical_paths(
+        [Path(m['jsonl_path']) for _, m in ordered], read_meta=_codex_head_meta)}
+    return [(key, meta) for key, meta in ordered if str(meta['jsonl_path']) in selected]
+
+
 def search_sessions(query: str):
-    """Full-text search all sessions. Return [{id, snippets}, ...] sorted by existing cache mtime descending."""
+    """Full-text search all sessions. Return [{id, snippets}, ...] sorted by activity descending."""
     terms = [t.lower() for t in query.split() if t]
     if not terms:
         return []
-
-    # Prefer the known session list in cache (descending mtime), with disk scan fallback
-    if not _cache:
-        scan_sessions()
-
-    # (key, meta) list matching the original traversal order
-    ordered = sorted(_cache.items(), key=lambda kv: activity_time(kv[1]), reverse=True)
-    from sources import codex_history
-    selected = {str(path) for path in codex_history.canonical_paths([Path(m['jsonl_path']) for _, m in ordered])}
-    ordered = [(key, meta) for key, meta in ordered if str(meta['jsonl_path']) in selected]
+    return _search_slice(terms, _search_order())
 
 
+def _encode_search_cursor(key, meta):
+    return f"{activity_time(meta)!r}|{key}"
+
+
+def _decode_search_cursor(cursor):
+    """Return (activity, key) or None for a malformed cursor."""
+    stamp, sep, key = str(cursor or "").partition("|")
+    if not sep or not key:
+        return None
+    try:
+        return float(stamp), key
+    except ValueError:
+        return None
+
+
+def search_sessions_page(query: str, limit: int, cursor=None):
+    """Search newest-first and stop once `limit` sessions have matched.
+
+    Most searches are for recent work, and searching every file costs time proportional
+    to how many of them match. This walks the same order search_sessions returns, in
+    growing slices, and returns {"hits", "next"}: `next` is an opaque cursor naming the
+    last record searched, or None once the whole library has been covered. Concatenating
+    every page gives exactly search_sessions(query) for a library that did not change
+    in between; a record whose activity moves past the cursor between pages is searched
+    on the next fresh query, not on this one.
+    """
+    terms = [t.lower() for t in query.split() if t]
+    if not terms:
+        return {"hits": [], "next": None}
+    ordered = _search_order()
+    if cursor:
+        after = _decode_search_cursor(cursor)
+        if after is None:
+            raise ValueError("invalid search cursor")
+        ordered = [(key, meta) for key, meta in ordered
+                   if (activity_time(meta), key) < after]
+    hits, start, size = [], 0, SEARCH_PAGE_FIRST_SLICE
+    context = _search_context(ordered)
+    while start < len(ordered) and len(hits) < limit:
+        chunk = ordered[start:start + size]
+        hits.extend(_search_slice(terms, chunk, context))
+        start += len(chunk)
+        size *= 2
+    nxt = _encode_search_cursor(*ordered[start - 1]) if start < len(ordered) else None
+    return {"hits": hits, "next": nxt}
+
+
+_PI_PATH_MEMO = {}
+
+
+def _is_pi_path(path):
+    """pi_source.is_pi_path, remembered per path: it resolves symlinks on every call."""
+    key = (str(path), str(pi_source.PI_SESSIONS_ROOT))
+    if key not in _PI_PATH_MEMO:
+        if len(_PI_PATH_MEMO) > 100_000:
+            _PI_PATH_MEMO.clear()
+        _PI_PATH_MEMO[key] = pi_source.is_pi_path(path)
+    return _PI_PATH_MEMO[key]
+
+
+def _search_context(ordered):
+    """Work every slice of one search shares, done once for all of `ordered`.
+
+    A Codex continuation also carries text from ancestor files, so its own file is not
+    enough evidence to skip it; `chains` maps each such record to every physical file of
+    its effective history (from the history index, whose catalogue walk is the costly
+    part). `conversations` carries conversation identity for the hits.
+    """
+    inherited = {
+        Path(m["jsonl_path"]) for _, m in ordered
+        if codex_source.is_codex_path(Path(m["jsonl_path"]))
+        and (_codex_head_meta(Path(m["jsonl_path"])) or {}).get("history_base")
+    }
+    conversations = {}
+    try:
+        conversations = _conversation_views()[0]
+    except Exception as e:  # identity is additive; search must never fail because of it
+        print(f"[warn] conversation identity unavailable for search: {e}", file=sys.stderr)
+    return {"inherited": inherited, "chains": None, "conversations": conversations}
+
+
+def _context_chains(context):
+    """Effective-history files of every Codex continuation in the context, looked up once.
+
+    Deferred until a slice holds a continuation: the history index walks the whole Codex
+    tree to answer, which a first page of Claude records never needs.
+    """
+    if context["chains"] is None:
+        context["chains"] = {}
+        if context["inherited"]:
+            from sources import codex_history, history_index
+            context["chains"] = history_index.segment_paths(
+                context["inherited"], codex_history.resolve) or {}
+    return context["chains"]
+
+
+_CODEX_HEAD_MEMO = {}
+
+
+def _codex_head_meta(path):
+    """codex_source._read_session_meta, remembered while the file is unchanged.
+
+    A rollout's first line can carry the whole base prompt, so reading it for thousands of
+    files on every search is a measurable cost. Search only reads the result.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = str(path)
+    stamp = (st.st_ino, st.st_mtime_ns, st.st_size)
+    held = _CODEX_HEAD_MEMO.get(key)
+    if held is None or held[0] != stamp:
+        if len(_CODEX_HEAD_MEMO) > 100_000:
+            _CODEX_HEAD_MEMO.clear()
+        held = (stamp, codex_source._read_session_meta(Path(path)))
+        _CODEX_HEAD_MEMO[key] = held
+    return held[1]
+
+
+def _search_slice(terms, ordered, context=None):
+    """Search the given (key, meta) records, keeping their order, and return the hits.
+
+    `context` is _search_context() over a superset of `ordered`, shared across slices.
+    """
+    if context is None:
+        context = _search_context(ordered)
     # ripgrep prefilter: select files whose content contains every term and skip expensive
     # per-line JSON parsing for the rest. prefiltered=None means rg is unavailable, so scan
     # every file as before.
     prefiltered = _rg_prefilter(terms, [Path(m["jsonl_path"]) for _, m in ordered])
 
-    # A Codex continuation also carries text from ancestor files, so its own file is not
-    # enough evidence to skip it. Prefilter it against every physical file of its
-    # effective history instead; without a complete indexed history, read it in full.
-    inherited = {
-        Path(m["jsonl_path"]) for _, m in ordered
-        if codex_source.is_codex_path(Path(m["jsonl_path"]))
-        and (codex_source._read_session_meta(Path(m["jsonl_path"])) or {}).get("history_base")
-    }
+    # Prefilter a Codex continuation against every physical file of its effective
+    # history; without a complete indexed history, read it in full.
+    inherited = {Path(m["jsonl_path"]) for _, m in ordered} & context["inherited"]
     chains = {}
     chain_hit = {}
     if inherited and prefiltered is not None:
-        from sources import history_index
-        chains = history_index.segment_paths(inherited, codex_history.resolve) or {}
+        known = _context_chains(context)
+        chains = {p: known[p] for p in inherited if p in known}
         chain_files = sorted({f for files in chains.values() if files for f, _ in files})
         term_hits = []
         for term in terms:
@@ -2993,7 +3122,7 @@ def search_sessions(query: str):
         entries, line_chains = [], {}
         for meta, jsonl_path in candidates:
             key = str(jsonl_path)
-            if devin_source.is_devin_path(jsonl_path) or pi_source.is_pi_path(jsonl_path):
+            if devin_source.is_devin_path(jsonl_path) or _is_pi_path(jsonl_path):
                 entries.append((meta, jsonl_path, "full"))
             elif codex_source.is_codex_path(jsonl_path):
                 if jsonl_path in inherited:
@@ -3016,11 +3145,7 @@ def search_sessions(query: str):
     # A hit keeps its own record id, path and line anchors so the evidence stays traceable,
     # and carries the conversation it belongs to so a caller can fold hits without losing
     # which physical file each snippet came from.
-    conversations = {}
-    try:
-        conversations = _conversation_views()[0]
-    except Exception as e:  # identity is additive; search must never fail because of it
-        print(f"[warn] conversation identity unavailable for search: {e}", file=sys.stderr)
+    conversations = context["conversations"]
 
     results = []
     for meta, jsonl_path in candidates:
@@ -3569,7 +3694,15 @@ class Handler(BaseHTTPRequestHandler):
             q = (qs.get("q") or [""])[0].strip()
             if not q:
                 return self._send_json(200, [])
-            return self._send_json(200, search_sessions(q))
+            limit = (qs.get("limit") or [""])[0].strip()
+            if not limit:
+                return self._send_json(200, search_sessions(q))
+            try:
+                limit = max(1, int(limit))
+                return self._send_json(200, search_sessions_page(
+                    q, limit, (qs.get("cursor") or [None])[0]))
+            except ValueError:
+                return self._send_json(400, {"error": "invalid limit or cursor"})
 
         if path == "/api/stats":
             # Count conversations, not records. Before this the bar counted every file a

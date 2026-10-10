@@ -30,7 +30,7 @@ vm.runInContext(section('// ---------- Conversation identity ----------',
 vm.runInContext(section('function cardDefaultCollapsed(scope)',
                         'function renderDots('), context);
 vm.runInContext(section('function displayedItems()', 'let _hasRendered'), context);
-vm.runInContext(section('function applySearchHits(hits)', 'async function load()'), context);
+vm.runInContext(section('function applySearchHits(hits', 'async function load()'), context);
 vm.runInContext(section('function pruneCardCollapsed()', 'const _saved ='), context);
 
 const run = s => vm.runInContext(s, context);
