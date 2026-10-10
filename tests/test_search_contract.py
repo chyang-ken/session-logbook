@@ -230,6 +230,44 @@ class SearchContractTests(unittest.TestCase):
                 extra = [i for i in got if i not in expected]
                 self.assertEqual(extra, [], f"unexpected sessions for {query!r}")
 
+    def test_pages_add_up_to_the_full_search(self):
+        # Newest-first paging must return the same hits, in the same order, as one full
+        # search: slices of one record exercise every page boundary, including a Codex
+        # continuation whose inherited page lies in an older slice.
+        queries = ["widget", "orchard", "inherited goal", "billing retry",
+                   "bbbbbbbb-2222", "liveneedle", "zzqxv-nothing", "devin widget audit"]
+        for limit in (1, 2, 50):
+            for query in queries:
+                with self.subTest(query=query, limit=limit), \
+                        mock.patch.object(server, "SEARCH_PAGE_FIRST_SLICE", 1), \
+                        mock.patch.object(server, "_warn_search_fallback",
+                                          side_effect=AssertionError(query)):
+                    full = server.search_sessions(query)
+                    pages, cursor, seen = [], None, 0
+                    while True:
+                        page = server.search_sessions_page(query, limit, cursor)
+                        if page["next"] is not None:
+                            self.assertGreaterEqual(len(page["hits"]), limit)
+                        pages.extend(page["hits"])
+                        cursor = page["next"]
+                        seen += 1
+                        if cursor is None:
+                            break
+                        self.assertLess(seen, 100)
+                    self.assertEqual(pages, full)
+
+    def test_first_page_stops_at_the_newest_matches(self):
+        # A common word is found in several sessions; the first page holds only the newest.
+        full = self.ids("widget")
+        with mock.patch.object(server, "SEARCH_PAGE_FIRST_SLICE", 1):
+            page = server.search_sessions_page("widget", 1)
+        self.assertEqual([h["id"] for h in page["hits"]], full[:1])
+        self.assertIsNotNone(page["next"])
+
+    def test_bad_cursor_is_rejected(self):
+        with self.assertRaises(ValueError):
+            server.search_sessions_page("widget", 5, "not-a-cursor")
+
     def test_queries_with_json_escaped_characters(self):
         # Quotes and backslashes are stored escaped in JSON; they must still match, fast.
         self.assertEqual(self.ids('"quoted"'), [CLAUDE_A])
