@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -99,6 +100,13 @@ BRIEF_TIMEOUT_SEC = 180  # claude -p call timeout; measured ~10-15s, leaving 12x
 SEARCH_SNIPPET_CONTEXT = 60   # how many characters to take on each side of a match
 SEARCH_MAX_SNIPPETS = 3       # max snippets returned per session
 SEARCH_PAGE_FIRST_SLICE = 200  # records searched for a page before the slice doubles
+# A page also ends early on time. A rare phrase (say, the last message of a session) matches
+# a handful of records, so waiting for `limit` matches meant searching the whole library
+# before the first one was shown: over ten seconds on a busy machine. A page with at least
+# one match returns once SEARCH_PAGE_SOON_S has passed, and any page returns after
+# SEARCH_PAGE_MAX_S, empty or not; the cursor carries on from where it stopped.
+SEARCH_PAGE_SOON_S = 0.5
+SEARCH_PAGE_MAX_S = 3.0
 # Keep each ripgrep argv comfortably below macOS ARG_MAX. Session paths can be long, and
 # several thousand of them otherwise make subprocess startup fail with E2BIG.
 MAX_JSON_BODY = 1024 * 1024   # local state updates should never need more than 1 MiB
@@ -113,6 +121,11 @@ RIPGREP_ARG_CHUNK_BYTES = 256 * 1024 if os.name != "nt" else 24 * 1024
 
 # ---------- In-memory state ----------
 _cache = {}   # jsonl_path_str -> session meta dict
+# One scan at a time. The server answers requests on parallel threads, and two scans that
+# both find a vanished file both try to delete its cache key: the second raised KeyError,
+# which closed that request's connection with no response. A request that arrives while a
+# scan runs now waits for it and then finds the cache already current.
+_SCAN_LOCK = threading.RLock()
 _state = {}   # session_id -> local user metadata (archive/star/note/title/human confirmation)
 # Whether load_state() has run successfully. Distinguishes genuinely empty state from
 # forgotten initialization. Every HTTP handler entry point falls back to load_state()
@@ -1836,7 +1849,7 @@ def _find_jsonl(session_id, resolve_conversation=True):
     Codex fallback covers standalone-tab cold starts (`/?session=<id>`) where _cache has not
     been populated yet but the Codex session can be found on disk.
     """
-    candidates = [m for m in _cache.values() if m.get('id') == session_id]
+    candidates = [m for m in list(_cache.values()) if m.get('id') == session_id]
     if any(m.get("source") == "codex" for m in candidates):
         # A warm cache may still name the previous rollout after a resume.
         p, _forked_child = codex_source.find_rollout_by_session_id(session_id)
@@ -1928,6 +1941,27 @@ def compute_scope(session_meta, state_entry, now=None):
 # ---------- Scanning ----------
 def scan_sessions(force=False):
     """Scan all Claude + Codex sessions, update cache incrementally, and return items by descending mtime."""
+    with _SCAN_LOCK:
+        return _scan_sessions_locked(force)
+
+
+def _read_metadata(extract, path):
+    """Run one source's metadata reader; a file that cannot be read now returns None.
+
+    A transcript that an agent is writing at this moment can change under the reader,
+    which then raises (Claude's history index says "source changed during indexing").
+    One such file used to fail the whole session list. Returning None leaves the file's
+    previous cache entry in place with its old mtime, so the next scan reads it again.
+    """
+    try:
+        return extract(path)
+    except Exception as exc:  # one file must never take down the list
+        print(f"[warn] skipped a session this scan, will retry: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return None
+
+
+def _scan_sessions_locked(force):
     global _codex_session_index_mtime_ns
     if force:
         if _cache or _CWD_TRUTH_MAP or _CWD_INDEX_SEEN or _CWD_SEQ:
@@ -1959,7 +1993,7 @@ def scan_sessions(force=False):
                     continue
                 cached = _cache.get(key)
                 if force or cached is None or cached.get("mtime") != cur_mtime:
-                    meta = extract_metadata(jsonl_path)
+                    meta = _read_metadata(extract_metadata, jsonl_path)
                     if meta and _cache.get(key) != meta:
                         _cache[key] = meta
                         _mark_scan_cache_dirty()
@@ -1978,7 +2012,7 @@ def scan_sessions(force=False):
             continue
         cached = _cache.get(key)
         if force or cached is None or cached.get("mtime") != cur_mtime:
-            meta = codex_source.extract_metadata(jsonl_path)
+            meta = _read_metadata(codex_source.extract_metadata, jsonl_path)
             if meta and _cache.get(key) != meta:
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
@@ -2008,7 +2042,7 @@ def scan_sessions(force=False):
             continue
         cached = _cache.get(key)
         if force or cached is None or cached.get("mtime") != cur_mtime:
-            meta = ag_source.extract_metadata(jsonl_path)
+            meta = _read_metadata(ag_source.extract_metadata, jsonl_path)
             if meta and _cache.get(key) != meta:
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
@@ -2045,7 +2079,7 @@ def scan_sessions(force=False):
             continue
         cached = _cache.get(key)
         if force or cached is None or cached.get("mtime") != cur_mtime:
-            meta = kimi_source.extract_metadata(jsonl_path)
+            meta = _read_metadata(kimi_source.extract_metadata, jsonl_path)
             if meta and _cache.get(key) != meta:
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
@@ -2061,7 +2095,7 @@ def scan_sessions(force=False):
             continue
         cached = _cache.get(key)
         if force or cached is None or cached.get("mtime") != mtime:
-            meta = pi_source.extract_metadata(path)
+            meta = _read_metadata(pi_source.extract_metadata, path)
             if meta:
                 _cache[key] = meta
                 _mark_scan_cache_dirty()
@@ -2920,7 +2954,9 @@ def _search_order():
     # Prefer the known session list in cache, with disk scan fallback
     if not _cache:
         scan_sessions()
-    ordered = sorted(_cache.items(), key=lambda kv: (activity_time(kv[1]), kv[0]), reverse=True)
+    with _SCAN_LOCK:  # a scan on another thread may be changing the cache
+        snapshot = list(_cache.items())
+    ordered = sorted(snapshot, key=lambda kv: (activity_time(kv[1]), kv[0]), reverse=True)
     from sources import codex_history
     selected = {str(path) for path in codex_history.canonical_paths(
         [Path(m['jsonl_path']) for _, m in ordered], read_meta=_codex_head_meta)}
@@ -2972,12 +3008,16 @@ def search_sessions_page(query: str, limit: int, cursor=None):
         ordered = [(key, meta) for key, meta in ordered
                    if (activity_time(meta), key) < after]
     hits, start, size = [], 0, SEARCH_PAGE_FIRST_SLICE
+    began = time.monotonic()
     context = _search_context(ordered)
     while start < len(ordered) and len(hits) < limit:
         chunk = ordered[start:start + size]
         hits.extend(_search_slice(terms, chunk, context))
         start += len(chunk)
         size *= 2
+        spent = time.monotonic() - began
+        if spent >= SEARCH_PAGE_MAX_S or (hits and spent >= SEARCH_PAGE_SOON_S):
+            break
     nxt = _encode_search_cursor(*ordered[start - 1]) if start < len(ordered) else None
     return {"hits": hits, "next": nxt}
 
@@ -3184,7 +3224,7 @@ def _resolve_known_project_root(root: str):
     """
     if not _cache:
         scan_sessions()
-    for meta in _cache.values():
+    for meta in list(_cache.values()):
         project_path = meta.get("project_path")
         # The frontend receives this exact value from session metadata and returns it.
         # Do not construct a Path from the HTTP value; select the trusted cached value.
@@ -3636,7 +3676,29 @@ class Handler(BaseHTTPRequestHandler):
             self.headers.get("Sec-Fetch-Site", ""),
         )
 
+    def _answer(self, handler):
+        """Run a request handler; an unexpected error answers 500 instead of a dropped connection.
+
+        Left alone, an exception escapes to socketserver, which prints it and closes the
+        socket without a byte: the browser sees ERR_EMPTY_RESPONSE, and the page cannot tell
+        a failure from an empty answer. The traceback still goes to stderr.
+        """
+        try:
+            return handler()
+        except (BrokenPipeError, ConnectionResetError):
+            return None
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+
     def do_GET(self):
+        return self._answer(self._do_get)
+
+    def do_POST(self):
+        return self._answer(self._do_post)
+
+    def _do_get(self):
         if not self._request_is_trusted():
             return self._send_json(403, {"error": "cross-site request rejected"})
         # Ensure _state has been loaded from disk. Idempotent: only the first call reads.
@@ -3928,7 +3990,7 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._send_bytes(404, "Not found", "text/plain; charset=utf-8")
 
-    def do_POST(self):
+    def _do_post(self):
         if not self._request_is_trusted():
             return self._send_json(403, {"error": "cross-site request rejected"})
         # Ensure _state has been loaded from disk; same rationale as do_GET.
