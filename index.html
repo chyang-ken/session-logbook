@@ -1410,6 +1410,12 @@
     transition: color 0.15s, border-color 0.15s, background 0.15s;
   }
   .empty-action:hover { color: var(--accent); border-color: var(--accent); background: var(--bg-hover); }
+  /* A search page that failed after earlier pages drew: the drawn matches stay, this row says the rest is missing */
+  .search-error {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    padding: 10px 20px; color: var(--text-2); font-size: 12px;
+  }
+  .search-error .empty-action { margin-top: 0; }
   /* C3 skeleton placeholder (conversation/Files loading): grey-bar shimmer, conveys "working" better than a blank-screen spinner, and pre-reserves layout to reduce CLS */
   .skeleton-line {
     height: 13px; border-radius: 4px; margin: 12px 0;
@@ -2483,6 +2489,7 @@ const state = {
   searchHits: {},    // session_id -> [{text, role, term}, ...]
   searchPending: false,  // pages of the current search are still being fetched
   searchHasPage: false,  // the current search's first (newest) page has arrived
+  searchError: null,     // why the current search stopped early (shown with a Retry button)
   sectionOpen: _saved
     ? new Set(_saved.sectionOpen)
     : new Set(Object.entries(SECTION_DEFAULT_OPEN).filter(([, v]) => v).map(([k]) => k)),
@@ -2844,6 +2851,20 @@ function displayedItems() {
 
 let _hasRendered = false;  // The entrance animation runs only once: true on the first frame, after which all renders (including live polling) no longer replay it
 function render() {
+  renderList();
+  syncSearchError();
+}
+
+// A search that failed says so, with a Retry button, instead of reading as "no matches".
+// With no match drawn the empty state carries the message (see renderList); this covers a
+// failure after earlier pages already drew matches.
+function syncSearchError() {
+  if (!state.q || !state.searchError || !$list.querySelector('.card')) return;
+  $list.insertAdjacentHTML('afterbegin', `<div class="search-error">Couldn't search older sessions: ${escapeHtml(state.searchError)}<button class="empty-action" id="search-retry">Retry</button></div>`);
+  document.getElementById('search-retry')?.addEventListener('click', () => startSearch(state.q));
+}
+
+function renderList() {
   // Entrance animation gate: only the first render attaches .anim-in to #list (making section-reveal take effect);
   // subsequent rebuilds (live polling / user actions) remove the class → no replay, eliminating the timed flicker.
   $list.classList.toggle('anim-in', !_hasRendered);
@@ -2879,6 +2900,10 @@ function render() {
     if (state.searchPending) {
       $count.textContent += state.searchHasPage ? ' · searching older…' : ' · searching…';
       $list.innerHTML = `<div class="empty"><div class="empty-title">${state.searchHasPage ? 'Searching older sessions' : 'Searching'} for “${escapeHtml(state.q)}”…</div></div>`;
+    } else if (state.searchError) {
+      $count.textContent += ' · search failed';
+      $list.innerHTML = `<div class="empty"><div class="empty-title">Search for “${escapeHtml(state.q)}” failed</div><div class="empty-hint">${escapeHtml(state.searchError)}</div><button class="empty-action" id="search-retry">Retry</button></div>`;
+      document.getElementById('search-retry')?.addEventListener('click', () => startSearch(state.q));
     } else if (hiddenSuspected.length) {
       $list.innerHTML = `<div class="empty"><div class="empty-title">No visible matches for “${escapeHtml(state.q)}”</div><div class="empty-hint">${hiddenSuspected.length} matching suspected ${hiddenSuspected.length === 1 ? 'run is' : 'runs are'} hidden.</div><button class="empty-action" id="empty-show-suspected">Search suspected runs</button></div>`;
       document.getElementById('empty-show-suspected')?.addEventListener('click', () => {
@@ -5213,25 +5238,48 @@ function applySearchHits(hits, append = false) {
 // Search newest-first, one page at a time: the most recent matches are drawn as soon as the
 // first page arrives, and older pages keep arriving after it. `isStale()` reports that a newer
 // search has taken over, so its pages stop being fetched and applied.
+// Returns true once every page has arrived; false when it stopped (stale or failed).
 let searchSeq = 0;  // prevent stale requests from overwriting newer results
 const SEARCH_FIRST_PAGE = 20;
 const SEARCH_NEXT_PAGE = 100;
+const SEARCH_RETRY_DELAY_MS = 500;
+
+function searchPageUrl(q, limit, cursor) {
+  return '/api/search?q=' + encodeURIComponent(q) + '&limit=' + limit
+    + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+}
+
+// One page, tried twice: under heavy load a single request can fail (a dropped connection
+// or a server error) and the second attempt usually succeeds. The second failure is thrown.
+async function fetchSearchPage(url, isStale) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, SEARCH_RETRY_DELAY_MS));
+    if (isStale()) return null;
+    try {
+      const res = await fetch(url);
+      if (isStale()) return null;
+      if (!res.ok) throw new Error('the server answered ' + res.status);
+      return await res.json();
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
+
 async function runPagedSearch(q, isStale) {
   let cursor = null;
   let first = true;
   let drawn = false;
   state.searchPending = true;
   state.searchHasPage = false;
+  state.searchError = null;
   try {
     do {
       const limit = first ? SEARCH_FIRST_PAGE : SEARCH_NEXT_PAGE;
-      const url = '/api/search?q=' + encodeURIComponent(q) + '&limit=' + limit
-        + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
-      const res = await fetch(url);
-      if (isStale()) return;
-      if (!res.ok) throw new Error('search failed: ' + res.status);
-      const page = await res.json();
-      if (isStale()) return;
+      const page = await fetchSearchPage(searchPageUrl(q, limit, cursor), isStale);
+      if (!page || isStale()) return false;
       applySearchHits(page.hits, !first);
       cursor = page.next || null;
       first = false;
@@ -5251,14 +5299,65 @@ async function runPagedSearch(q, isStale) {
           + ` · ${found} found so far, searching older…`;
       }
     } while (cursor);
-  } catch {
-    if (isStale()) return;
+    return true;
+  } catch (err) {
+    if (isStale()) return false;
     // Keep the hits earlier pages drew; only a failed first page leaves nothing to show.
+    // Either way the page says the search failed and offers Retry (see syncSearchError).
     if (first) state.searchHits = {};
     state.searchPending = false;
+    state.searchError = (err && err.message) || 'the request failed';
     $searchWrap.classList.remove('searching');
     render();
+    return false;
   }
+}
+
+// Refresh the session list after a search finished, without making the search wait for it.
+// The list is large and slow to fetch on a busy machine, and searching needs only the list
+// the page already holds. What a stale list can miss is a session started after it was
+// fetched: the server learns about new files from this request. So when it brings new
+// sessions, the newest page is searched once more and matches not yet shown are added.
+async function refreshListAfterSearch(q, isStale) {
+  let items;
+  try {
+    const res = await fetch('/api/sessions');
+    if (!res.ok) return;
+    items = await res.json();
+  } catch {
+    return;  // the live poll refreshes the list once the search is cleared
+  }
+  if (isStale()) return;
+  const sig = sessionsSignature(items);
+  if (sig === _liveSig) return;
+  const known = new Set(state.items.map(m => m.id));
+  const hasNew = items.some(m => !known.has(m.id));
+  setItems(items);
+  _liveSig = sig;
+  if (hasNew) {
+    try {
+      const page = await fetchSearchPage(searchPageUrl(q, SEARCH_FIRST_PAGE, null), isStale);
+      if (!page || isStale()) return;
+      applySearchHits((page.hits || []).filter(h => !state.searchHits[h.conversation_current_id || h.id]), true);
+    } catch {
+      // The matches already drawn stay correct; a repeat search finds the new session.
+    }
+  }
+  if (!isStale()) render();
+}
+
+// Start a search for `q`: the list is cleared at once so the page plainly shows a search is
+// running, then results draw page by page. The session list is refreshed afterwards.
+async function startSearch(q) {
+  const seq = ++searchSeq;
+  const isStale = () => seq !== searchSeq;
+  state.searchHits = {};
+  state.searchPending = true;
+  state.searchHasPage = false;
+  state.searchError = null;
+  $searchWrap.classList.add('searching');
+  render();
+  if (await runPagedSearch(q, isStale)) await refreshListAfterSearch(q, isStale);
 }
 
 async function load() {
@@ -5272,7 +5371,7 @@ async function load() {
     if (state.q) {
       const seq = ++searchSeq;
       $searchWrap.classList.add('searching');
-      runPagedSearch(state.q, () => seq !== searchSeq);
+      runPagedSearch(state.q, () => seq !== searchSeq);  // the list was just fetched: no refresh after
     }
 
     render();
@@ -5308,37 +5407,14 @@ $search.addEventListener('input', () => {
     if (!newQ) {
       ++searchSeq;  // stop the pages of any search still arriving
       state.searchPending = false;
+      state.searchError = null;
       $searchWrap.classList.remove('searching');
       state.searchHits = {};
       render();
       return;
     }
 
-    // Enter the "searching" state: counter text + search-box spinner, making the wait visible with 0 delay.
-    // Stale requests superseded by later input don't clear searching on early-return (the new request is still spinning);
-    // only the latest request finishes up at the end, avoiding the spinner stopping too early during rapid typing.
-    $count.textContent = 'searching…';
-    $searchWrap.classList.add('searching');
-
-    const seq = ++searchSeq;
-    try {
-      // Refresh the session list before searching: (1) search filters against state.items (render line ~2242
-      // intersect hitIds); (2) the backend search_sessions only iterates files already scanned into _cache,
-      // so a new session can't even be found by the backend without triggering a scan first. Hence the required order:
-      // /api/sessions refreshes the backend _cache + frontend state.items first, then /api/search can hit a just-born new session.
-      const sessRes = await fetch('/api/sessions');
-      if (seq !== searchSeq) return;  // a newer request has taken over, keep searching
-      const items = await sessRes.json();
-      setItems(items);
-      _liveSig = sessionsSignature(items);  // align the live baseline, avoiding an empty redraw on the first poll after clearing the search
-    } catch {
-      if (seq !== searchSeq) return;
-      state.searchHits = {};
-      $searchWrap.classList.remove('searching');
-      render();
-      return;
-    }
-    await runPagedSearch(newQ, () => seq !== searchSeq);
+    startSearch(newQ);
   }, 250);
 });
 

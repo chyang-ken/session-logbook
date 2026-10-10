@@ -230,16 +230,20 @@ class SearchContractTests(unittest.TestCase):
                 extra = [i for i in got if i not in expected]
                 self.assertEqual(extra, [], f"unexpected sessions for {query!r}")
 
+    PAGING_QUERIES = ["widget", "orchard", "inherited goal", "billing retry",
+                      "bbbbbbbb-2222", "liveneedle", "zzqxv-nothing", "devin widget audit"]
+
     def test_pages_add_up_to_the_full_search(self):
         # Newest-first paging must return the same hits, in the same order, as one full
         # search: slices of one record exercise every page boundary, including a Codex
-        # continuation whose inherited page lies in an older slice.
-        queries = ["widget", "orchard", "inherited goal", "billing retry",
-                   "bbbbbbbb-2222", "liveneedle", "zzqxv-nothing", "devin widget audit"]
+        # continuation whose inherited page lies in an older slice. The time limits are
+        # lifted so a page always ends on its match count here.
         for limit in (1, 2, 50):
-            for query in queries:
+            for query in self.PAGING_QUERIES:
                 with self.subTest(query=query, limit=limit), \
                         mock.patch.object(server, "SEARCH_PAGE_FIRST_SLICE", 1), \
+                        mock.patch.object(server, "SEARCH_PAGE_SOON_S", 1e9), \
+                        mock.patch.object(server, "SEARCH_PAGE_MAX_S", 1e9), \
                         mock.patch.object(server, "_warn_search_fallback",
                                           side_effect=AssertionError(query)):
                     full = server.search_sessions(query)
@@ -255,6 +259,28 @@ class SearchContractTests(unittest.TestCase):
                             break
                         self.assertLess(seen, 100)
                     self.assertEqual(pages, full)
+
+    def test_pages_that_end_on_time_still_add_up_to_the_full_search(self):
+        # With no time to spare every page ends after one slice: a page with a match comes
+        # back before it holds `limit`, an empty page comes back empty with a cursor, and
+        # the pages still concatenate to the full search.
+        for query in self.PAGING_QUERIES:
+            with self.subTest(query=query), \
+                    mock.patch.object(server, "SEARCH_PAGE_FIRST_SLICE", 1), \
+                    mock.patch.object(server, "SEARCH_PAGE_SOON_S", 0), \
+                    mock.patch.object(server, "SEARCH_PAGE_MAX_S", 0):
+                full = server.search_sessions(query)
+                pages, cursor, sizes = [], None, []
+                while True:
+                    page = server.search_sessions_page(query, 50, cursor)
+                    pages.extend(page["hits"])
+                    sizes.append(len(page["hits"]))
+                    cursor = page["next"]
+                    if cursor is None:
+                        break
+                    self.assertLess(len(sizes), 100)
+                self.assertEqual(pages, full)
+                self.assertTrue(all(n <= 1 for n in sizes), sizes)
 
     def test_first_page_stops_at_the_newest_matches(self):
         # A common word is found in several sessions; the first page holds only the newest.
