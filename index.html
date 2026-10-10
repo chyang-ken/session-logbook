@@ -2481,8 +2481,8 @@ const state = {
   q: _saved?.q || '',
   items: [],
   searchHits: {},    // session_id -> [{text, role, term}, ...]
-  searchPending: false,  // older pages of the current search are still being fetched
-  searchPending: false,
+  searchPending: false,  // pages of the current search are still being fetched
+  searchHasPage: false,  // the current search's first (newest) page has arrived
   sectionOpen: _saved
     ? new Set(_saved.sectionOpen)
     : new Set(Object.entries(SECTION_DEFAULT_OPEN).filter(([, v]) => v).map(([k]) => k)),
@@ -2877,8 +2877,8 @@ function render() {
   if (state.q && filtered.length === 0) {
     $count.textContent = '0 / ' + scopedItems.length + ' sessions';
     if (state.searchPending) {
-      $count.textContent += ' · searching older…';
-      $list.innerHTML = `<div class="empty"><div class="empty-title">Searching older sessions for “${escapeHtml(state.q)}”…</div></div>`;
+      $count.textContent += state.searchHasPage ? ' · searching older…' : ' · searching…';
+      $list.innerHTML = `<div class="empty"><div class="empty-title">${state.searchHasPage ? 'Searching older sessions' : 'Searching'} for “${escapeHtml(state.q)}”…</div></div>`;
     } else if (hiddenSuspected.length) {
       $list.innerHTML = `<div class="empty"><div class="empty-title">No visible matches for “${escapeHtml(state.q)}”</div><div class="empty-hint">${hiddenSuspected.length} matching suspected ${hiddenSuspected.length === 1 ? 'run is' : 'runs are'} hidden.</div><button class="empty-action" id="empty-show-suspected">Search suspected runs</button></div>`;
       document.getElementById('empty-show-suspected')?.addEventListener('click', () => {
@@ -2911,7 +2911,7 @@ function render() {
   } else {
     $count.textContent = filtered.length + ' / ' + scopedItems.length + ' sessions';
   }
-  if (state.q && state.searchPending) $count.textContent += ' · searching older…';
+  if (state.q && state.searchPending) $count.textContent += state.searchHasPage ? ' · searching older…' : ' · searching…';
 
   if (state.viewMode === 'timeline') {
     const scrollTop = $list.scrollTop;
@@ -5220,6 +5220,7 @@ async function runPagedSearch(q, isStale) {
   let cursor = null;
   let first = true;
   state.searchPending = true;
+  state.searchHasPage = false;
   try {
     do {
       const limit = first ? SEARCH_FIRST_PAGE : SEARCH_NEXT_PAGE;
@@ -5233,6 +5234,7 @@ async function runPagedSearch(q, isStale) {
       applySearchHits(page.hits, !first);
       cursor = page.next || null;
       first = false;
+      state.searchHasPage = true;
       state.searchPending = !!cursor;
       $searchWrap.classList.toggle('searching', !!cursor);
       render();
