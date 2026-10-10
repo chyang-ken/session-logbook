@@ -5219,6 +5219,7 @@ const SEARCH_NEXT_PAGE = 100;
 async function runPagedSearch(q, isStale) {
   let cursor = null;
   let first = true;
+  let drawn = false;
   state.searchPending = true;
   state.searchHasPage = false;
   try {
@@ -5237,7 +5238,18 @@ async function runPagedSearch(q, isStale) {
       state.searchHasPage = true;
       state.searchPending = !!cursor;
       $searchWrap.classList.toggle('searching', !!cursor);
-      render();
+      // Redrawing the list costs up to a second of frozen page once it holds hundreds of
+      // cards, so the list is drawn for the first page, while it still shows nothing, and
+      // once more when the last page lands. Pages in between only update the count.
+      if (!drawn || !cursor || !$list.querySelector('.card')) {
+        render();
+        drawn = true;
+      } else {
+        // Same count the list will show, without building the cards.
+        const found = displayedItems().filtered.length;
+        $count.textContent = $count.textContent.replace(/ · .*$/, '')
+          + ` · ${found} found so far, searching older…`;
+      }
     } while (cursor);
   } catch {
     if (isStale()) return;
