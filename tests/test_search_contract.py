@@ -6,7 +6,9 @@ Devin), runs `scan_sessions()` + `search_sessions()` for a table of queries, and
 
 - the expected sessions, in activity order;
 - the fast path (ripgrep streaming matching lines) and the whole-file path agree;
-- the fast path really ran for queries it supports.
+- the fast path really ran for queries it supports;
+- the search-text sidecar prefilter ran, and gives the same results as the raw-file
+  prefilter it replaces.
 
 When search changes, add the new behaviour as a row here. For a change meant to keep
 results identical on real data, also run `scripts/search_compare.py`.
@@ -22,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 import server
-from sources import antigravity, codex, codex_history, devin, kimi, pi
+from sources import antigravity, codex, codex_history, devin, kimi, pi, search_text
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -37,6 +39,7 @@ AG_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 AG_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 AG_REWOUND = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
 PI = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+PROJECT_THREAD = "cmsg_0aaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def claude_user(text, ts):
@@ -90,7 +93,9 @@ class SearchContractTests(unittest.TestCase):
         stack.enter_context(mock.patch.object(
             antigravity, "scan_sessions", lambda root=None: ag_scan(root or antigravity.AG_BRAIN)))
         stack.enter_context(mock.patch.dict(
-            "os.environ", {"SESSION_LOGBOOK_HISTORY_INDEX": str(root / "history-index.sqlite3")}))
+            "os.environ", {"SESSION_LOGBOOK_HISTORY_INDEX": str(root / "history-index.sqlite3"),
+                           "SESSION_LOGBOOK_SEARCH_TEXT": str(root / "search-text")}))
+        stack.enter_context(mock.patch.object(search_text, "BACKGROUND", False))
         self.write_claude()
         self.write_codex()
         self.write_devin()
@@ -119,8 +124,16 @@ class SearchContractTests(unittest.TestCase):
         rows_b = [
             claude_user("payment retry details for the widget", "2025-06-01T00:00:01Z"),
             claude_assistant([{"type": "text", "text": "Retry handled"}], "2025-06-01T00:00:02Z"),
+            claude_user("\u90e8\u7f72 done", "2025-06-01T00:00:03Z"),
+            claude_user(f'<wake reason="mention"><thread ts="{PROJECT_THREAD}">'
+                        '<message id="cmsg_1">wake body</message></thread></wake>',
+                        "2025-06-01T00:00:04Z"),
+            # The last record has no newline yet: the matcher still reads it.
+            claude_user("unfinishedneedle here", "2025-06-01T00:00:05Z"),
         ]
-        (project / f"{CLAUDE_B}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows_b))
+        (project / f"{CLAUDE_B}.jsonl").write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows_b).rstrip("\n"),
+            encoding="utf-8")
 
     def write_codex(self):
         day = self.root / "codex" / "2026" / "01" / "02"
@@ -176,15 +189,23 @@ class SearchContractTests(unittest.TestCase):
 
     # ---------- helpers ----------
     def search(self, query, fast_expected=True):
-        """Return result ids; assert fast and whole-file search agree."""
+        """Return result ids; assert the fast, whole-file and raw-prefilter paths agree."""
+        before = dict(search_text.stats)
         if fast_expected:
             with mock.patch.object(server, "_warn_search_fallback", side_effect=AssertionError(query)):
                 fast = server.search_sessions(query)
         else:
             fast = server.search_sessions(query)
+        if fast_expected:
+            # The sidecars were the prefilter, for every file that has one.
+            self.assertGreater(search_text.stats["indexed"], before["indexed"], query)
+            self.assertEqual(search_text.stats["unindexed"], before["unindexed"], query)
         with mock.patch.object(server, "_rg_matching_lines", side_effect=RuntimeError("forced")):
             full = server.search_sessions(query)
         self.assertEqual(fast, full, query)
+        with mock.patch.dict("os.environ", {"SESSION_LOGBOOK_SEARCH_TEXT": "off"}):
+            raw = server.search_sessions(query)
+        self.assertEqual(fast, raw, query)
         return fast
 
     def ids(self, query, **kwargs):
@@ -223,6 +244,11 @@ class SearchContractTests(unittest.TestCase):
             ("devin widget audit", [DEVIN], "Devin"),
             ("widget payment", [CLAUDE_B], "AND across messages of one session only"),
             ("zzqxv-nothing", [], "no match"),
+            ("logbooksearchtext", [], "a sidecar's own header never matches"),
+            ("\u90e8", [CLAUDE_B], "a one-character CJK query"),
+            ("\u90e8\u7f72", [CLAUDE_B], "a two-character CJK query"),
+            ("unfinishedneedle", [CLAUDE_B], "a final record still being written is searchable"),
+            (PROJECT_THREAD, [CLAUDE_B], "a Project thread id from a wake envelope"),
         ]
         for query, expected, why in cases:
             with self.subTest(query=query, why=why):
@@ -400,6 +426,73 @@ class SearchContractTests(unittest.TestCase):
         self.assertGreater(len(handed[0]), 1)
         self.assertEqual(handed[1], sorted(found) if len(found) > 1 else list(found))
         self.assertEqual(self.ids("unsentqueueonly widget"), [CLAUDE_A])
+
+    # ---------- search-text sidecars ----------
+    def claude_a_path(self):
+        return self.root / "claude" / "-Users-alice-my-app" / f"{CLAUDE_A}.jsonl"
+
+    def test_a_growing_session_is_appended_not_rebuilt(self):
+        self.assertEqual(self.ids("widget deployed"), [CLAUDE_A])
+        path = self.claude_a_path()
+        sidecar = search_text.sidecar_path(self.root / "search-text", str(path))
+        before = sidecar.read_bytes()
+        with path.open("a") as f:
+            f.write(json.dumps(claude_user("grownneedle arrives", "2026-01-01T00:02:00Z")) + "\n")
+        self.assertEqual(self.ids("grownneedle"), [CLAUDE_A])
+        after = sidecar.read_bytes()
+        header = search_text.HEADER_BYTES
+        self.assertTrue(after[header:].startswith(before[header:]), "body was rewritten, not appended")
+        self.assertIn(b"grownneedle arrives", after)
+
+    def test_a_rewritten_session_is_rebuilt(self):
+        self.assertEqual(self.ids("widget deployed"), [CLAUDE_A])
+        path = self.claude_a_path()
+        rows = [claude_user("rewrittenneedle " + "x" * 4000, "2026-01-01T00:00:01Z"),
+                claude_assistant([{"type": "text", "text": "Widget deployed."}], "2026-01-01T00:00:04Z")]
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self.assertEqual(self.ids("rewrittenneedle"), [CLAUDE_A])
+        self.assertNotIn(b"unsentqueueonly",
+                         search_text.sidecar_path(self.root / "search-text", str(path)).read_bytes())
+
+    def test_a_sidecar_too_large_to_refresh_falls_back_to_the_raw_file(self):
+        expected = {q: self.ids(q) for q in ("widget", "inherited goal", "unsentqueueonly")}
+        shutil.rmtree(self.root / "search-text")
+        search_text._fresh.clear()  # as in a new process
+        before = dict(search_text.stats)
+        with mock.patch.object(server, "SEARCH_TEXT_INLINE_BYTES", 0):
+            for query, ids in expected.items():
+                self.assertEqual([r["id"] for r in server.search_sessions(query)], ids, query)
+        self.assertGreater(search_text.stats["unindexed"], before["unindexed"])
+        self.assertEqual(search_text.stats["indexed"], before["indexed"])
+
+    def test_the_header_never_admits_a_file(self):
+        # Every sidecar starts with a capitalised header; a lowercased term must not match it,
+        # or a query naming it would send every file to the matchers.
+        paths = [Path(m["jsonl_path"]) for m in server._cache.values()]
+        self.assertEqual(self.ids("widget"), [CODEX_PLAIN, CLAUDE_A, CLAUDE_B, DEVIN])
+        found = server._text_prefilter(["logbooksearchtext"], paths)
+        self.assertEqual(found, set())
+
+    def test_a_sidecar_removed_behind_the_memo_costs_time_not_results(self):
+        expected = self.ids("widget")
+        shutil.rmtree(self.root / "search-text")
+        self.assertEqual([r["id"] for r in server.search_sessions("widget")], expected)
+        # and the next search rebuilds what went missing
+        self.assertEqual(self.ids("widget"), expected)
+
+    def test_the_background_builder_fills_missing_sidecars(self):
+        store = self.root / "search-text"
+        items = server._search_text_items([Path(m["jsonl_path"]) for m in server._cache.values()])
+        with mock.patch.object(search_text, "BACKGROUND", True):
+            search_text.kick(items, store)
+            search_text._worker.join(10)
+        self.assertTrue(all(search_text.sidecar_path(store, source).exists() for source, _ in items))
+
+    def test_sidecars_stay_out_of_the_users_state_without_the_variable(self):
+        with mock.patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("SESSION_LOGBOOK_SEARCH_TEXT", None)
+            self.assertIsNone(server._search_text_dir())
 
     def test_bad_cursor_is_rejected(self):
         with self.assertRaises(ValueError):

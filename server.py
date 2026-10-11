@@ -32,6 +32,7 @@ from sources import devin as devin_source
 
 from sources import kimi as kimi_source
 from sources import pi as pi_source
+from sources import search_text
 from sources import session_identity
 
 # ---------- Config ----------
@@ -115,6 +116,9 @@ SEARCH_PAGE_MAX_SLICE = 800
 # messages are read from disk instead (see _codex_long_line). A rare phrase used to stream
 # over a gigabyte of compaction archives and snapshots that merely mention it.
 SEARCH_LONG_LINE_BYTES = 8192
+# Source bytes one prefilter call may read to bring stale search-text sidecars up to date
+# (a growing session appends a little; a cold build is the background thread's job).
+SEARCH_TEXT_INLINE_BYTES = 32 * 1024 * 1024
 # Keep each ripgrep argv comfortably below macOS ARG_MAX. Session paths can be long, and
 # several thousand of them otherwise make subprocess startup fail with E2BIG.
 MAX_JSON_BODY = 1024 * 1024   # local state updates should never need more than 1 MiB
@@ -2657,7 +2661,6 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                     continue
 
                 t = d.get("type")
-                text = ""
                 handed_over = claude_events.delivered_text(d)
                 if handed_over is not None:
                     queued_delivered[handed_over] = queued_delivered.get(handed_over, 0) + 1
@@ -2668,20 +2671,9 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                     continue
                 if t == "user":
                     project_ids |= project_message_ids(d)
-                    text = human_turn_words(d)
-                elif t == "assistant":
-                    text = assistant_search_words(d.get("message", {}).get("content"))
-                elif t == "response_item":
-                    # Codex row: extract message.role=user/assistant text and search it too
-                    p = d.get("payload") or {}
-                    if p.get("type") == "message" and p.get("role") in ("user", "assistant"):
-                        text = codex_source._extract_text_from_message_content(p.get("content"))
-                elif t in ("USER_INPUT", "PLANNER_RESPONSE"):
-                    # Antigravity row: extract user/assistant text and search it too
-                    text = ag_source.search_text_from_line(d)
-                elif t in ("context.append_message", "context.append_loop_event"):
-                    # Kimi row: appended user message / assistant text part
-                    text = kimi_source.search_text_from_line(d)
+                # The same function writes the search-text sidecars, so the prefilter
+                # and this matcher read the same fields.
+                text = search_text.message_text(d)
 
                 if not text:
                     continue
@@ -2855,6 +2847,106 @@ def _rg_prefilter(terms, paths):
     return candidate or set()
 
 
+def _search_text_dir():
+    """Where search-text sidecars live, or None to search raw files only.
+
+    SESSION_LOGBOOK_SEARCH_TEXT names the directory (or "off"), mirroring
+    SESSION_LOGBOOK_HISTORY_INDEX. Otherwise the sidecars sit next to the state file, so a
+    launcher that rebinds STATE_FILE gets its own. A process whose source roots are not
+    the user's real ones (a test fixture) writes none unless the variable is set.
+    """
+    configured = os.environ.get("SESSION_LOGBOOK_SEARCH_TEXT")
+    if configured == "off":
+        return None
+    if configured:
+        return Path(configured).expanduser()
+    if (PROJECTS_DIR != Path.home() / ".claude" / "projects"
+            or codex_source.CODEX_ROOT != Path.home() / ".codex" / "sessions"):
+        return None
+    return STATE_FILE.parent / "search-text"
+
+
+def _search_text_items(paths):
+    """(source path string, kind) for every path that gets a sidecar.
+
+    Devin is a database and Pi selects a branch over the whole file; both stay on their
+    existing paths (they are a few megabytes here).
+    """
+    items = []
+    roots = (str(codex_source.CODEX_ROOT), str(codex_source.CODEX_ARCHIVED_ROOT),
+             str(pi_source.PI_SESSIONS_ROOT), str(devin_source.DEVIN_ROOT))
+    for p in paths:
+        key = (str(p), roots)
+        kind = _SEARCH_TEXT_KINDS.get(key)
+        if kind is None:
+            if len(_SEARCH_TEXT_KINDS) > 100_000:
+                _SEARCH_TEXT_KINDS.clear()
+            if devin_source.is_devin_path(p) or _is_pi_path(p):
+                kind = ""
+            else:
+                kind = "codex" if codex_source.is_codex_path(p) else "generic"
+            _SEARCH_TEXT_KINDS[key] = kind
+        if kind:
+            items.append((key[0], kind))
+    return items
+
+
+_SEARCH_TEXT_KINDS = {}  # remembered per path and source roots: asked for every file per search
+
+
+def _text_index(terms, paths):
+    """(paths whose sidecar holds every term, paths a fresh sidecar answered for), or None.
+
+    None when no sidecar can be used at all (no store, no ripgrep, a ripgrep failure);
+    every path is then the raw-file prefilter's to answer.
+    """
+    store = _search_text_dir()
+    rg_executable = _find_ripgrep()
+    if store is None or not rg_executable:
+        return None
+    items = _search_text_items(paths)
+    indexed = search_text.prefilter(terms, items, store, rg_executable,
+                                    SEARCH_TEXT_INLINE_BYTES, RIPGREP_ARG_CHUNK_BYTES)
+    if indexed is None:
+        _warn_search_fallback("search-text sidecars unusable for this query")
+        return None
+    hits, unindexed = indexed
+    return hits, {source for source, _ in items}.difference(unindexed)
+
+
+def _text_prefilter(terms, paths, index=None):
+    """Paths whose searchable text may hold every term; same contract as _rg_prefilter.
+
+    Uses the search-text sidecars where they are fresh (see sources/search_text.py) and
+    the raw-file prefilter for every other path, so a missing or stale sidecar costs time,
+    never a result. None when ripgrep is unavailable, as for _rg_prefilter.
+
+    index, when given, is a _text_index() already computed over a superset of `paths`.
+    """
+    if index is None:
+        index = _text_index(terms, paths)
+    if index is None:
+        return _rg_prefilter(terms, paths)
+    hits, covered = index
+    keys = [str(p) for p in paths]
+    rest = [p for p, key in zip(paths, keys) if key not in covered]
+    raw = _rg_prefilter(terms, rest) if rest else set()
+    if raw is None:
+        return None
+    return {key for key in keys if key in hits} | raw
+
+
+def build_search_text(paths=None):
+    """Build every search-text sidecar now; return (fresh, total). For scripts."""
+    store = _search_text_dir()
+    if store is None:
+        return 0, 0
+    if paths is None:
+        paths = [Path(m["jsonl_path"]) for _, m in _search_order()]
+    items = _search_text_items(paths)
+    return search_text.build(items, store), len(items)
+
+
 _RG_PCRE2 = {}
 
 
@@ -2943,32 +3035,9 @@ def _rg_matching_lines(terms, paths, long_line_paths=()):
             raise RuntimeError(f"ripgrep exited with status {code}")
 
 
-def _codex_message(raw):
-    """Return (role, text) when a raw Codex record is a user/assistant message, else None.
-
-    Mirrors codex_history.read_segment's record validation and iter_messages' selection.
-    """
-    try:
-        row = json.loads(raw)
-    except (ValueError, UnicodeError):
-        return None
-    if not isinstance(row, dict) or row.get("type") != "response_item":
-        return None
-    payload = row.get("payload")
-    if not isinstance(payload, dict) or payload.get("type") != "message":
-        return None
-    role = payload.get("role")
-    if role not in {"user", "assistant"}:
-        return None
-    text = codex_source._extract_text_from_message_content(payload.get("content"))
-    return (role, text) if text else None
-
-
-# The start of a Codex rollout line: optional timestamp and ordinal, then the record type
-# and, for a response item, the payload type.
-_CODEX_LINE_HEAD = re.compile(
-    rb'\{(?:"timestamp":"[^"\\]*",)?(?:"ordinal":\d+,)?"type":"([a-z_]+)"'
-    rb'(?:,"payload":\{"type":"([a-z_]+)")?')
+# One copy of the Codex message test, shared with the search-text sidecars.
+_codex_message = search_text.codex_message
+_CODEX_LINE_HEAD = search_text.CODEX_LINE_HEAD
 
 
 def _codex_long_line(path, offset):
@@ -2982,10 +3051,7 @@ def _codex_long_line(path, offset):
     try:
         with open(path, "rb") as f:
             f.seek(offset)
-            head = f.read(512)
-            m = _CODEX_LINE_HEAD.match(head)
-            if m and (m.group(1) != b"response_item"
-                      or (m.group(2) is not None and m.group(2) != b"message")):
+            if search_text.codex_ruled_out(f.read(512)):
                 return None
             f.seek(offset)
             line = f.readline()
@@ -3196,6 +3262,9 @@ def search_sessions_page(query: str, limit: int, cursor=None):
     hits, start, size = [], 0, SEARCH_PAGE_FIRST_SLICE
     began = time.monotonic()
     context = _search_context(ordered)
+    # One pass over the sidecars answers every slice of this page: reading 4% of the
+    # library once is cheaper than starting ripgrep again for each slice.
+    context["text_index"] = _text_index(terms, [Path(m["jsonl_path"]) for _, m in ordered])
     while start < len(ordered) and len(hits) < limit:
         chunk = ordered[start:start + size]
         hits.extend(_search_slice(terms, chunk, context))
@@ -3281,6 +3350,31 @@ def _codex_head_meta(path):
     return held[1]
 
 
+def _chain_term_hits(terms, context, chains):
+    """Per term, the continuation history files whose searchable text holds it, or None.
+
+    A paged search answers this once for every continuation in the page (`chains` of a
+    page-level context are filled on first use), not once per slice.
+    """
+    if "chain_term_hits" in context and context["chain_term_hits"][0] == terms:
+        return context["chain_term_hits"][1]
+    if context.get("text_index") is not None:
+        # Page-level context: cover every continuation the page can reach.
+        chains = {p: files for p, files in _context_chains(context).items()
+                  if p in context["inherited"]}
+    chain_files = sorted({f for files in chains.values() if files for f, _ in files})
+    term_hits = []
+    for term in terms:
+        hits = _text_prefilter([term], [Path(f) for f in chain_files]) if chain_files else set()
+        if hits is None:
+            term_hits = None
+            break
+        term_hits.append(hits)
+    if context.get("text_index") is not None:
+        context["chain_term_hits"] = (terms, term_hits)
+    return term_hits
+
+
 def _search_slice(terms, ordered, context=None):
     """Search the given (key, meta) records, keeping their order, and return the hits.
 
@@ -3291,7 +3385,8 @@ def _search_slice(terms, ordered, context=None):
     # ripgrep prefilter: select files whose content contains every term and skip expensive
     # per-line JSON parsing for the rest. prefiltered=None means rg is unavailable, so scan
     # every file as before.
-    prefiltered = _rg_prefilter(terms, [Path(m["jsonl_path"]) for _, m in ordered])
+    prefiltered = _text_prefilter(terms, [Path(m["jsonl_path"]) for _, m in ordered],
+                                  context.get("text_index"))
 
     # Prefilter a Codex continuation against every physical file of its effective
     # history; without a complete indexed history, read it in full.
@@ -3301,14 +3396,7 @@ def _search_slice(terms, ordered, context=None):
     if inherited and prefiltered is not None:
         known = _context_chains(context)
         chains = {p: known[p] for p in inherited if p in known}
-        chain_files = sorted({f for files in chains.values() if files for f, _ in files})
-        term_hits = []
-        for term in terms:
-            hits = _rg_prefilter([term], [Path(f) for f in chain_files]) if chain_files else set()
-            if hits is None:
-                term_hits = None
-                break
-            term_hits.append(hits)
+        term_hits = _chain_term_hits(terms, context, chains)
         if term_hits is not None:
             for path, files in chains.items():
                 if files:
@@ -4301,6 +4389,14 @@ def main(argv=None):
     elapsed = (datetime.now() - t0).total_seconds()
     mode = "hot cache + incremental scan" if cache_loaded else "full scan"
     print(f"[info] {len(items)} sessions loaded in {elapsed:.1f}s ({mode})")
+    store = _search_text_dir()
+    if store is not None:
+        # Build missing search-text sidecars in the background, newest first; until one
+        # exists, search reads that session's raw file as before.
+        search_text.BACKGROUND = True
+        search_text.kick(_search_text_items(
+            [Path(m["jsonl_path"]) for _, m in _search_order()]), store)
+        print(f"[info] search text: {store}")
     print(f"[info] listening on http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
