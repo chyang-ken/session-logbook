@@ -107,6 +107,14 @@ SEARCH_PAGE_FIRST_SLICE = 200  # records searched for a page before the slice do
 # SEARCH_PAGE_MAX_S, empty or not; the cursor carries on from where it stopped.
 SEARCH_PAGE_SOON_S = 0.5
 SEARCH_PAGE_MAX_S = 3.0
+# Slices stop doubling at this size. The clock is read only between slices, so an unbounded
+# slice (3,200 records on the fifth step) could hold a page, and a match found early in it,
+# for several seconds past SEARCH_PAGE_MAX_S on a busy machine.
+SEARCH_PAGE_MAX_SLICE = 800
+# Codex lines longer than this are not streamed by the line search; the few that can be
+# messages are read from disk instead (see _codex_long_line). A rare phrase used to stream
+# over a gigabyte of compaction archives and snapshots that merely mention it.
+SEARCH_LONG_LINE_BYTES = 8192
 # Keep each ripgrep argv comfortably below macOS ARG_MAX. Session paths can be long, and
 # several thousand of them otherwise make subprocess startup fail with E2BIG.
 MAX_JSON_BODY = 1024 * 1024   # local state updates should never need more than 1 MiB
@@ -126,6 +134,10 @@ _cache = {}   # jsonl_path_str -> session meta dict
 # which closed that request's connection with no response. A request that arrives while a
 # scan runs now waits for it and then finds the cache already current.
 _SCAN_LOCK = threading.RLock()
+# The (key, meta) pairs the cache held when the last scan finished. Search reads this
+# instead of waiting while another request's scan holds _SCAN_LOCK: on a busy machine one
+# scan takes several seconds, and a paged search used to wait for one on every page.
+_search_snapshot = None
 _state = {}   # session_id -> local user metadata (archive/star/note/title/human confirmation)
 # Whether load_state() has run successfully. Distinguishes genuinely empty state from
 # forgotten initialization. Every HTTP handler entry point falls back to load_state()
@@ -1941,8 +1953,11 @@ def compute_scope(session_meta, state_entry, now=None):
 # ---------- Scanning ----------
 def scan_sessions(force=False):
     """Scan all Claude + Codex sessions, update cache incrementally, and return items by descending mtime."""
+    global _search_snapshot
     with _SCAN_LOCK:
-        return _scan_sessions_locked(force)
+        items = _scan_sessions_locked(force)
+        _search_snapshot = list(_cache.items())
+        return items
 
 
 def _read_metadata(extract, path):
@@ -2467,7 +2482,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     """
     if codex_source.is_codex_path(jsonl_path):
         return _search_codex_history(jsonl_path, terms, session_meta)
-    if pi_source.is_pi_path(jsonl_path):
+    if _is_pi_path(jsonl_path):
         meta = session_meta or pi_source.extract_metadata(jsonl_path) or {}
         return pi_source.search(jsonl_path, terms, meta,
                                 str(_state.get(meta.get("id"), {}).get("title_override") or ""))
@@ -2727,6 +2742,10 @@ def _rg_prefilter(terms, paths):
         batches = []
         batch = []
         batch_bytes = fixed_bytes
+        # Later terms only need the files every earlier term was found in: a two-word
+        # query used to read the whole library once per word.
+        if candidate is not None:
+            path_strs = [p for p in path_strs if p in candidate]
         for path_str in path_strs:
             arg_bytes = len(os.fsencode(path_str)) + 1
             if batch and batch_bytes + arg_bytes > RIPGREP_ARG_CHUNK_BYTES:
@@ -2775,13 +2794,17 @@ def _rg_has_pcre2(rg_executable):
     return _RG_PCRE2[rg_executable]
 
 
-def _rg_matching_lines(terms, paths):
+def _rg_matching_lines(terms, paths, long_line_paths=()):
     """Yield (path, line_number, byte_offset, raw_line) for lines containing any term.
 
     Lines of one file arrive together and in file order; ripgrep prints each file's
     matches as one block. Matching is case-insensitive and literal, like the file-level
     prefilter. Raises RuntimeError when ripgrep is unavailable or fails, so the caller
     can fall back to reading whole files.
+
+    For a path in `long_line_paths`, a line longer than SEARCH_LONG_LINE_BYTES is not
+    sent through the pipe: raw_line is None and the caller reads it from byte_offset if
+    it needs it.
     """
     rg_executable = _find_ripgrep()
     if not rg_executable:
@@ -2801,21 +2824,26 @@ def _rg_matching_lines(terms, paths):
         for term in terms:
             for form in _raw_forms(term):
                 fixed += ["-e", form]
+    long_line_paths = set(long_line_paths)
+    short = [*fixed, "--max-columns", str(SEARCH_LONG_LINE_BYTES), "--"]
     fixed.append("--")
-    fixed_bytes = sum(len(os.fsencode(arg)) + 1 for arg in fixed)
-    batches, batch, batch_bytes = [], [], fixed_bytes
-    for path_str in paths:
-        arg_bytes = len(os.fsencode(path_str)) + 1
-        if batch and batch_bytes + arg_bytes > RIPGREP_ARG_CHUNK_BYTES:
-            batches.append(batch)
-            batch, batch_bytes = [], fixed_bytes
-        batch.append(path_str)
-        batch_bytes += arg_bytes
-    if batch:
-        batches.append(batch)
-    for path_batch in batches:
+    batches = []
+    for group, args in (([p for p in paths if p not in long_line_paths], fixed),
+                        ([p for p in paths if p in long_line_paths], short)):
+        fixed_bytes = sum(len(os.fsencode(arg)) + 1 for arg in args)
+        batch, batch_bytes = [], fixed_bytes
+        for path_str in group:
+            arg_bytes = len(os.fsencode(path_str)) + 1
+            if batch and batch_bytes + arg_bytes > RIPGREP_ARG_CHUNK_BYTES:
+                batches.append((args, batch))
+                batch, batch_bytes = [], fixed_bytes
+            batch.append(path_str)
+            batch_bytes += arg_bytes
+        if batch:
+            batches.append((args, batch))
+    for args, path_batch in batches:
         try:
-            proc = subprocess.Popen([*fixed, *path_batch], stdout=subprocess.PIPE,
+            proc = subprocess.Popen([*args, *path_batch], stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL)
         except OSError as e:
             raise RuntimeError(f"ripgrep could not start ({type(e).__name__})")
@@ -2828,6 +2856,10 @@ def _rg_matching_lines(terms, paths):
                     raise RuntimeError("unexpected ripgrep output")
                 if content.endswith(b"\n"):
                     content = content[:-1]
+                # A JSONL line starts with "{", so this can only be ripgrep's placeholder
+                # for a line longer than --max-columns.
+                if args is short and content.startswith(b"[Omitted long"):
+                    content = None
                 yield os.fsdecode(path), int(number), int(offset), content
         finally:
             proc.stdout.close()
@@ -2858,6 +2890,36 @@ def _codex_message(raw):
     return (role, text) if text else None
 
 
+# The start of a Codex rollout line: optional timestamp and ordinal, then the record type
+# and, for a response item, the payload type.
+_CODEX_LINE_HEAD = re.compile(
+    rb'\{(?:"timestamp":"[^"\\]*",)?(?:"ordinal":\d+,)?"type":"([a-z_]+)"'
+    rb'(?:,"payload":\{"type":"([a-z_]+)")?')
+
+
+def _codex_long_line(path, offset):
+    """The Codex line at `offset` when it could be a message, else None.
+
+    Most long Codex lines are compaction archives, world-state snapshots and tool output,
+    which _codex_message rejects after parsing up to a megabyte each. The first bytes name
+    the record type; only a line they do not rule out is read in full. The returned line
+    keeps a missing final newline missing, so the caller still skips an unfinished record.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            head = f.read(512)
+            m = _CODEX_LINE_HEAD.match(head)
+            if m and (m.group(1) != b"response_item"
+                      or (m.group(2) is not None and m.group(2) != b"message")):
+                return None
+            f.seek(offset)
+            line = f.readline()
+    except OSError:
+        return None
+    return line[:-1] if line.endswith(b"\n") else line
+
+
 def _search_by_matching_lines(terms, entries, chains):
     """Search entries using only lines that contain a term; return {path: snippets}.
 
@@ -2876,7 +2938,7 @@ def _search_by_matching_lines(terms, entries, chains):
         yield first
         yield from rest
 
-    records = _rg_matching_lines(terms, stream_files)
+    records = _rg_matching_lines(terms, stream_files, codex_files)
     failure = []
 
     def advance():
@@ -2907,7 +2969,7 @@ def _search_by_matching_lines(terms, entries, chains):
         if path in by_path:
             meta, jsonl_path = by_path[path]
             rows = ((number, raw.decode("utf-8", "replace"))
-                    for _, number, _, raw in same_file())
+                    for _, number, _, raw in same_file() if raw is not None)
             results[path] = _search_session(jsonl_path, terms, meta, lines=rows)
             for _ in same_file():  # drain lines left after an early stop
                 pass
@@ -2918,6 +2980,10 @@ def _search_by_matching_lines(terms, entries, chains):
                 except OSError:
                     sizes[path] = 0
             for _, number, offset, raw in same_file():
+                if raw is None:
+                    raw = _codex_long_line(path, offset)
+                    if raw is None:
+                        continue
                 # A final line without a newline is still being written; the history
                 # reader skips it, so search does too.
                 if offset + len(raw) + 1 > sizes[path]:
@@ -2956,16 +3022,57 @@ def _search_order():
 
     Ties are broken by key so that a paging cursor names one exact position.
     """
-    # Prefer the known session list in cache, with disk scan fallback
-    if not _cache:
-        scan_sessions()
-    with _SCAN_LOCK:  # a scan on another thread may be changing the cache
-        snapshot = list(_cache.items())
+    snapshot = _search_cache_items()
     ordered = sorted(snapshot, key=lambda kv: (activity_time(kv[1]), kv[0]), reverse=True)
     from sources import codex_history
     selected = {str(path) for path in codex_history.canonical_paths(
         [Path(m['jsonl_path']) for _, m in ordered], read_meta=_codex_head_meta)}
     return [(key, meta) for key, meta in ordered if str(meta['jsonl_path']) in selected]
+
+
+def _search_cache_items():
+    """(key, meta) pairs of the session cache, without waiting behind a running scan.
+
+    When no scan is running the cache is read as it is now. While one is running (a list
+    refresh from any open dashboard), the pairs the previous scan left are used: at most
+    one scan old, and the page refreshes the list after a search to catch anything newer.
+    Only a search that finds no earlier snapshot at all waits for the scan.
+    """
+    global _search_snapshot
+    if _SCAN_LOCK.acquire(blocking=False):
+        try:
+            # Prefer the known session list in cache, with disk scan fallback
+            if not _cache:
+                scan_sessions()
+            _search_snapshot = list(_cache.items())
+            return _search_snapshot
+        finally:
+            _SCAN_LOCK.release()
+    snapshot = _search_snapshot
+    if snapshot is not None:
+        return snapshot
+    with _SCAN_LOCK:  # a scan on another thread is changing the cache
+        if not _cache:
+            scan_sessions()
+        return list(_cache.items())
+
+
+def _search_conversations():
+    """Conversation facts by record id for search hits, without waiting behind a scan.
+
+    _conversation_views reads the cache, which a running scan is changing; while one runs,
+    the views the last completed computation left are used, matching the snapshot
+    _search_cache_items returns in that case.
+    """
+    if _SCAN_LOCK.acquire(blocking=False):
+        try:
+            return _conversation_views()[0]
+        finally:
+            _SCAN_LOCK.release()
+    if _conversation_memo["generation"] is not None:
+        return _conversation_memo["by_record"]
+    with _SCAN_LOCK:
+        return _conversation_views()[0]
 
 
 def search_sessions(query: str):
@@ -3019,7 +3126,7 @@ def search_sessions_page(query: str, limit: int, cursor=None):
         chunk = ordered[start:start + size]
         hits.extend(_search_slice(terms, chunk, context))
         start += len(chunk)
-        size *= 2
+        size = min(size * 2, SEARCH_PAGE_MAX_SLICE)
         spent = time.monotonic() - began
         if spent >= SEARCH_PAGE_MAX_S or (hits and spent >= SEARCH_PAGE_SOON_S):
             break
@@ -3055,7 +3162,7 @@ def _search_context(ordered):
     }
     conversations = {}
     try:
-        conversations = _conversation_views()[0]
+        conversations = _search_conversations()
     except Exception as e:  # identity is additive; search must never fail because of it
         print(f"[warn] conversation identity unavailable for search: {e}", file=sys.stderr)
     return {"inherited": inherited, "chains": None, "conversations": conversations}
