@@ -56,6 +56,8 @@ The nine below were written over two days by parallel branches and are best read
 
 ### Retrieval, sources and scope
 
+- [`2026-10-11-search-text-sidecars.md`](2026-10-11-search-text-sidecars.md)
+  — search prefilters per-session text sidecars instead of reading the whole library.
 - [`2026-10-11-rare-phrase-search-latency.md`](2026-10-11-rare-phrase-search-latency.md)
   — search does not wait behind a list refresh, and skips long non-message Codex lines.
 - [`2026-09-19-search-matching-lines.md`](2026-09-19-search-matching-lines.md)
