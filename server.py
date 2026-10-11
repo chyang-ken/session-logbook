@@ -138,6 +138,11 @@ _SCAN_LOCK = threading.RLock()
 # instead of waiting while another request's scan holds _SCAN_LOCK: on a busy machine one
 # scan takes several seconds, and a paged search used to wait for one on every page.
 _search_snapshot = None
+# When the last scan finished, and a lock that keeps at most one background scan running.
+_last_scan_at = 0.0
+_BACKGROUND_SCAN = threading.Lock()
+# The reader asks for a background scan when the cache is older than this.
+READER_RESCAN_S = 5
 _state = {}   # session_id -> local user metadata (archive/star/note/title/human confirmation)
 # Whether load_state() has run successfully. Distinguishes genuinely empty state from
 # forgotten initialization. Every HTTP handler entry point falls back to load_state()
@@ -1078,6 +1083,22 @@ def extract_metadata(jsonl_path: Path):
 
 
 # ---------- Conversation extraction ----------
+def _message_tool_text(name, inp):
+    """The text an agent sent to the person through a messaging tool, else None.
+
+    Some harnesses deliver the agent's answer through a tool call (a project-thread
+    `..._reply` or `..._post_message` with a `text` argument) instead of a text block.
+    That text is the reply the person read, so the reader shows it as assistant text;
+    as a tool call it was cut to a one-line summary and could not be expanded.
+    """
+    if not isinstance(inp, dict) or not isinstance(name, str):
+        return None
+    if not (name.endswith('__reply') or name.endswith('__post_message')):
+        return None
+    text = inp.get('text')
+    return text if isinstance(text, str) and text.strip() else None
+
+
 def _tool_input_summary(name, inp):
     """Generate a one-line summary of tool call input."""
     if not isinstance(inp, dict):
@@ -1404,6 +1425,12 @@ def extract_conversation(jsonl_path, include_rewound=False):
                         })
                         pending_tools[tool_id] = {'__spawn__': True}
                         continue
+                    sent = _message_tool_text(tname, block.get('input'))
+                    if sent is not None:
+                        text_parts.append(sent)
+                        # Its result is only a delivery receipt; skip it like a spawn's.
+                        pending_tools[tool_id] = {'__spawn__': True}
+                        continue
                     pending_tools[tool_id] = {
                         'name': tname,
                         'summary': _tool_input_summary(
@@ -1661,6 +1688,9 @@ def extract_transcript(jsonl_path: Path) -> str:
                         text_parts.append(txt)
                 elif bt == 'tool_use':
                     tname = block.get('name', '?')
+                    sent = _message_tool_text(tname, block.get('input'))
+                    if sent is not None:
+                        text_parts.append(sent)
                     pending_tools[block.get('id', '')] = {
                         'name': tname,
                         'summary': _tool_input_summary(
@@ -1953,11 +1983,55 @@ def compute_scope(session_meta, state_entry, now=None):
 # ---------- Scanning ----------
 def scan_sessions(force=False):
     """Scan all Claude + Codex sessions, update cache incrementally, and return items by descending mtime."""
-    global _search_snapshot
+    global _search_snapshot, _last_scan_at
     with _SCAN_LOCK:
         items = _scan_sessions_locked(force)
         _search_snapshot = list(_cache.items())
+        _last_scan_at = time.time()
         return items
+
+
+def _background_scan():
+    try:
+        scan_sessions()
+    except Exception as e:  # a failed refresh must not kill the thread silently
+        print(f"[reader] background scan failed: {type(e).__name__}: {e}", file=sys.stderr)
+    finally:
+        _BACKGROUND_SCAN.release()
+
+
+def _read_while_written(read, attempts=3):
+    """Run `read`, retrying when the transcript grew while it was being read.
+
+    The history readers refuse a file whose signature moved mid-read rather than return a
+    torn view. A Session that is running right now - the one most often opened - is
+    appended to every few seconds, so a single attempt failed often enough for the
+    reader to come up empty. A fresh attempt reads the new, consistent file.
+    """
+    for attempt in range(attempts):
+        try:
+            return read()
+        except ValueError as e:
+            if 'changed during' not in str(e) or attempt == attempts - 1:
+                raise
+            time.sleep(0.05)
+
+
+def _reader_items():
+    """Session metas for the conversation reader, without waiting for a scan.
+
+    The reader used to run a full scan on every open and on every live poll, so opening a
+    Session waited for a scan of every file, or for a list refresh already holding the
+    lock: several seconds on a busy machine. It now answers from the cache as it stands
+    (the snapshot the last scan left while one is running) and, when that is older than
+    READER_RESCAN_S, starts one scan in the background, so the next live poll sees a new
+    record or a rewind. A cold cache still scans before answering.
+    """
+    items = [meta for _, meta in _search_cache_items()]
+    if (time.time() - _last_scan_at >= READER_RESCAN_S
+            and _BACKGROUND_SCAN.acquire(blocking=False)):
+        threading.Thread(target=_background_scan, daemon=True).start()
+    return sorted(items, key=activity_time, reverse=True)
 
 
 def _read_metadata(extract, path):
@@ -3908,7 +3982,7 @@ class Handler(BaseHTTPRequestHandler):
                 include_rewound = (qs.get('include_rewound') or [''])[0] == '1'
                 desktop_meta = {}
                 if Path(PROJECTS_DIR).resolve() in Path(jsonl).resolve().parents:
-                    desktop_meta = claude_desktop.metadata_for_session(sid, scan_sessions())
+                    desktop_meta = claude_desktop.metadata_for_session(sid, _reader_items())
                     fingerprint += ':' + hashlib.sha256(json.dumps(
                         desktop_meta, sort_keys=True).encode()).hexdigest()
                     fingerprint += ':all' if include_rewound else ':current'
@@ -3943,7 +4017,8 @@ class Handler(BaseHTTPRequestHandler):
                 if devin_source.is_devin_path(jsonl):
                     pass  # Already parsed from one coherent SQLite snapshot above.
                 elif codex_source.is_codex_path(jsonl):
-                    conv = codex_source.extract_conversation(jsonl)
+                    conv = _read_while_written(
+                        lambda: codex_source.extract_conversation(jsonl))
                 elif ag_source.is_antigravity_path(jsonl):
                     conv = ag_source.extract_conversation(jsonl)
                 elif kimi_source.is_kimi_path(jsonl):
@@ -3951,7 +4026,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif pi_source.is_pi_path(jsonl):
                     conv = pi_source.extract_conversation(jsonl)
                 else:
-                    conv = extract_conversation(jsonl, include_rewound=include_rewound)
+                    conv = _read_while_written(
+                        lambda: extract_conversation(jsonl, include_rewound=include_rewound))
                     conv.update(desktop_meta)
                 st = _state.get(sid, {})
                 conv['title_override'] = st.get('title_override', '')

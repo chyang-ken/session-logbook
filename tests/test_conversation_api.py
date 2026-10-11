@@ -332,6 +332,58 @@ class HttpTests(ApiFixture):
         with urllib.request.urlopen(request, timeout=10) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def test_reader_does_not_wait_behind_a_running_scan(self):
+        # A list refresh holds the scan lock; opening a Session answers from the cache as
+        # it stands instead of waiting, with its Desktop rewind facts intact.
+        held, release = threading.Event(), threading.Event()
+
+        def scan_in_progress():
+            with server._SCAN_LOCK:
+                held.set()
+                release.wait(30)
+
+        holder = threading.Thread(target=scan_in_progress)
+        holder.start()
+        try:
+            self.assertTrue(held.wait(10))
+            conv = self.get(f"/api/sessions/{R3}/conversation")  # times out after 10 s
+            self.assertEqual(conv["id"], R3)
+            self.assertEqual(conv.get("desktop_session_id"), CONVERSATION)
+        finally:
+            release.set()
+            holder.join()
+
+    def test_reader_refreshes_a_stale_cache_in_the_background(self):
+        with mock.patch.object(server, "_last_scan_at", 0.0):
+            done = threading.Event()
+            real = server.scan_sessions
+
+            def scan(*args, **kwargs):
+                try:
+                    return real(*args, **kwargs)
+                finally:
+                    done.set()
+
+            with mock.patch.object(server, "scan_sessions", side_effect=scan):
+                self.get(f"/api/sessions/{R3}/conversation")
+                self.assertTrue(done.wait(10), "a stale cache started no scan")
+                self.assertGreater(server._last_scan_at, 0.0)
+
+    def test_reader_retries_a_session_that_grew_mid_read(self):
+        real = server.extract_conversation
+        calls = []
+
+        def growing(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ValueError("Claude source changed during read; retry observation")
+            return real(*args, **kwargs)
+
+        with mock.patch.object(server, "extract_conversation", side_effect=growing):
+            conv = self.get(f"/api/sessions/{R3}/conversation")
+        self.assertEqual(conv["id"], R3)
+        self.assertEqual(len(calls), 2)
+
     def test_stats_counts_conversations_not_records(self):
         stats = self.get("/api/stats")
         self.assertEqual(stats["total"], 2)  # one rewind chain plus one lone record
