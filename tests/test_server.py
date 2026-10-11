@@ -828,6 +828,37 @@ class TestClaudeSubagentSpawn(unittest.TestCase):
         p.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
         return p
 
+    def test_message_tool_text_is_shown_as_assistant_text(self):
+        # A harness that answers the person through a reply tool: the full text is the
+        # reply, shown as assistant text; its delivery receipt is not a tool block.
+        long_text = "Deployed. " + "detail " * 400
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "session.jsonl"
+            rows = [
+                {"uuid": "u1", "timestamp": "2026-05-15T10:00:00Z", "type": "user",
+                 "message": {"role": "user", "content": "status?"}},
+                {"uuid": "u2", "parentUuid": "u1", "timestamp": "2026-05-15T10:00:01Z",
+                 "type": "assistant", "message": {"role": "assistant", "content": [
+                     {"type": "tool_use", "id": "t1", "name": "mcp__chat__reply",
+                      "input": {"text": long_text}},
+                     {"type": "tool_use", "id": "t2", "name": "Bash",
+                      "input": {"command": "ls"}},
+                     {"type": "tool_use", "id": "t3", "name": "mcp__notes__create",
+                      "input": {"text": "a note, not a reply"}}]}},
+                {"uuid": "u3", "parentUuid": "u2", "timestamp": "2026-05-15T10:00:02Z",
+                 "type": "user", "message": {"role": "user", "content": [
+                     {"type": "tool_result", "tool_use_id": "t1", "content": '{"message_id":"m1"}'},
+                     {"type": "tool_result", "tool_use_id": "t2", "content": "a.txt"},
+                     {"type": "tool_result", "tool_use_id": "t3", "content": "ok"}]}},
+            ]
+            p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            turns = server.extract_conversation(p)["turns"]
+            texts = [t["text"] for t in turns if t.get("type") == "assistant"]
+            self.assertEqual(texts, [long_text])
+            self.assertEqual([t["name"] for t in turns if t.get("type") == "tool"],
+                             ["Bash", "mcp__notes__create"])
+            self.assertIn(long_text, server.extract_transcript(p))
+
     def test_agent_tool_becomes_subagent_spawn(self):
         with tempfile.TemporaryDirectory() as td:
             path = self._write_fixture(Path(td), {
