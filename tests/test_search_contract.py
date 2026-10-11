@@ -15,6 +15,7 @@ import json
 import shutil
 import sqlite3
 import tempfile
+import threading
 import unittest
 from contextlib import ExitStack, closing
 from pathlib import Path
@@ -289,6 +290,116 @@ class SearchContractTests(unittest.TestCase):
             page = server.search_sessions_page("widget", 1)
         self.assertEqual([h["id"] for h in page["hits"]], full[:1])
         self.assertIsNotNone(page["next"])
+
+    def test_slices_stop_growing_at_the_cap(self):
+        # The page clock is read only between slices, so slices must stop doubling.
+        sizes = []
+        real = server._search_slice
+
+        def spy(terms, chunk, context=None):
+            sizes.append(len(chunk))
+            return real(terms, chunk, context)
+
+        with mock.patch.object(server, "SEARCH_PAGE_FIRST_SLICE", 1), \
+                mock.patch.object(server, "SEARCH_PAGE_MAX_SLICE", 2), \
+                mock.patch.object(server, "SEARCH_PAGE_SOON_S", 1e9), \
+                mock.patch.object(server, "SEARCH_PAGE_MAX_S", 1e9), \
+                mock.patch.object(server, "_search_slice", side_effect=spy):
+            server.search_sessions_page("zzqxv-nothing", 50)
+        self.assertGreater(len(sizes), 3)
+        self.assertEqual(sizes[0], 1)
+        self.assertTrue(all(n <= 2 for n in sizes), sizes)
+
+    def test_search_does_not_wait_behind_a_running_scan(self):
+        # Another request's scan holds the scan lock; search answers from the snapshot the
+        # last scan left instead of waiting for it, and still finds every match.
+        expected = self.ids("widget")
+        server.scan_sessions()
+        held, release = threading.Event(), threading.Event()
+
+        def scan_in_progress():
+            with server._SCAN_LOCK:
+                held.set()
+                release.wait(30)
+
+        holder = threading.Thread(target=scan_in_progress)
+        holder.start()
+        try:
+            self.assertTrue(held.wait(10))
+            result = {}
+            worker = threading.Thread(
+                target=lambda: result.update(page=server.search_sessions_page("widget", 50)))
+            worker.start()
+            worker.join(20)
+            self.assertFalse(worker.is_alive(), "search waited for the scan lock")
+            self.assertEqual([h["id"] for h in result["page"]["hits"]], expected)
+        finally:
+            release.set()
+            holder.join()
+
+    def test_long_codex_lines_are_read_only_when_they_can_be_messages(self):
+        # Real rollouts are compact JSON with the record type first. Long archive and event
+        # lines that mention a term are ruled out from their first bytes; a long message is
+        # read from disk and still found; an unfinished long last line is still skipped.
+        sid = "dddddddd-4444-4444-4444-dddddddddddd"
+        pad = "x" * (server.SEARCH_LONG_LINE_BYTES * 2)
+
+        def line(i, kind, payload):
+            return json.dumps({"timestamp": "2026-01-03T00:00:00Z", "ordinal": i,
+                               "type": kind, "payload": payload}, separators=(",", ":"))
+
+        def message(role, text):
+            return codex_message(role, text)["payload"]
+
+        rows = [
+            line(0, "session_meta", {"id": sid, "cwd": "/Users/alice/my-app",
+                                     "timestamp": "2026-01-03T00:00:00Z"}),
+            line(1, "compacted", {"message": pad + " archiveneedle longneedle"}),
+            line(2, "event_msg", {"type": "item_completed", "text": pad + " eventneedle"}),
+            line(3, "response_item", {"type": "function_call_output",
+                                      "output": pad + " outputneedle"}),
+            line(4, "response_item", message("user", pad + " longneedle in a real message")),
+        ]
+        day = self.root / "codex" / "2026" / "01" / "03"
+        day.mkdir(parents=True)
+        path = day / f"rollout-2026-01-03T00-00-00-{sid}.jsonl"
+        path.write_text("\n".join(rows) + "\n"
+                        + line(5, "response_item", message("user", pad + " tailneedle")))
+        server.scan_sessions()
+
+        seen = []
+        real = server._codex_long_line
+
+        def spy(p, offset):
+            got = real(p, offset)
+            seen.append(got is not None)
+            return got
+
+        with mock.patch.object(server, "_codex_long_line", side_effect=spy):
+            self.assertEqual(self.ids("longneedle"), [sid])
+            for needle in ("archiveneedle", "eventneedle", "outputneedle", "tailneedle"):
+                self.assertEqual(self.ids(needle), [], needle)
+        self.assertIn(True, seen)    # the long message was read in full
+        self.assertIn(False, seen)   # the archive, event and tool output lines were not
+
+    def test_later_terms_only_search_files_with_the_earlier_ones(self):
+        # "unsentqueueonly" is in one file, so "widget" is looked for in that file only.
+        handed = []
+        real = server.subprocess.run
+
+        def spy(cmd, *args, **kwargs):
+            if "-l" in cmd:
+                handed.append(cmd[cmd.index("--") + 1:])
+            return real(cmd, *args, **kwargs)
+
+        paths = [Path(m["jsonl_path"]) for m in server._cache.values()]
+        with mock.patch.object(server.subprocess, "run", side_effect=spy):
+            found = server._rg_prefilter(["unsentqueueonly", "widget"], paths)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(len(handed), 2)
+        self.assertGreater(len(handed[0]), 1)
+        self.assertEqual(handed[1], sorted(found) if len(found) > 1 else list(found))
+        self.assertEqual(self.ids("unsentqueueonly widget"), [CLAUDE_A])
 
     def test_bad_cursor_is_rejected(self):
         with self.assertRaises(ValueError):
