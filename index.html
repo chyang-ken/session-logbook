@@ -2900,7 +2900,8 @@ function renderList() {
     $count.textContent = '0 / ' + scopedItems.length + ' sessions';
     if (state.searchPending) {
       $count.textContent += state.searchHasPage ? ' · searching older…' : ' · searching…';
-      $list.innerHTML = `<div class="empty"><div class="empty-title">${state.searchHasPage ? 'Searching older sessions' : 'Searching'} for “${escapeHtml(state.q)}”…</div></div>`;
+      // The query is already in the search box; repeating it here only crowded the line.
+      $list.innerHTML = `<div class="empty"><div class="empty-title">${state.searchHasPage ? 'Searching older sessions…' : 'Searching…'}</div></div>`;
     } else if (state.searchError) {
       $count.textContent += ' · search failed';
       $list.innerHTML = `<div class="empty"><div class="empty-title">Search for “${escapeHtml(state.q)}” failed</div><div class="empty-hint">${escapeHtml(state.searchError)}</div><button class="empty-action" id="search-retry">Retry</button></div>`;
