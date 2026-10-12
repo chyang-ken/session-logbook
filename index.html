@@ -4983,6 +4983,19 @@ function bindConvFind(body, head) {
   applyScopeVisibility();  // attach once initially, ensuring consistent state after refresh / switching session
 }
 
+// marked's GFM mode also treats a single tilde pair as strikethrough, so a
+// range like "3~5 days and 10~20 files" rendered as crossed-out text with the
+// tildes gone. A lone "~" in agent replies means "about" or a range far more
+// often than strikethrough, so only the double-tilde form strikes through.
+// Returning nothing leaves the "~" to the text tokenizer; returning false
+// hands "~~" back to marked's own rule.
+function strikethroughNeedsDoubleTilde(src) {
+  return /^~(?!~)/.test(src) ? undefined : false;
+}
+if (typeof marked !== 'undefined') {
+  marked.use({ tokenizer: { del: strikethroughNeedsDoubleTilde } });
+}
+
 function renderMarkdown(text) {
   if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
     return escapeHtml(text);
