@@ -33,7 +33,7 @@ import re
 from datetime import datetime, timezone
 from sources import claude_events
 from sources.claude_text import (strip_leading_reminders, anchored_user_text, project_wake_words,
-                                 user_record_text, project_reply_text)
+                                 user_record_text, project_reply_text, session_message_text)
 
 
 def trunc(s, n):
@@ -491,18 +491,23 @@ def render_claude(path, records=None) -> str:
                 elif bt == 'tool_use':
                     nm = b.get('name', '?')
                     reply = project_reply_text(b)
-                    if reply is not None:
-                        kind = 'PROJECT_EDIT' if nm == 'mcp__hearthbot__update_message' else 'PROJECT_REPLY'
+                    message = session_message_text(b)
+                    if reply is not None or message is not None:
+                        kind = ('SESSION_MESSAGE' if message is not None else
+                                'PROJECT_EDIT' if nm == 'mcp__hearthbot__update_message' else 'PROJECT_REPLY')
                         tool_id = b.get('id')
                         inputs = b.get('input') or {}
                         target = inputs.get('message_id')
                         target = f"message_id={target}; " if isinstance(target, str) else ''
+                        if message is not None:
+                            target = json.dumps({k: v for k, v in inputs.items() if k != 'message'},
+                                                ensure_ascii=False) + '; '
                         header = (f"[L{ln}] ASSISTANT{side} {kind} "
                                   f"({target}tool_use_id={tool_id or 'unknown'}; ")
                         if isinstance(tool_id, str) and tool_id:
                             project_calls[tool_id] = (len(o_lines), header)
                         o_lines.append(header + 'result=unconfirmed):')
-                        o_lines.append(reply)
+                        o_lines.append(message if message is not None else reply)
                         continue
                     o_lines.append(f"[L{ln}]   🔧 {nm}{side}: {_tool_input_summary(nm, b.get('input'))}")
         elif t == 'system':

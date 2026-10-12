@@ -198,6 +198,53 @@ class ProjectReadingTests(unittest.TestCase):
         for text in (NOTE, EDIT, REPLY):
             self.assertIn(text, export)
 
+    def test_remote_session_messages_keep_full_input_and_separate_receipts(self):
+        message = 'Report to the parent, not human authorization.\n' * 40 + 'REMOTE_MESSAGE_END'
+        def send(n, text):
+            return record(n, 'assistant', message={'role': 'assistant', 'content': [{
+                'type': 'tool_use', 'id': f'tool-{n}',
+                'name': 'mcp__claude-code-remote__send_message',
+                'input': {'session_id': 'parent', 'visibility': 'sent_to_shared_agent',
+                          'message': text}}]})
+        self.rows = [user(1, 'Report the findings.'), send(2, message),
+                     receipt(3, 'tool-2'), send(4, message + '\nRejected attempt.'),
+                     receipt(5, 'tool-4', error=True), send(6, message + '\nPending attempt.')]
+        self.write()
+        turns = server.extract_conversation(self.path)['turns']
+        sends = [t for t in turns if t.get('name') == 'mcp__claude-code-remote__send_message']
+        self.assertEqual(len(sends), 3)
+        for turn in sends:
+            self.assertIn(message, turn['message'])
+            self.assertIn('parent', turn['message_context'])
+            self.assertIn('sent_to_shared_agent', turn['message_context'])
+        self.assertFalse(sends[0]['is_error'])
+        self.assertTrue(sends[1]['is_error'])
+        self.assertIn('Delivery rejected', sends[1]['result'])
+        self.assertNotIn('result', sends[2])
+        self.assertEqual([t['type'] for t in turns], ['user', 'tool', 'tool', 'tool'])
+        body = self.run_cli('context', self.path, skill=True)
+        self.assertEqual(body.count(message), 3)
+        for status in ('result=OK at L3', 'result=ERROR at L5', 'result=unconfirmed'):
+            self.assertIn(status, body)
+        self.assertIn('[L2] ASSISTANT SESSION_MESSAGE', body)
+        self.assertIn('sent_to_shared_agent', body)
+        self.assertEqual(len(anchored_transcript.turn_anchors(body)), 1)
+        delta = self.run_cli('follow', self.path, '--cursor-line', 3, '--delta')
+        self.assertIn('tool_use_id=tool-2', delta)
+        self.assertIn(message + '\nPending attempt.', delta)
+        export = server.extract_transcript(self.path)
+        self.assertEqual(export.count(message), 3)
+        self.assertIn('SESSION MESSAGE', export)
+
+    def test_remote_send_is_not_inferred_from_arbitrary_message_fields(self):
+        block = {'type': 'tool_use', 'name': 'mcp__other__send_message',
+                 'input': {'message': 'Not a known session message.'}}
+        self.assertIsNone(claude_text.session_message_text(block))
+        block['name'] = 'mcp__claude-code-remote__send_message'
+        for value in (None, {}, [], '', '   '):
+            block['input'] = {'message': value}
+            self.assertIsNone(claude_text.session_message_text(block))
+
     def test_queue_bookkeeping_and_duplicate_uuid_do_not_repeat_a_delivery(self):
         self.rows.insert(1, {'type': 'queue-operation', 'operation': 'enqueue', 'content': relay(NOTE)})
         self.rows.insert(3, copy.deepcopy(self.rows[2]))
