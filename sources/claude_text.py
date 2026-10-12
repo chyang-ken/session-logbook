@@ -67,10 +67,11 @@ def strip_leading_reminders(text):
 
 
 def normalize_record(row):
-    """Expose delivered human interruptions as user messages, not queue events.
+    """Expose delivered prompts as message records, keeping their actual origin.
 
     Desktop persists an interruption as an attachment after delivery. Its rendered
-    system-reminder is transport wrapping; the attachment prompt is the human text.
+    system-reminder is transport wrapping. A Project relay uses the same attachment
+    shape but remains a peer event, never a human turn.
     Keep original identity and coordinates so raw evidence still points to the source.
     """
     if not isinstance(row, dict) or row.get('type') != 'attachment' or row.get('isMeta'):
@@ -82,10 +83,31 @@ def normalize_record(row):
     prompt = attachment.get('prompt')
     if (attachment.get('type') != 'queued_command'
             or attachment.get('commandMode') != 'prompt'
-            or not isinstance(origin, dict) or origin.get('kind') != 'human'
+            or not isinstance(origin, dict)
+            or not (origin.get('kind') == 'human' or _project_relay_origin(origin))
             or not isinstance(prompt, str) or not prompt.strip()):
         return row
-    return dict(row, type='user', message={'role': 'user', 'content': prompt})
+    return dict(row, type='user', origin=origin, message={'role': 'user', 'content': prompt})
+
+
+def _project_relay_origin(origin):
+    return (isinstance(origin, dict) and origin.get('kind') == 'task-notification'
+            and origin.get('subkind') == 'projects-relay')
+
+
+def project_relay_text(row):
+    """A delivered Project peer message, including a coordinator's spawn brief.
+
+    Queue bookkeeping is not delivery. Explicit client provenance also recognizes a
+    relay whose wrapper is missing; it must never become a human turn in that case.
+    """
+    row = normalize_record(row)
+    if (not isinstance(row, dict) or row.get('type') != 'user'
+            or is_compact_summary(row)):
+        return ''
+    text = user_record_text(row, joiner='\n').lstrip()
+    return text if (text.startswith(PROJECT_RELAY_PREFIXES)
+                    or _project_relay_origin(row.get('origin'))) else ''
 
 
 def is_compact_summary(row):
@@ -141,7 +163,7 @@ def anchored_user_text(row):
     row = normalize_record(row)
     if not isinstance(row, dict) or row.get('type') != 'user':
         return ''
-    if row.get('isMeta') or is_compact_summary(row):
+    if row.get('isMeta') or is_compact_summary(row) or project_relay_text(row):
         return ''
     text = user_record_text(row)
     if not text.strip() or is_system_user_string(text.lstrip()):
@@ -223,7 +245,7 @@ def is_project_checkin(row):
     row = normalize_record(row)
     if not isinstance(row, dict) or row.get('type') != 'user' or row.get('isMeta'):
         return False
-    return user_record_text(row).lstrip().startswith(PROJECT_RELAY_PREFIXES)
+    return bool(project_relay_text(row))
 
 
 def human_turn_text(row):
@@ -260,6 +282,17 @@ PROJECT_REPLY_TOOLS = frozenset({
 })
 
 
+def project_reply_text(block):
+    """Full authored text of a known Project reply/edit call, not a delivery claim."""
+    if (not isinstance(block, dict) or block.get('type') != 'tool_use'
+            or not isinstance(block.get('name'), str)
+            or block.get('name') not in PROJECT_REPLY_TOOLS):
+        return None
+    inputs = block.get('input')
+    text = inputs.get('text') if isinstance(inputs, dict) else None
+    return text if isinstance(text, str) and text.strip() else None
+
+
 def assistant_search_words(content):
     """What the assistant said to the person, for matching a search.
 
@@ -274,8 +307,8 @@ def assistant_search_words(content):
             continue
         if block.get('type') == 'text':
             text = block.get('text')
-        elif block.get('type') == 'tool_use' and block.get('name') in PROJECT_REPLY_TOOLS:
-            text = (block.get('input') or {}).get('text')
+        elif block.get('type') == 'tool_use':
+            text = project_reply_text(block)
         else:
             continue
         if isinstance(text, str) and text:

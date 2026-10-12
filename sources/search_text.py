@@ -41,7 +41,8 @@ from sources import kimi as kimi_source
 from sources.claude_text import (assistant_search_words, human_turn_words, normalize_record,
                                  project_message_ids, project_wake_words)
 
-FORMAT = 1
+# 2: delivered Project peer messages are searchable in addition to human/assistant text.
+FORMAT = 2
 _MAGIC = "LOGBOOKSEARCHTEXT"
 _TO_CAPS = str.maketrans("0123456789abcdef", "ABCDEFGHIJKLMNOP")
 _FROM_CAPS = str.maketrans("ABCDEFGHIJKLMNOP", "0123456789abcdef")
@@ -69,6 +70,9 @@ def message_text(d):
     by the caller before this is asked. server._search_session uses this same function,
     so the matcher and the sidecar cannot disagree about which field holds the text.
     """
+    relay = claude_events.project_relay_words(d)
+    if relay:
+        return relay
     t = d.get("type")
     if t == "user":
         return human_turn_words(d)

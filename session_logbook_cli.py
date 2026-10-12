@@ -221,6 +221,9 @@ def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
 
     if source == "claude":
         row = server.normalize_record(row)
+        relay = claude_events.project_relay_words(row)
+        if relay:
+            return "peer", relay
         if row.get("isMeta"):
             return None, ""
         kind = row.get("type")
@@ -338,7 +341,7 @@ def search_sessions(
     include_subagents: bool = False,
     limit: int = 10,
 ) -> list[dict]:
-    """Search real user/assistant text with AND semantics and useful filters."""
+    """Search user/assistant text and labelled Project peers with AND semantics."""
     terms = [term.lower() for term in query.split() if term]
     if not terms:
         raise SessionLookupError("search query must not be empty")
@@ -1184,9 +1187,9 @@ def build_parser():
     search = sub.add_parser("search", help="search session message text")
     search.add_argument("query", help="one or more words; several are matched with AND "
                                       "across a session, and a session title or ID matches too")
-    search.add_argument("--role", choices=("any", "user", "assistant"), default="any",
-                        help="match only what a person typed, only what the model replied, "
-                             "or either")
+    search.add_argument("--role", choices=("any", "user", "assistant", "peer"), default="any",
+                        help="match human input, assistant replies, Project peer messages, "
+                             "or all searchable roles")
     search.add_argument("--source", choices=SUPPORTED_SOURCES, help="restrict to one agent client")
     search.add_argument("--project", help="project-path substring")
     search.add_argument("--since", help="ISO date/time or relative days such as 7d")

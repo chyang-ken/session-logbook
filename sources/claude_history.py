@@ -12,7 +12,7 @@ from pathlib import Path
 import sqlite3
 
 from sources import history_index
-from sources.claude_text import anchored_user_text, normalize_record
+from sources.claude_text import anchored_user_text, normalize_record, project_relay_text
 
 # 6: `user_turn` stopped counting the harness's user-role pseudo-messages (a background-task
 # notice, bash output, a teammate report, a slash-command injection). A cache written under 5
@@ -23,7 +23,9 @@ from sources.claude_text import anchored_user_text, normalize_record
 # (`isCompactSummary`), so [U#] moves down by one after every compaction in a Session.
 # 9: `user_turn` stopped counting a note a Claude Project's coordinator relayed into the
 # thread (<project_claude_message> / <relay>); it is another agent speaking.
-SCHEMA = 9
+# 10: delivered Project relay attachments normalize to peer message records. Cursor
+# remapping must reject inserted relays and changes between human and peer provenance.
+SCHEMA = 10
 _MEMORY = {}
 
 
@@ -42,6 +44,7 @@ def _payload(row):
                   'role': message.get('role'), 'content': message.get('content'),
                   'text': row.get('content'), 'attachment': row.get('attachment'),
                   'isMeta': row.get('isMeta'),
+                  'project_relay': bool(project_relay_text(row)),
                   'compactMetadata': row.get('compactMetadata')})
 
 

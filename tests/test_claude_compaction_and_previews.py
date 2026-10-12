@@ -178,8 +178,8 @@ class CompactionSummaryTests(Fixture):
 
     def test_a_history_cache_written_before_the_rule_is_rebuilt(self):
         path = self.session()
-        self.assertEqual(claude_history.SCHEMA, 9)
-        with patch.object(claude_history, 'SCHEMA', 8):
+        self.assertEqual(claude_history.SCHEMA, 10)
+        with patch.object(claude_history, 'SCHEMA', 9):
             claude_history._MEMORY.clear()
             with patch.object(claude_history, 'anchored_user_text',
                               lambda row: claude_text.user_record_text(row) if row.get('type') == 'user' else ''):

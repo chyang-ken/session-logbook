@@ -85,6 +85,13 @@ never automatically changes a supervisor's target. Explicit source-qualified fol
 checks copied record identity and rejects divergent cursors. See the
 [Claude history contract](docs/decisions/2026-09-19-claude-copied-history.md).
 
+Claude Projects saved in local Claude logs use the same commands. `context` retains full
+Project replies, edits, and coordinator messages, with original line anchors and tool-result
+status. `search --role peer` finds coordinator messages without treating them as user input;
+a full Project thread/message ID (`cmsg_...`) also works as a search query. The
+[Skill's Projects guide](skills/session-logbook/SKILL.md#claude-projects-complete-reading)
+explains full reading, late receipts, and incrementally following these conversations.
+
 The repository also ships one Agent Skill, [`session-logbook`](skills/session-logbook/SKILL.md),
 covering handoff, follow-up observation, evidence expansion, discovery, and historical mining.
 Install it by linking the repository copy into your Agent's Skill directory so the Skill and
