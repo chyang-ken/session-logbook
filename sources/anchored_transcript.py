@@ -33,7 +33,7 @@ import re
 from datetime import datetime, timezone
 from sources import claude_events
 from sources.claude_text import (strip_leading_reminders, anchored_user_text, project_wake_words,
-                                 user_record_text, PROJECT_RELAY_PREFIXES)
+                                 user_record_text, project_reply_text)
 
 
 def trunc(s, n):
@@ -373,6 +373,7 @@ def render_claude(path, records=None) -> str:
     o_lines = []
     queued_lines = {}
     delivered = {}
+    project_calls = {}
     errors = claude_events.ApiErrorRun()
 
     def close_error_run():
@@ -385,14 +386,11 @@ def render_claude(path, records=None) -> str:
         t = o.get('type')
         ts = (o.get('timestamp') or '')[:19]
         side = ' (subagent)' if o.get('isSidechain') else ''
+        relay = claude_events.project_relay_event(o)
+        if relay is not None:
+            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} TEAMMATE_MESSAGE: {relay['text']}")
+            continue
         if o.get('isMeta'):
-            # The brief a Project coordinator hands a worker it spawns is filed as the
-            # client's own record, yet it is the job the session was started for; the reader
-            # and the export show it, so the transcript an Agent reads must too. No [U#].
-            raw = user_record_text(o).lstrip() if t == 'user' else ''
-            if raw.startswith(PROJECT_RELAY_PREFIXES):
-                o_lines.append(f"[L{ln}]   ⚠ EVENT{side} TEAMMATE_MESSAGE: "
-                               + trunc(claude_events.parse_project_relay(raw), 300))
             continue
 
         handed_over = claude_events.delivered_text(o)
@@ -447,7 +445,15 @@ def render_claude(path, records=None) -> str:
                     is_error = bool(b.get('is_error'))
                     status = 'ERROR' if is_error else 'OK'
                     txt = _result_index(_result_text(b.get('content')), is_error)
-                    o_lines.append(f"[L{ln}]   ⮑ TOOL_RESULT {status}{side}: {txt}")
+                    tool_id = b.get('tool_use_id')
+                    call = project_calls.pop(tool_id, None) if isinstance(tool_id, str) else None
+                    if call is not None:
+                        slot, header = call
+                        o_lines[slot] = header + f"result={status} at L{ln}):"
+                    # A delta can contain the receipt without its earlier call. Retain the
+                    # native id so the consumer can join it to the previously read reply.
+                    reference = f" [tool_use_id={tool_id}]" if isinstance(tool_id, str) else ''
+                    o_lines.append(f"[L{ln}]   ⮑ TOOL_RESULT {status}{side}: {txt}{reference}")
             # One rule decides a human turn, for the reader, the card count and this banner
             # alike. A record may hold a tool result and typed text; the text keeps its [U#].
             txt = anchored_user_text(o)
@@ -484,6 +490,20 @@ def render_claude(path, records=None) -> str:
                         o_lines.append(f"[L{ln}]   💭 THINK{side}: {trunc(th, 1400)}")
                 elif bt == 'tool_use':
                     nm = b.get('name', '?')
+                    reply = project_reply_text(b)
+                    if reply is not None:
+                        kind = 'PROJECT_EDIT' if nm == 'mcp__hearthbot__update_message' else 'PROJECT_REPLY'
+                        tool_id = b.get('id')
+                        inputs = b.get('input') or {}
+                        target = inputs.get('message_id')
+                        target = f"message_id={target}; " if isinstance(target, str) else ''
+                        header = (f"[L{ln}] ASSISTANT{side} {kind} "
+                                  f"({target}tool_use_id={tool_id or 'unknown'}; ")
+                        if isinstance(tool_id, str) and tool_id:
+                            project_calls[tool_id] = (len(o_lines), header)
+                        o_lines.append(header + 'result=unconfirmed):')
+                        o_lines.append(reply)
+                        continue
                     o_lines.append(f"[L{ln}]   🔧 {nm}{side}: {_tool_input_summary(nm, b.get('input'))}")
         elif t == 'system':
             tx = (o.get('content') or o.get('text') or '')

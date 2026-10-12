@@ -44,11 +44,12 @@ import re
 from sources.claude_text import (PROJECT_RELAY_PREFIXES, SYSTEM_USER_PREFIXES_EVENT,
                                  SYSTEM_USER_PREFIXES_SKIP, interrupt_marker_text,
                                  is_compact_summary, is_project_status_wake, is_system_user_string,
-                                 user_record_text)
+                                 project_relay_text, user_record_text)
 
 __all__ = [
     'enqueued_text', 'delivered_text', 'notification_prompt', 'api_error_label',
     'parse_task_notification', 'parse_system_user_event', 'parse_project_relay',
+    'project_relay_event', 'project_relay_words',
     'extract_inner_xml',
     'ApiErrorRun', 'QUEUED_INPUT_ROLE', 'compact_summary_text',
 ]
@@ -190,19 +191,35 @@ def extract_inner_xml(text, tag):
 _RELAY_SENDER = re.compile(r'<relay\b[^>]*?\bfrom="([^"]*)"')
 
 
-def parse_project_relay(stripped):
+def parse_project_relay(stripped, include_sender=True):
     """A Project coordinator's note as one ``[sender] note`` line of text.
 
     Only the ``<note>`` body is kept: the wrapper, its session and thread ids and the
     sentence saying who wrote it are transport, and the sender label says the same thing.
     The body is HTML-escaped by the channel, as a wake envelope's is.
     """
+    if not stripped.startswith(PROJECT_RELAY_PREFIXES):
+        return ('[peer] ' if include_sender else '') + stripped
     sender = _RELAY_SENDER.search(stripped)
     note = extract_inner_xml(stripped, 'note')
     if not note.strip():
         note = re.sub(r'<[^>]*>', ' ', stripped)
-    note = html.unescape(note).strip() or '(empty)'
-    return '[%s] %s' % (sender.group(1) if sender else 'coordinator', note)
+    note = html.unescape(note).strip()
+    if not include_sender:
+        return note
+    return '[%s] %s' % (sender.group(1) if sender else 'coordinator', note or '(empty)')
+
+
+def project_relay_event(row):
+    """The shared full-text view of a delivered Project peer message."""
+    text = project_relay_text(row)
+    return {'type': 'teammate_message', 'text': parse_project_relay(text)} if text else None
+
+
+def project_relay_words(row):
+    """Search authored peer words without generated speaker/empty-body labels."""
+    text = project_relay_text(row)
+    return parse_project_relay(text, include_sender=False) if text else ''
 
 
 def parse_system_user_event(stripped):

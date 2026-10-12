@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import json
 import hashlib
+import html
 import sqlite3
 import os
 import re
@@ -23,7 +24,7 @@ from sources import claude_events
 from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
                                  anchored_user_text, assistant_search_words, human_turn_text,
                                  human_turn_words, is_project_checkin, is_system_user_string,
-                                 matches_project_id, project_message_ids, project_wake_words,
+                                 matches_project_id, project_message_ids, project_wake_words, project_reply_text,
                                  normalize_record, strip_leading_reminders)
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
@@ -65,7 +66,9 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 # user_turn_count for Project workers (single_turn stays false for a worker that got a
 # check-in); and a Project wake envelope is shown unwrapped in the card previews (first
 # message, recent_msgs), which the CLI title reads.
-CACHE_SCHEMA_VERSION = 16
+# 17: delivered Project relay attachments count as coordinator check-ins, so workers
+# with one human turn and a mid-turn check-in are no longer suspected one-shot runs.
+CACHE_SCHEMA_VERSION = 17
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -1097,6 +1100,9 @@ def _message_tool_text(name, inp):
     """
     if not isinstance(inp, dict) or not isinstance(name, str):
         return None
+    project_text = project_reply_text({'type': 'tool_use', 'name': name, 'input': inp})
+    if project_text is not None:
+        return project_text
     if not (name.endswith('__reply') or name.endswith('__post_message')):
         return None
     text = inp.get('text')
@@ -1351,6 +1357,11 @@ def extract_conversation(jsonl_path, include_rewound=False):
         if handed_over is not None:
             delivered[handed_over] = delivered.get(handed_over, 0) + 1
 
+        relay = claude_events.project_relay_event(d)
+        if relay is not None:
+            turns.append({**relay, 'text': _truncate_conv(relay['text'], CONV_USER_MAX), 'ts': ts})
+            continue
+
         error_label = claude_events.api_error_label(d)
         if error_label is not None:
             # Still the same run only when nothing else was rendered in between: the slot
@@ -1432,8 +1443,13 @@ def extract_conversation(jsonl_path, include_rewound=False):
                     sent = _message_tool_text(tname, block.get('input'))
                     if sent is not None:
                         text_parts.append(sent)
-                        # Its result is only a delivery receipt; skip it like a spawn's.
-                        pending_tools[tool_id] = {'__spawn__': True}
+                        if project_reply_text(block) is not None:
+                            # Preserve the receipt (especially failure) beside the authored
+                            # text. An outgoing call is not evidence of successful delivery.
+                            pending_tools[tool_id] = {
+                                'name': tname, 'summary': f'tool_use_id={tool_id}', 'ts': ts}
+                        else:
+                            pending_tools[tool_id] = {'__spawn__': True}
                         continue
                     pending_tools[tool_id] = {
                         'name': tname,
@@ -1647,6 +1663,11 @@ def extract_transcript(jsonl_path: Path) -> str:
         handed_over = claude_events.delivered_text(d)
         if handed_over is not None:
             delivered[handed_over] = delivered.get(handed_over, 0) + 1
+
+        relay = claude_events.project_relay_event(d)
+        if relay is not None:
+            out_blocks.append(_transcript_event_block(relay))
+            continue
 
         error_label = claude_events.api_error_label(d)
         if error_label is not None:
@@ -2628,6 +2649,8 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     # frequency terms that rg cannot narrow at file level but most lines still do not contain.
     prefilter_safe = not any(c in t for t in terms for c in '"\\\n\r\t')
 
+    raw_forms = {form.lower() for term in terms for form in _raw_forms(term)}
+
     # An Antigravity rewind abandons earlier rows inside the same file. Search the live
     # history only, in line with the reader and with the other branching sources.
     skip_lines = ag_source.abandoned_line_numbers(jsonl_path) if is_ag else frozenset()
@@ -2653,7 +2676,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                 # Supplied lines were already selected by ripgrep for containing a term.
                 if prefilter_safe and lines is None:
                     line_lower = line.lower()
-                    if not any(term in line_lower for term in terms):
+                    if not any(form in line_lower for form in raw_forms):
                         continue
                 try:
                     d = normalize_record(json.loads(line))
@@ -2694,7 +2717,8 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                             snippet = re.sub(r"\s+", " ", snippet)
                             prefix = "…" if start > 0 else ""
                             suffix = "…" if end < len(text) else ""
-                            role = "you" if t == "user" else ""
+                            role = ("peer" if claude_events.project_relay_event(d) is not None
+                                    else "you" if t == "user" else "")
                             candidate = {
                                 "text": prefix + snippet + suffix,
                                 "role": role,
@@ -2768,11 +2792,15 @@ def _record_queued_hit(queued, terms, term_found, queued_hits):
 def _raw_forms(term):
     """Return the forms a term can take in raw JSONL bytes.
 
-    JSON escapes quotes, backslashes and control characters inside strings, so a term
-    containing them appears in the file only in escaped form.
+    Project envelopes HTML-escape message bodies before JSON escapes the record.
+    Match both encodings in prefilters; the decoded body still decides the final hit.
     """
-    escaped = json.dumps(term, ensure_ascii=False)[1:-1]
-    return [term] if escaped == term else [term, escaped]
+    forms = []
+    for text in (term, html.escape(term, quote=False), html.escape(term, quote=True)):
+        for value in (text, json.dumps(text, ensure_ascii=False)[1:-1]):
+            if value not in forms:
+                forms.append(value)
+    return forms
 
 
 def _rg_prefilter(terms, paths):

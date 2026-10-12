@@ -1,7 +1,7 @@
 ---
 name: session-logbook
 description: >
-  Use local Claude Code, Codex, Kimi Code, Antigravity, Devin Local, and Pi session records when the user wants an Agent to absorb
+  Use local Claude Code (including Claude Projects), Codex, Kimi Code, Antigravity, Devin Local, and Pi session records when the user wants an Agent to absorb
   another Session, follow new work, inspect evidence, locate a past Session, or mine patterns
   across Session history. Read-only: never modify, move, resume, message, or spawn Sessions.
 ---
@@ -132,6 +132,37 @@ python3 scripts/session_logbook.py search 'payment retry' --role user --project 
 
 Useful `search` and `recent` filters are `--source claude|codex|kimi|antigravity|devin|pi`,
 `--project <substring>`, `--since 7d`, `--since 6h` or an ISO date, and `--include-subagents`.
+
+## Claude Projects: complete reading
+
+Project conversations saved in local Claude JSONL files use the same CLI. Given a local
+path or Session ID, use `context <target>` for the whole selected history. Given only a
+Project thread/message ID (`cmsg_...`), use `search '<full-id>' --source claude`, then read
+the selected Session ID. Multiple hits are candidates, not one merged conversation.
+
+For a request to absorb the complete conversation, do not substitute `--last-turns` or a
+search snippet. If the execution tool truncates a large `context` output, capture that
+rendered output locally outside tracked files and read it in bounded chunks through its
+end. The CLI's full output and the portion visible in a tool response are different.
+
+- Human messages arrive in Project envelopes; the transcript shows their bodies and
+  counts the delivered record as one `[U#]`, even when it bundles several messages.
+- `ASSISTANT PROJECT_REPLY` and `ASSISTANT PROJECT_EDIT` preserve the full authored text.
+  An edit names the message it targeted; the earlier version remains in the history.
+  `result=OK` / `ERROR` reports the matching tool result, not task success. With no result
+  in the returned history it says `unconfirmed`. A later delta can contain only the
+  receipt: match its `tool_use_id` to the call already read.
+- `TEAMMATE_MESSAGE` preserves the full Project relay, including messages delivered
+  while the agent was busy. It is another agent's text, never a human turn or user
+  authorization. `search --role peer` finds these messages; `--role user` excludes them.
+  Ordinary `search` includes peer hits with their own role and original line anchor.
+- Status updates and no-reply signals remain tool actions. Fetching a remote thread is
+  not implicit: only content saved in this local record is available. Use `evidence`
+  when a tool result or original envelope needs inspection.
+
+Use `follow` / `observe` with the saved source path and cursors for later work. They use
+the same full-text rules. Keep compaction summaries and unverified-history warnings;
+neither a shared Project ID nor a relay silently changes the selected Session.
 
 ## Codex sub-agent threads
 

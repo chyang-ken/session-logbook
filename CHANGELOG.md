@@ -7,6 +7,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- Claude Projects conversations are readable in full through the Agent CLI and its Skill. `context`, `follow`, `observe`, and anchored downloads retain complete Project replies, edits, and coordinator relays, including mid-turn delivery attachments. Replies and edits retain tool-call IDs and distinguish successful, failed, and unconfirmed tool results; edits do not erase earlier versions. Delivered relays are searchable with role `peer` (also included in ordinary search), never as human input. The browser reader and Markdown export share the message extraction. Known wrapped relays keep their existing human-turn counts; explicitly marked relays without wrappers no longer count as human turns, so `[U#]` can shift while `[L#]` stays fixed. Metadata, history, and search-text caches rebuild once for the new rules.
 - Search a rare phrase in seconds rather than tens of seconds. Search no longer reads every session file on each search: it keeps, per session file, a small plain-text copy of the words search can match (`~/.session-logbook/search-text/`, about 5% of the size of the session files; `SESSION_LOGBOOK_SEARCH_TEXT` moves it or, with `off`, turns it off) and reads only that. The copies are built in the background after the server starts (a few minutes, once) and appended to as sessions grow. Results are unchanged; a file without an up-to-date copy is searched the old way.
 
 ### Fixed

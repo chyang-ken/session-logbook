@@ -119,6 +119,19 @@ class SearchContractTests(unittest.TestCase):
             {"type": "attachment", "timestamp": "2026-01-01T00:00:06Z",
              "attachment": {"type": "queued_command", "commandMode": "prompt",
                             "origin": {"kind": "human"}, "prompt": "interruptneedle clarify criteria"}},
+            {"type": "attachment", "timestamp": "2026-01-01T00:00:07Z",
+             "attachment": {"type": "queued_command", "commandMode": "prompt",
+                            "origin": {"kind": "task-notification", "subkind": "projects-relay"},
+                            "prompt": '<relay from="coordinator"><note>peerattachmentneedle '
+                                      'review &amp; report &lt;gate&gt; R&amp;D</note></relay>'}},
+            claude_user('<project_claude_message thread_id="cmsg_peer"><relay from="coordinator">'
+                        '<note>peeruserneedle report</note></relay></project_claude_message>',
+                        "2026-01-01T00:00:08Z"),
+            {"type": "queue-operation", "operation": "enqueue",
+             "content": '<relay from="coordinator"><note>undeliveredpeerneedle</note></relay>'},
+            claude_assistant([{"type": "tool_use", "id": "projectreply", "name": "mcp__hearthbot__reply",
+                               "input": {"text": "Project answer " + "detail " * 30 + "projectanswerterminus"}}],
+                             "2026-01-01T00:00:09Z"),
         ] + [claude_user(f"repeat marker {i}", f"2026-01-01T00:01:0{i}Z") for i in range(5)]
         (project / f"{CLAUDE_A}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows_a))
         rows_b = [
@@ -226,6 +239,12 @@ class SearchContractTests(unittest.TestCase):
             ("launch.json", [], "tool input is not message text"),
             ("toolonlyneedle", [], "tool output is not message text"),
             ("interruptneedle criteria", [CLAUDE_A], "delivered human interruption is searchable"),
+            ("peerattachmentneedle report", [CLAUDE_A], "delivered mid-turn Project peer message"),
+            ("<gate>", [CLAUDE_A], "Project relay HTML entities are decoded before matching"),
+            ("R&D", [CLAUDE_A], "a Project peer phrase split by an HTML entity is searchable"),
+            ("peeruserneedle report", [CLAUDE_A], "Project peer message filed under the user role"),
+            ("undeliveredpeerneedle", [], "peer queue bookkeeping is not a delivered message"),
+            ("projectanswerterminus", [CLAUDE_A], "the end of a Project reply is searchable"),
             ("unsentqueueonly", [CLAUDE_A], "a queue entry nothing confirmed delivered is still findable"),
             ("codextoolonly", [], "Codex tool output is not message text"),
             ("sessionid", [CLAUDE_A], "key-like text inside a message still matches"),
@@ -256,6 +275,11 @@ class SearchContractTests(unittest.TestCase):
                 self.assertEqual([i for i in got if i in expected], expected)
                 extra = [i for i in got if i not in expected]
                 self.assertEqual(extra, [], f"unexpected sessions for {query!r}")
+
+    def test_project_peer_hits_keep_a_distinct_role_in_every_search_path(self):
+        for query in ('peerattachmentneedle', 'peeruserneedle'):
+            hits = self.search(query)
+            self.assertEqual(hits[0]['snippets'][0]['role'], 'peer')
 
     PAGING_QUERIES = ["widget", "orchard", "inherited goal", "billing retry",
                       "bbbbbbbb-2222", "liveneedle", "zzqxv-nothing", "devin widget audit"]

@@ -217,14 +217,15 @@ class CoordinatorNoteTests(Fixture):
         self.assertNotIn('<project_claude_message', rendered)
         self.assertNotIn('not by your user', rendered)
 
-    def test_a_note_is_nobodys_words_in_previews_search_and_the_cli(self):
+    def test_a_note_is_searchable_as_peer_but_not_as_the_person(self):
         path = self.worker()
         self.assertEqual(self.previews(path), [ASK])
-        self.assertEqual(server._search_session(path, ['gate']), [])
-        self.assertEqual(server._search_session(path, ['pricing']), [])
+        for term in ('gate', 'pricing'):
+            self.assertEqual(server._search_session(path, [term])[0]['role'], 'peer')
         self.assertTrue(server._search_session(path, ['checklist']))
-        said = [text for _, _, text in cli.iter_messages(path, 'claude')]
-        self.assertFalse([text for text in said if 'gate' in text or 'pricing' in text], said)
+        said = list(cli.iter_messages(path, 'claude'))
+        self.assertEqual([role for _, role, text in said if 'gate' in text or 'pricing' in text],
+                         ['peer', 'peer'])
 
     def test_a_queued_note_is_not_announced_as_queued_input(self):
         later = project_message('Undelivered check-in about the quince report')

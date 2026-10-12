@@ -1,5 +1,8 @@
 # 2026-10-05 — Claude Project threads: show the person's words, and a coordinator's note is not a human turn
 
+Updated on 2026-10-11 for complete Agent reading; see the extension below. The original
+observations describe the earlier implementation.
+
 Follows [2026-09-21 — A compaction summary is not a human turn](2026-09-21-compaction-summary-and-record-level-previews.md)
 and `a50d22d` ("make Claude Project worker sessions searchable"), which unwrapped the
 Project wake envelope for search only.
@@ -185,3 +188,42 @@ frozen list of 5,086 Session files:
 ## Commit
 
 Filled in by the implementing commit's message (`Decision: docs/decisions/2026-10-05-claude-project-threads.md`).
+
+## 2026-10-11 extension: complete Agent reading
+
+The maintainer approved implementing complete Claude Projects parsing, with priority on
+the CLI and the existing Skill. This authorizes a local implementation and validation;
+it does not authorize deployment or a change to the running installation.
+
+The earlier search support could find an entire channel reply while `context` reduced
+that same tool call to 80 characters of its input. Relays were limited to 300 characters
+in the anchored transcript, and mid-turn `queued_command` attachments with
+`origin.kind=task-notification`, `subkind=projects-relay`, and `commandMode=prompt` were
+omitted entirely. These are substantive conversation messages, not incidental tool data.
+
+The shared Claude reader now recognizes those attachments without making them human
+turns. The original wrappers remain supported; explicit relay provenance also keeps a
+message with a missing wrapper from becoming a user request. Replies and edits use the
+existing known Project tool names. Their text is kept whole, with tool IDs, edit target
+IDs, and the observed result (`OK`, `ERROR`, or `unconfirmed`). A delta receipt retains
+its tool ID when the original call is before the cursor. This is a history of attempts
+and results, not a reconstruction of the remote thread's current contents or task state.
+
+Delivered relays, including the spawn brief, are searchable under `peer`, both in the
+CLI and dashboard snippets; `--role user` never includes them. This intentionally extends
+the earlier search contract. Undelivered relay queue entries, unrelated attachments,
+status calls, and no-reply signals do not become peer conversation text. The same helper
+feeds search sidecars so the fast path cannot filter out the newly supported messages.
+
+We kept the existing Claude source, Skill, line anchors, selected-history logic, and
+session identities. A new source adapter or a separate Projects Skill would duplicate
+those mechanisms; promoting peers to users would lose the distinction between an
+agent's report and the maintainer's authorization. Removing wrappers from raw evidence
+or replacing edit history with the last version would also destroy useful evidence.
+
+Synthetic executable evidence is in `tests/test_claude_project_reading.py`, the peer
+queries in `tests/test_search_contract.py`, and the inserted-relay cursor guard in
+`tests/test_claude_history.py`. They cover the packaged Skill entry point, complete
+messages, late/failed/missing receipts, search roles and fast-path parity, human-turn
+slicing, duplicate record UUIDs, queue confirmation, compaction, rewinds, and raw evidence.
+No real transcript content is committed.
