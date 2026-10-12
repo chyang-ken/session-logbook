@@ -56,6 +56,9 @@ The nine below were written over two days by parallel branches and are best read
 
 ### Retrieval, sources and scope
 
+- [`2026-10-11-shared-claude-message-reader.md`](2026-10-11-shared-claude-message-reader.md)
+  — browser, Markdown and CLI/Skill share message interpretation and receipt pairing; only presentation remains separate.
+
 - [`2026-10-11-search-text-sidecars.md`](2026-10-11-search-text-sidecars.md)
   — search prefilters per-session text sidecars instead of reading the whole library.
 - [`2026-10-11-rare-phrase-search-latency.md`](2026-10-11-rare-phrase-search-latency.md)
