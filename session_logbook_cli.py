@@ -933,7 +933,7 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     elif item["source"] == "antigravity":
         body = anchored_transcript.render_antigravity(path)
     else:
-        body = anchored_transcript.render_claude(path, claude_history.records(path, after_line))
+        body = anchored_transcript.render_claude(path, first=after_line)
     # Pi can switch branches inside one file. Return the complete selected branch
     # on follow rather than pretending an append-only cursor preserves its context.
     if item["source"] not in {"pi", "claude"}:

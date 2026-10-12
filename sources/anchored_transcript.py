@@ -31,9 +31,7 @@ from pathlib import Path
 import json
 import re
 from datetime import datetime, timezone
-from sources import claude_events
-from sources.claude_text import (strip_leading_reminders, anchored_user_text, project_wake_words,
-                                 user_record_text, project_reply_text, session_message_text)
+from sources import claude_events, claude_messages
 
 
 def trunc(s, n):
@@ -361,19 +359,10 @@ def render_antigravity(path) -> str:
     return "\n".join(o_lines)
 
 
-def render_claude(path, records=None) -> str:
-    """Claude Code session jsonl → anchored-transcript string.
-
-    Records that are neither human speech nor model output - a queue entry, a background
-    task notice, a connection failure - are emitted as ⚠ EVENT marker lines carrying their
-    own [L#]. They never take a [U#]: an agent reading this transcript must be able to
-    trust that every [U#] is something the person actually said and the model actually saw.
-    """
-    uturn = 0
-    o_lines = []
-    queued_lines = {}
-    delivered = {}
-    project_calls = {}
+def render_claude(path, records=None, *, first=0) -> str:
+    """Present the shared Claude model with stable source-line and human-turn anchors."""
+    model = claude_messages.read(path, first=first, records=records)
+    o_lines, suppressed = [], set()
     errors = claude_events.ApiErrorRun()
 
     def close_error_run():
@@ -381,144 +370,89 @@ def render_claude(path, records=None) -> str:
             o_lines[errors.slot] = errors.prefix + errors.summary()
             errors.clear()
 
-    from sources import claude_history
-    for ln, o in (claude_history.records(path) if records is None else records):
-        t = o.get('type')
-        ts = (o.get('timestamp') or '')[:19]
-        side = ' (subagent)' if o.get('isSidechain') else ''
-        relay = claude_events.project_relay_event(o)
-        if relay is not None:
-            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} TEAMMATE_MESSAGE: {relay['text']}")
+    for entry in model['records']:
+        ln, kind = entry['line'], entry['kind']
+        ts = entry['timestamp'][:19]
+        side = ' (subagent)' if entry['sidechain'] else ''
+        if kind == 'relay':
+            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} TEAMMATE_MESSAGE: {entry['event']['text']}")
             continue
-        if o.get('isMeta'):
+        if entry['is_meta']:
             continue
-
-        handed_over = claude_events.delivered_text(o)
-        if handed_over is not None:
-            delivered[handed_over] = delivered.get(handed_over, 0) + 1
-
-        error_label = claude_events.api_error_label(o)
-        if error_label is not None:
+        if kind == 'api_error':
             prefix = f"[L{ln}]   ⚠ EVENT{side} API_ERROR: "
-            if errors.matches(error_label) and errors.slot == len(o_lines) - 1:
-                errors.extend(o.get('timestamp') or '')
+            if errors.matches(entry['text']) and errors.slot == len(o_lines) - 1:
+                errors.extend(entry['timestamp'])
             else:
                 close_error_run()
-                o_lines.append(prefix + error_label)
-                errors.open(error_label, o.get('timestamp') or '', len(o_lines) - 1, prefix)
-            continue
-
-        queued = claude_events.enqueued_text(o)
-        if queued is not None:
-            if claude_events.is_task_notification(queued):
-                text = ('TASK_NOTIFICATION (queued, delivery not confirmed): '
-                        + claude_events.parse_task_notification(queued))
-            elif claude_events.is_queued_human_text(queued):
-                text = 'QUEUED_INPUT (delivery not confirmed): ' + trunc(queued.strip(), 2000)
+                o_lines.append(prefix + entry['text'])
+                errors.open(entry['text'], entry['timestamp'], len(o_lines) - 1, prefix)
+        elif kind in ('notification', 'queued_input'):
+            if kind == 'notification':
+                label = 'TASK_NOTIFICATION' + ('' if entry['delivered'] else ' (queued, delivery not confirmed)')
+                text = entry['text']
             else:
+                label, text = 'QUEUED_INPUT (delivery not confirmed)', trunc(entry['text'], 2000)
+            if entry.get('suppressed'):
+                suppressed.add(len(o_lines))
+            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} {label}: {text}")
+        elif kind == 'compact_summary':
+            text = entry['text']
+            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} COMPACTION_SUMMARY (written by the client, {len(text)} chars):")
+            o_lines.append(text)
+        elif kind == 'user_record':
+            for item in entry['results']:
+                receipt = item['receipt']
+                status = 'ERROR' if receipt['is_error'] else 'OK'
+                parts = [('[binary/base64 stripped]' if part['kind'] == 'text' and _looks_b64(part['text'])
+                          else part['text']) for part in receipt['parts']]
+                txt = _result_index('\n'.join(parts), receipt['is_error'])
+                tool_id = receipt['id']
+                reference = f" [tool_use_id={tool_id}]" if isinstance(tool_id, str) else ''
+                o_lines.append(f"[L{ln}]   ⮑ TOOL_RESULT {status}{side}: {txt}{reference}")
+            body = entry['body']
+            if body is None:
                 continue
-            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} {text}")
-            queued_lines.setdefault(queued, []).append(len(o_lines) - 1)
-            continue
-
-        notification = claude_events.notification_prompt(o)
-        if notification is not None:
-            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} TASK_NOTIFICATION: "
-                           + claude_events.parse_task_notification(notification))
-            continue
-
-        summary = claude_events.compact_summary_text(o)
-        if summary is not None:
-            # The client's own account of the turns it compacted away. Kept whole, because
-            # a compaction can start a new file and then this is the only record in it of
-            # what came before; but it takes no [U#], because nobody said it.
-            o_lines.append(f"[L{ln}]   ⚠ EVENT{side} COMPACTION_SUMMARY "
-                           f"(written by the client, {len(summary)} chars):")
-            o_lines.append(summary)
-            continue
-
-        if t == 'user':
-            msg = o.get('message') or {}
-            content = msg.get('content')
-            for b in (content if isinstance(content, list) else ()):
-                if isinstance(b, dict) and b.get('type') == 'tool_result':
-                    is_error = bool(b.get('is_error'))
-                    status = 'ERROR' if is_error else 'OK'
-                    txt = _result_index(_result_text(b.get('content')), is_error)
-                    tool_id = b.get('tool_use_id')
-                    call = project_calls.pop(tool_id, None) if isinstance(tool_id, str) else None
-                    if call is not None:
-                        slot, header = call
-                        o_lines[slot] = header + f"result={status} at L{ln}):"
-                    # A delta can contain the receipt without its earlier call. Retain the
-                    # native id so the consumer can join it to the previously read reply.
-                    reference = f" [tool_use_id={tool_id}]" if isinstance(tool_id, str) else ''
-                    o_lines.append(f"[L{ln}]   ⮑ TOOL_RESULT {status}{side}: {txt}{reference}")
-            # One rule decides a human turn, for the reader, the card count and this banner
-            # alike. A record may hold a tool result and typed text; the text keeps its [U#].
-            txt = anchored_user_text(o)
-            if not txt:
-                # Pseudo-messages the harness files under the user role keep their
-                # content but lose their [U#]: a delivered task notice or an interrupt is
-                # still worth reading, and still is not something the person said.
-                raw = user_record_text(o)
-                event = claude_events.parse_system_user_event(raw.lstrip()) if raw else None
-                if event is not None:
-                    kind = ('INTERRUPTED' if event.get('kind') == 'interrupt' else
-                            {'system_notification': 'TASK_NOTIFICATION',
-                             'bash_output': 'BASH_OUTPUT'}.get(event['type'], 'TEAMMATE_MESSAGE'))
-                    o_lines.append(f"[L{ln}]   ⚠ EVENT{side} {kind}: {trunc(event['text'], 300)}")
-                continue
-            uturn = o.get('_logbook_user_turn', uturn + 1)
-            o_lines.append("")
-            o_lines.append(f"━━━━━━━━━━ [U{uturn}] [L{ln}] USER {ts}{side} ━━━━━━━━━━")
-            # A Project wake envelope is transport; the person's words are its messages.
-            o_lines.append(str(project_wake_words(txt)))
-        elif t == 'assistant':
-            msg = o.get('message') or {}
-            for b in (msg.get('content') or []):
-                if not isinstance(b, dict):
-                    continue
-                bt = b.get('type')
-                if bt == 'text':
-                    tx = (b.get('text') or '').strip()
-                    if tx:
-                        o_lines.append(f"[L{ln}] ASSISTANT{side}: {tx}")
-                elif bt == 'thinking':
-                    th = (b.get('thinking') or '').strip()
-                    if th:
-                        o_lines.append(f"[L{ln}]   💭 THINK{side}: {trunc(th, 1400)}")
-                elif bt == 'tool_use':
-                    nm = b.get('name', '?')
-                    reply = project_reply_text(b)
-                    message = session_message_text(b)
-                    if reply is not None or message is not None:
-                        kind = ('SESSION_MESSAGE' if message is not None else
-                                'PROJECT_EDIT' if nm == 'mcp__hearthbot__update_message' else 'PROJECT_REPLY')
-                        tool_id = b.get('id')
-                        inputs = b.get('input') or {}
-                        target = inputs.get('message_id')
+            if body['kind'] == 'event':
+                event = body['event']
+                label = ('INTERRUPTED' if event.get('kind') == 'interrupt' else
+                         {'system_notification': 'TASK_NOTIFICATION',
+                          'bash_output': 'BASH_OUTPUT'}.get(event['type'], 'TEAMMATE_MESSAGE'))
+                o_lines.append(f"[L{ln}]   ⚠ EVENT{side} {label}: {trunc(event['text'], 300)}")
+            elif body['kind'] == 'user':
+                o_lines.append('')
+                o_lines.append(f"━━━━━━━━━━ [U{body['user_turn']}] [L{ln}] USER {ts}{side} ━━━━━━━━━━")
+                o_lines.append(body['inline_text'])
+        elif kind == 'assistant':
+            for block in entry['blocks']:
+                if block['kind'] in ('text', 'thinking'):
+                    text = block['text'].strip()
+                    if text:
+                        o_lines.append(f"[L{ln}] ASSISTANT{side}: {text}" if block['kind'] == 'text' else
+                                       f"[L{ln}]   💭 THINK{side}: {trunc(text, 1400)}")
+                elif block['kind'] == 'tool':
+                    message = block['message']
+                    # Legacy generic channel tools retain their compact action display.
+                    if message and message['kind'] != 'CHANNEL_REPLY':
+                        target = message.get('message_id')
                         target = f"message_id={target}; " if isinstance(target, str) else ''
-                        if message is not None:
-                            target = json.dumps({k: v for k, v in inputs.items() if k != 'message'},
-                                                ensure_ascii=False) + '; '
-                        header = (f"[L{ln}] ASSISTANT{side} {kind} "
-                                  f"({target}tool_use_id={tool_id or 'unknown'}; ")
-                        if isinstance(tool_id, str) and tool_id:
-                            project_calls[tool_id] = (len(o_lines), header)
-                        o_lines.append(header + 'result=unconfirmed):')
-                        o_lines.append(message if message is not None else reply)
-                        continue
-                    o_lines.append(f"[L{ln}]   🔧 {nm}{side}: {_tool_input_summary(nm, b.get('input'))}")
-        elif t == 'system':
-            tx = (o.get('content') or o.get('text') or '')
-            if isinstance(tx, str) and tx.strip():
-                o_lines.append(f"[L{ln}] [SYSTEM]: {trunc(tx.strip(), 300)}")
+                        if message['audience'] == 'session':
+                            target = json.dumps(message['context'], ensure_ascii=False) + '; '
+                        header = (f"[L{ln}] ASSISTANT{side} {message['kind']} "
+                                  f"({target}tool_use_id={block['id'] or 'unknown'}; ")
+                        receipt = block['receipt']
+                        if receipt is not None and not receipt['is_meta']:
+                            status = 'ERROR' if receipt['is_error'] else 'OK'
+                            header += f"result={status} at L{receipt['line']}):"
+                        else:
+                            header += 'result=unconfirmed):'
+                        o_lines.extend([header, message['text']])
+                    else:
+                        o_lines.append(f"[L{ln}]   🔧 {block['name']}{side}: {_tool_input_summary(block['name'], block['input'])}")
+        elif kind == 'system':
+            o_lines.append(f"[L{ln}] [SYSTEM]: {trunc(entry['text'], 300)}")
     close_error_run()
-    dropped = set(claude_events.confirmed_queue_entries(queued_lines, delivered))
-    if dropped:
-        o_lines = [line for i, line in enumerate(o_lines) if i not in dropped]
-    return "\n".join(o_lines)
+    return "\n".join(line for i, line in enumerate(o_lines) if i not in suppressed)
 
 
 # ───────────────────────── Codex ─────────────────────────

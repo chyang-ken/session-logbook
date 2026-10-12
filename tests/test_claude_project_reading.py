@@ -15,7 +15,7 @@ from unittest.mock import patch
 import server
 import session_logbook_cli as cli
 from sources import (anchored_transcript, antigravity, claude_desktop, claude_events, claude_history,
-                     claude_text, codex, devin, kimi, pi, search_text)
+                     claude_messages, claude_text, codex, devin, kimi, pi, search_text)
 
 SID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 THREAD = 'cmsg_0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -127,6 +127,66 @@ class ProjectReadingTests(unittest.TestCase):
                 code = cli.main(list(map(str, args)))
         self.assertEqual(code, 0, output.getvalue())
         return output.getvalue()
+
+    def test_one_message_classifier_feeds_browser_export_cli_and_skill(self):
+        # A newly recognized message form must reach every reading surface by changing
+        # the shared classifier alone. No renderer may reinterpret its native input.
+        text = 'A newly supported transport keeps the whole message.\n' * 45 + 'FINAL_DETAIL'
+        self.rows = [user(1, 'Read this conversation.'),
+                     call(2, 'synthetic_transport', 'native field is deliberately different'),
+                     receipt(3, 'tool-2', error=True)]
+        self.write()
+        message = {'kind': 'SESSION_MESSAGE', 'audience': 'session', 'text': text,
+                   'context': {'session_id': '@parent'}}
+        with patch.object(claude_messages, '_message_call', return_value=message):
+            browser = server.extract_conversation(self.path)['turns']
+            sent = next(turn for turn in browser if 'message' in turn)
+            self.assertEqual(sent['message'], text)
+            self.assertTrue(sent['is_error'])
+            self.assertEqual(sent['result'], 'Delivery rejected')
+            markdown = server.extract_transcript(self.path)
+            self.assertIn(text, markdown)
+            self.assertIn('[ERROR]', markdown)
+            for skill in (False, True):
+                output = self.run_cli('context', self.path, skill=skill)
+                self.assertIn(text, output)
+                self.assertIn('tool_use_id=tool-2; result=ERROR at L3', output)
+                self.assertIn('Delivery rejected', output)
+
+    def test_shared_reader_pairs_only_receipts_inside_the_selected_slice(self):
+        model = claude_messages.read(self.path)
+        calls = [block for entry in model['records'] if entry['kind'] == 'assistant'
+                 for block in entry['blocks'] if block['kind'] == 'tool']
+        self.assertEqual([call['message']['text'] for call in calls],
+                         [REPLY, EDIT, 'A reply with no receipt yet.'])
+        self.assertEqual([call['receipt']['is_error'] if call['receipt'] else None
+                          for call in calls], [False, True, None])
+        delta = claude_messages.read(self.path, first=4)
+        receipt_only = delta['records'][0]['results'][0]
+        self.assertIsNone(receipt_only['call'])
+        self.assertEqual(receipt_only['receipt']['id'], 'tool-3')
+        self.assertEqual(receipt_only['receipt']['line'], 4)
+        call_only = claude_messages.read(self.path, records=list(claude_history.records(self.path))[:3])
+        self.assertIsNone(call_only['records'][-1]['blocks'][0]['receipt'])
+        missing_id = [(1, user(1, [{'type': 'tool_result', 'content': 'ok'}]))]
+        orphan = claude_messages.read(self.path, records=missing_id)['records'][0]['results'][0]
+        self.assertIsNone(orphan['receipt']['id'])
+        self.assertNotIn('tool_use_id=', anchored_transcript.render_claude(self.path, missing_id))
+
+    def test_proactive_skill_classification_is_shared_with_markdown_export(self):
+        text = 'Synthetic skill instructions.\n' * 30 + 'SKILL_FINAL_DETAIL'
+        self.rows = [user(1, 'Use the requested skill.'),
+                     call(2, 'Skill', '', skill='example'), receipt(3, 'tool-2'),
+                     user(4, [{'type': 'text', 'text': text}], isMeta=True)]
+        self.write()
+        browser = server.extract_conversation(self.path)['turns']
+        self.assertEqual([turn['type'] for turn in browser], ['user', 'tool', 'skill'])
+        self.assertEqual(browser[-1]['text'], text.strip())
+        self.assertIn('## SKILL\n' + text, server.extract_transcript(self.path))
+        # The CLI intentionally omits injected Skill instructions, not human messages.
+        output = self.run_cli('context', self.path)
+        self.assertNotIn('SKILL_FINAL_DETAIL', output)
+        self.assertEqual(len(anchored_transcript.turn_anchors(output)), 1)
 
     def test_skill_context_keeps_bodies_receipts_and_source_anchors(self):
         original = hashlib.sha256(self.path.read_bytes()).hexdigest()

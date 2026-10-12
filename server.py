@@ -20,12 +20,12 @@ from pathlib import Path
 
 from sources import antigravity as ag_source
 from sources import anchored_transcript
-from sources import claude_events
+from sources import claude_events, claude_messages
 from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXES_SKIP,
                                  anchored_user_text, assistant_search_words, human_turn_text,
                                  human_turn_words, is_project_checkin, is_system_user_string,
-                                 matches_project_id, project_message_ids, project_wake_words, project_reply_text,
-                                 normalize_record, session_message_text, strip_leading_reminders)
+                                 matches_project_id, project_message_ids, project_wake_words,
+                                 normalize_record)
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
 from sources import codex as codex_source
@@ -1090,25 +1090,6 @@ def extract_metadata(jsonl_path: Path):
 
 
 # ---------- Conversation extraction ----------
-def _message_tool_text(name, inp):
-    """The text an agent sent to the person through a messaging tool, else None.
-
-    Some harnesses deliver the agent's answer through a tool call (a project-thread
-    `..._reply` or `..._post_message` with a `text` argument) instead of a text block.
-    That text is the reply the person read, so the reader shows it as assistant text;
-    as a tool call it was cut to a one-line summary and could not be expanded.
-    """
-    if not isinstance(inp, dict) or not isinstance(name, str):
-        return None
-    project_text = project_reply_text({'type': 'tool_use', 'name': name, 'input': inp})
-    if project_text is not None:
-        return project_text
-    if not (name.endswith('__reply') or name.endswith('__post_message')):
-        return None
-    text = inp.get('text')
-    return text if isinstance(text, str) and text.strip() else None
-
-
 def _tool_input_summary(name, inp):
     """Generate a one-line summary of tool call input."""
     if not isinstance(inp, dict):
@@ -1135,24 +1116,6 @@ def _tool_input_summary(name, inp):
     for k, v in list(inp.items())[:3]:
         parts.append(f'{k}={str(v)[:80]}')
     return ', '.join(parts)[:CONV_TOOL_INPUT_MAX]
-
-
-def _tool_result_content(content):
-    """Extract plain text from tool_result content."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for b in content:
-            if isinstance(b, dict):
-                if b.get('type') == 'text':
-                    parts.append(b.get('text', ''))
-                elif b.get('type') == 'image':
-                    parts.append('[image]')
-            elif isinstance(b, str):
-                parts.append(b)
-        return '\n'.join(parts)
-    return str(content)
 
 
 def _truncate_conv(text, max_chars):
@@ -1183,55 +1146,7 @@ def _truncate_tool_result(text, max_chars):
 # QA is a converged-conversation subtype at the same level as USER / ASSISTANT, not a truncated tool_result.
 # Input = assistant tool_use(AskUserQuestion).input; output = the user jsonl row toolUseResult.
 
-def _build_qa_unit(tool_use_input, tool_use_result):
-    """Build a structured QA unit from AskUserQuestion input plus the user's answer snapshot.
-
-    Returns a dict with questions: [{question, header, multiSelect, options, answer, matched_option}].
-    matched_option is the index in options; None means a free-form Other answer, often the
-    most important user correction signal. Return None on upstream anomalies so the caller
-    can fall back to the generic tool path.
-    """
-    questions_in = (tool_use_input or {}).get('questions') or []
-    if not questions_in:
-        return None
-    answers_map = {}
-    if isinstance(tool_use_result, dict):
-        raw_ans = tool_use_result.get('answers')
-        if isinstance(raw_ans, dict):
-            answers_map = raw_ans
-
-    out_q = []
-    for q in questions_in:
-        if not isinstance(q, dict):
-            continue
-        qtext = q.get('question', '') or ''
-        options = []
-        for opt in q.get('options') or []:
-            if not isinstance(opt, dict):
-                continue
-            options.append({
-                'label': opt.get('label', '') or '',
-                'description': opt.get('description', '') or '',
-                'preview': opt.get('preview') or None,
-            })
-        ans = answers_map.get(qtext, '') or ''
-        matched = None
-        for i, opt in enumerate(options):
-            if opt['label'] and opt['label'] == ans:
-                matched = i
-                break
-        out_q.append({
-            'question': qtext,
-            'header': q.get('header', '') or '',
-            'multiSelect': bool(q.get('multiSelect')),
-            'options': options,
-            'answer': ans,
-            'matched_option': matched,
-        })
-
-    if not out_q:
-        return None
-    return {'questions': out_q}
+_build_qa_unit = claude_messages.build_qa
 
 
 def _format_qa_transcript(qa_unit):
@@ -1291,339 +1206,102 @@ def file_fingerprint(path) -> str:
 CONV_HARNESS_NOTE_MAX = 300
 
 
-def _claude_text_kind(record, skill_context):
-    """What a user-role record with readable text is, once commands and events are ruled out.
-
-    A person's message is `user` whatever preceded it - a built-in slash command such as
-    /clear announces no body, and the next thing typed used to be filed as its skill.
-    Whatever is left was written by the client (`isMeta`): the `skill` body when a command or
-    a Skill call announced one, otherwise a `harness_note` (the "[Image: source: ...]" line
-    after a pasted image, hook feedback, a message relayed from another session).
-    """
-    if anchored_user_text(record):
-        return 'user'
-    return 'skill' if skill_context else 'harness_note'
-
-
-def _claude_text_turn(record, text, skill_context, ts):
-    """The reader's turn for that record. A harness note is shown, short, as a system event:
-    it explains what the agent did next, and it is not something the person said."""
-    kind = _claude_text_kind(record, skill_context)
-    if kind == 'harness_note':
-        return {'type': 'system_notification', 'kind': kind,
-                'text': _truncate_conv(text, CONV_HARNESS_NOTE_MAX), 'ts': ts}
-    if kind == 'user':
-        text = project_wake_words(text)
-    return {'type': kind, 'text': _truncate_conv(text, CONV_USER_MAX), 'ts': ts}
-
-
 def extract_conversation(jsonl_path, include_rewound=False):
-    """Read the full JSONL and extract conversation content, filtering metadata/thinking/image and pairing tool_use with result."""
-    turns = []
-    pending_tools = {}  # tool_use_id -> {name, summary, ts}
-    next_is_skill = False  # previous user turn was <command-*>, so the next one is a skill injection
-    # When the AI calls the Skill tool proactively (not via a user slash command), the SDK
-    # inserts a user-array text block as the skill body after tool_result. That row used to
-    # be misclassified as user. Track it with a separate flag rather than reusing next_is_skill:
-    # tool_result does not consume it; the later skill body row consumes it.
-    pending_skill_body = False
-    total_lines = 0
-    project_path = None
-    custom_title = None  # title set by /title; take the last one in the file
-    # Queue entries are provisional: the same text usually shows up again as a delivered
-    # record further down the file, and then the delivered record is the one turn to show.
-    # Park each entry's turn here and drop the ones a delivery later accounts for, rather
-    # than guessing from the queue bookkeeping alone.
-    queued_turns = {}  # exact enqueued string -> turn dicts awaiting confirmation, in queue order
-    delivered = {}  # exact delivered string -> how many times it was handed over
+    """Present the shared Claude message model as browser turns."""
+    model = claude_messages.read(jsonl_path, include_rewound=include_rewound)
+    turns, suppressed = [], set()
     errors = claude_events.ApiErrorRun()
 
     def close_error_run():
-        """Write a finished retry run's total into the slot reserved at its first record."""
         if errors.count:
             errors.slot['text'] = errors.summary()
             errors.slot['retries'] = errors.count
             errors.clear()
 
-    total_lines = claude_history.summary(jsonl_path)['physical_lines']
-    for _line_number, d in claude_history.records(jsonl_path, include_rewound=include_rewound):
-        t = d.get('type')
-        ts = d.get('timestamp', '')
-
-        if project_path is None and d.get('cwd'):
-            project_path = d['cwd']
-
-        handed_over = claude_events.delivered_text(d)
-        if handed_over is not None:
-            delivered[handed_over] = delivered.get(handed_over, 0) + 1
-
-        relay = claude_events.project_relay_event(d)
-        if relay is not None:
-            turns.append({**relay, 'text': _truncate_conv(relay['text'], CONV_USER_MAX), 'ts': ts})
-            continue
-
-        error_label = claude_events.api_error_label(d)
-        if error_label is not None:
-            # Still the same run only when nothing else was rendered in between: the slot
-            # this run reserved is still the newest turn.
-            if errors.matches(error_label) and turns and turns[-1] is errors.slot:
+    for entry in model['records']:
+        kind, ts = entry['kind'], entry['timestamp']
+        if kind == 'api_error':
+            if errors.matches(entry['text']) and turns and turns[-1] is errors.slot:
                 errors.extend(ts)
             else:
                 close_error_run()
-                slot = {'type': 'api_error', 'text': error_label, 'retries': 1, 'ts': ts}
+                slot = {'type': 'api_error', 'text': entry['text'], 'retries': 1, 'ts': ts}
                 turns.append(slot)
-                errors.open(error_label, ts, slot)
-            continue
-
-        queued = claude_events.enqueued_text(d)
-        if queued is not None:
-            if claude_events.is_task_notification(queued):
-                turn = {'type': 'system_notification', 'delivered': False,
-                        'text': _truncate_conv(claude_events.parse_task_notification(queued), CONV_USER_MAX),
-                        'ts': ts}
-            elif claude_events.is_queued_human_text(queued):
-                turn = {'type': 'queued_input',
-                        'text': _truncate_conv(queued.strip(), CONV_USER_MAX), 'ts': ts}
-            else:
-                continue  # an injected block the reader already shows where it was delivered
+                errors.open(entry['text'], ts, slot)
+        elif kind == 'relay':
+            event = entry['event']
+            turns.append({**event, 'text': _truncate_conv(event['text'], CONV_USER_MAX), 'ts': ts})
+        elif kind in ('notification', 'queued_input', 'compact_summary'):
+            turn = {'type': 'system_notification' if kind == 'notification' else kind,
+                    'text': _truncate_conv(entry['text'], CONV_USER_MAX), 'ts': ts}
+            if kind == 'notification':
+                turn['delivered'] = entry['delivered']
             turns.append(turn)
-            queued_turns.setdefault(queued, []).append(turn)
-            continue
-
-        notification = claude_events.notification_prompt(d)
-        if notification is not None:
-            turns.append({'type': 'system_notification', 'delivered': True,
-                          'text': _truncate_conv(claude_events.parse_task_notification(notification), CONV_USER_MAX),
-                          'ts': ts})
-            continue
-
-        if t == 'custom-title':
-            cleaned = _clean_custom_title(d.get('customTitle'))
-            if cleaned:
-                custom_title = cleaned
-            continue
-
-        if t == 'assistant':
-            content = d.get('message', {}).get('content', [])
-            if not isinstance(content, list):
-                continue
+            if entry.get('suppressed'):
+                suppressed.add(id(turn))
+        elif kind == 'assistant':
             text_parts = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                bt = block.get('type')
-                if bt == 'text':
-                    txt = block.get('text', '')
-                    if txt:
-                        text_parts.append(txt)
-                elif bt == 'tool_use':
-                    tool_id = block.get('id', '')
-                    tname = block.get('name', '?')
-                    # Translate Agent (subagent dispatch) into a subagent_spawn turn. The
-                    # corresponding tool_result is not expanded yet, but the tool_id must be
-                    # recorded with a spawn sentinel so the later tool_result branch skips it.
-                    # Otherwise it falls through to the unknown-tool fallback and renders an
-                    # anonymous tool block alongside subagent_spawn, violating spec section 6.2.
-                    if tname == 'Agent':
-                        inp = block.get('input', {}) or {}
-                        sub_name = inp.get('subagent_type') or 'general-purpose'
-                        desc = inp.get('description') or ''
-                        if not desc:
-                            # Fallback: when description is missing, use the first 120 prompt characters
-                            prompt = inp.get('prompt', '') or ''
-                            desc = prompt[:120]
-                        turns.append({
-                            'type': 'subagent_spawn',
-                            'name': sub_name,
-                            'description': _truncate_conv(desc, 500),
-                            'ts': ts,
-                        })
-                        pending_tools[tool_id] = {'__spawn__': True}
-                        continue
-                    message = session_message_text(block)
-                    if message is not None:
-                        # Emit at the call even when no receipt has arrived. A later
-                        # tool_result updates this same row instead of replacing its input.
-                        message_turn = {
-                            'type': 'tool', 'name': tname,
-                            'summary': _tool_input_summary(tname, block['input']),
-                            'message': message,
-                            'message_context': json.dumps(
-                                {k: v for k, v in block['input'].items() if k != 'message'},
-                                ensure_ascii=False),
-                            'ts': ts,
-                        }
-                        turns.append(message_turn)
-                        pending_tools[tool_id] = {'__message_turn__': message_turn}
-                        continue
-                    sent = _message_tool_text(tname, block.get('input'))
-                    if sent is not None:
-                        text_parts.append(sent)
-                        if project_reply_text(block) is not None:
-                            # Preserve the receipt (especially failure) beside the authored
-                            # text. An outgoing call is not evidence of successful delivery.
-                            pending_tools[tool_id] = {
-                                'name': tname, 'summary': f'tool_use_id={tool_id}', 'ts': ts}
-                        else:
-                            pending_tools[tool_id] = {'__spawn__': True}
-                        continue
-                    pending_tools[tool_id] = {
-                        'name': tname,
-                        'summary': _tool_input_summary(
-                            tname, block.get('input', {})),
-                        'ts': ts,
-                        # Only AskUserQuestion keeps raw input for later QA unit synthesis
-                        '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
-                    }
-                    # AI called the Skill tool: mark the next user-array text block as the skill body
-                    if tname == 'Skill':
-                        pending_skill_body = True
-                # thinking: skip entirely
+            for block in entry['blocks']:
+                if block['kind'] == 'text':
+                    text_parts.append(block['text'])
+                elif block['kind'] == 'tool':
+                    message = block['message']
+                    if 'spawn' in block:
+                        turns.append({'type': 'subagent_spawn', 'name': block['spawn']['name'],
+                                      'description': _truncate_conv(block['spawn']['description'], 500), 'ts': ts})
+                    elif message and message['audience'] == 'session':
+                        turn = {'type': 'tool', 'name': block['name'],
+                                'summary': _tool_input_summary(block['name'], block['input']),
+                                'message': message['text'],
+                                'message_context': json.dumps(message['context'], ensure_ascii=False), 'ts': ts}
+                        if block['receipt'] is not None:
+                            receipt = block['receipt']
+                            turn.update(result=_truncate_tool_result(receipt['text'], CONV_TOOL_RESULT_MAX),
+                                        is_error=receipt['is_error'])
+                        turns.append(turn)
+                    elif message:
+                        text_parts.append(message['text'])
             if text_parts:
-                turns.append({
-                    'type': 'assistant',
-                    'text': _truncate_conv(
-                        '\n'.join(text_parts), CONV_ASSISTANT_MAX),
-                    'ts': ts,
-                })
-
-        elif t == 'user':
-            summary = claude_events.compact_summary_text(d)
-            if summary is not None:
-                # The client's account of the turns it compacted away. Not a `user` turn -
-                # nobody said it - and not a one-line event either: it is the only record
-                # of what the agent still knew afterwards, so the reader keeps it, folded.
-                turns.append({'type': 'compact_summary',
-                              'text': _truncate_conv(summary, CONV_USER_MAX),
-                              'ts': ts})
-                next_is_skill = False
-                pending_skill_body = False
+                turns.append({'type': 'assistant',
+                              'text': _truncate_conv('\n'.join(text_parts), CONV_ASSISTANT_MAX), 'ts': ts})
+        elif kind == 'user_record':
+            for result in entry['results']:
+                call, receipt = result['call'], result['receipt']
+                message = call['message'] if call else None
+                if call and ('spawn' in call or (message and (
+                        message['audience'] == 'session' or message['kind'] == 'CHANNEL_REPLY'))):
+                    continue
+                if receipt['qa']:
+                    turns.append({'type': 'qa', 'questions': receipt['qa']['questions'],
+                                  'ts': call['timestamp']})
+                    continue
+                summary = (f"tool_use_id={call['id']}" if message else
+                           _tool_input_summary(call['name'], call['input']) if call else '')
+                turns.append({'type': 'tool', 'name': call['name'] if call else '?',
+                              'summary': summary, 'ts': call['timestamp'] if call else ts,
+                              'result': _truncate_tool_result(receipt['text'], CONV_TOOL_RESULT_MAX),
+                              'is_error': receipt['is_error']})
+            body = entry['body']
+            if body is None:
                 continue
-            msg_content = d.get('message', {}).get('content')
-            if isinstance(msg_content, str):
-                text = strip_leading_reminders(msg_content).strip()
-                if not text:
-                    next_is_skill = False
-                elif text.startswith('<command-'):
-                    # slash-command injection: the next user message is the skill body
-                    next_is_skill = True
-                elif text.startswith(('<local-command-', '<system-reminder>')):
-                    # silent injection only: skip without affecting next_is_skill
-                    next_is_skill = False
-                elif (event := _parse_system_event(text)) is not None:
-                    # System events (task-notification / bash output / teammate) become
-                    # independent turns, not user/skill, and do not affect next_is_skill.
-                    next_is_skill = False
-                    turns.append({
-                        **event,
-                        'text': _truncate_conv(event['text'], CONV_USER_MAX),
-                        'ts': ts,
-                    })
-                else:
-                    turns.append(_claude_text_turn(d, text, next_is_skill, ts))
-                    next_is_skill = False
-            elif isinstance(msg_content, list):
-                user_texts = []
-                for block in msg_content:
-                    if not isinstance(block, dict):
-                        continue
-                    bt = block.get('type')
-                    if bt == 'tool_result':
-                        tool_id = block.get('tool_use_id', '')
-                        raw = _tool_result_content(
-                            block.get('content', ''))
-                        is_err = block.get('is_error', False)
-                        if tool_id in pending_tools:
-                            tc = pending_tools.pop(tool_id)
-                            # Agent (subagent spawn) tool_result is not expanded yet
-                            if tc.get('__spawn__'):
-                                continue
-                            if '__message_turn__' in tc:
-                                tc['__message_turn__'].update(
-                                    result=_truncate_tool_result(raw, CONV_TOOL_RESULT_MAX),
-                                    is_error=is_err)
-                                continue
-                            # AskUserQuestion becomes a QA turn, a conversation subtype, not a truncated tool path
-                            if tc['name'] == 'AskUserQuestion':
-                                qa_unit = _build_qa_unit(
-                                    tc.get('_raw_input'),
-                                    d.get('toolUseResult'))
-                                if qa_unit:
-                                    turns.append({
-                                        'type': 'qa',
-                                        'questions': qa_unit['questions'],
-                                        'ts': tc.get('ts', ts),
-                                    })
-                                    continue
-                                # fallback: on parse failure, use the tool path
-                            tc.pop('_raw_input', None)
-                            tc['result'] = _truncate_tool_result(
-                                raw, CONV_TOOL_RESULT_MAX)
-                            tc['is_error'] = is_err
-                            turns.append({'type': 'tool', **tc})
-                        else:
-                            turns.append({
-                                'type': 'tool', 'name': '?',
-                                'summary': '',
-                                'result': _truncate_tool_result(
-                                    raw, CONV_TOOL_RESULT_MAX),
-                                'is_error': is_err, 'ts': ts,
-                            })
-                    elif bt == 'text':
-                        txt = strip_leading_reminders(block.get('text', ''))
-                        if txt and not txt.lstrip().startswith(
-                                '<system-reminder>'):
-                            user_texts.append(txt)
-                    elif bt == 'image':
-                        user_texts.append('[image]')
-                if user_texts:
-                    full = '\n'.join(user_texts).strip()
-                    if not full or full.startswith((
-                            '<local-command-', '<command-')):
-                        next_is_skill = False
-                        pending_skill_body = False
-                    elif (event := _parse_system_event(full)) is not None:
-                        # The interrupt marker the client writes on Esc, and any other
-                        # pseudo-message that arrives as blocks: an event, not user input.
-                        turns.append({
-                            **event,
-                            'text': _truncate_conv(event['text'], CONV_USER_MAX),
-                            'ts': ts,
-                        })
-                        next_is_skill = False
-                        pending_skill_body = False
-                    elif d.get('isMeta') and full == 'Continue from where you left off.':
-                        # Resume prompt injected by --resume / Continue button. Only the
-                        # client's own record counts: a person may type the same sentence.
-                        turns.append({
-                            'type': 'system_notification',
-                            'text': 'Continue from where you left off',
-                            'ts': ts,
-                        })
-                        next_is_skill = False
-                        pending_skill_body = False
-                    else:
-                        skill_context = (next_is_skill or pending_skill_body
-                                         or full.startswith('Base directory for this skill: '))
-                        turns.append(_claude_text_turn(d, full, skill_context, ts))
-                        next_is_skill = False
-                        pending_skill_body = False
-                else:
-                    # Pure tool_result messages (for example Skill launch reports) do not
-                    # consume pending_skill_body / next_is_skill; the following real text inherits it.
-                    pass
-
+            if body['kind'] == 'event':
+                event = body['event']
+                turns.append({**event, 'text': _truncate_conv(event['text'], CONV_USER_MAX), 'ts': ts})
+            elif body.get('resume_note'):
+                turns.append({'type': 'system_notification', 'text': 'Continue from where you left off', 'ts': ts})
+            elif body['kind'] == 'harness_note':
+                turns.append({'type': 'system_notification', 'kind': 'harness_note',
+                              'text': _truncate_conv(body['text'], CONV_HARNESS_NOTE_MAX), 'ts': ts})
+            else:
+                turns.append({'type': body['kind'], 'text': _truncate_conv(body['text'], CONV_USER_MAX), 'ts': ts})
     close_error_run()
-    confirmed = {id(turn) for turn in claude_events.confirmed_queue_entries(queued_turns, delivered)}
-    if confirmed:
-        turns = [turn for turn in turns if id(turn) not in confirmed]
-
+    titles = [title for raw in model['custom_titles'] if (title := _clean_custom_title(raw))]
     return {
         'id': jsonl_path.stem,
-        'project_path': project_path or '',
-        'total_lines': total_lines,
-        'turns': turns,
-        'custom_title': custom_title,
+        'project_path': model['project_path'],
+        'total_lines': claude_history.summary(jsonl_path)['physical_lines'],
+        'turns': [turn for turn in turns if id(turn) not in suppressed],
+        'custom_title': titles[-1] if titles else None,
         'source': 'claude',
         'include_rewound': include_rewound,
         'jsonl_path': str(jsonl_path),
@@ -1643,31 +1321,10 @@ def _transcript_event_block(event):
     return f'## {label}\n{event["text"]}\n'
 
 
-def _transcript_text_block(record, text, skill_context):
-    """The export block for a user-role record, labelled by the same rule the reader uses."""
-    kind = _claude_text_kind(record, skill_context)
-    if kind == 'harness_note':
-        return '## SYSTEM\n%s\n' % _truncate_conv(text, CONV_HARNESS_NOTE_MAX)
-    if kind == 'user':
-        text = project_wake_words(text)
-    return '## %s\n%s\n' % (kind.upper(), text)
-
-
 def extract_transcript(jsonl_path: Path) -> str:
-    """Token-optimized export: v1 markdown shape, untruncated user/assistant, 200-char tool_result.
-
-    The key difference from extract_conversation is that messages are the core signal in
-    export and are never truncated.
-    """
-    out_blocks = []
-    pending_tools = {}
-    next_is_skill = False
-    project_path = None
-    total_lines = 0
-    # Same three event kinds as the reader, same confirmation rule. An export that quietly
-    # dropped them would read as though the agent had seen everything the person typed.
-    queued_blocks = {}
-    delivered = {}
+    """Present the shared Claude model as Markdown, retaining authored text in full."""
+    model = claude_messages.read(jsonl_path)
+    out_blocks, suppressed = [], set()
     errors = claude_events.ApiErrorRun()
 
     def close_error_run():
@@ -1675,169 +1332,74 @@ def extract_transcript(jsonl_path: Path) -> str:
             out_blocks[errors.slot] = '## CONNECTION-ERROR\n%s\n' % errors.summary()
             errors.clear()
 
-    total_lines = claude_history.summary(jsonl_path)['physical_lines']
-    for _line_number, d in claude_history.records(jsonl_path):
-        t = d.get('type')
-        if project_path is None and d.get('cwd'):
-            project_path = d['cwd']
-
-        handed_over = claude_events.delivered_text(d)
-        if handed_over is not None:
-            delivered[handed_over] = delivered.get(handed_over, 0) + 1
-
-        relay = claude_events.project_relay_event(d)
-        if relay is not None:
-            out_blocks.append(_transcript_event_block(relay))
-            continue
-
-        error_label = claude_events.api_error_label(d)
-        if error_label is not None:
-            if errors.matches(error_label) and errors.slot == len(out_blocks) - 1:
-                errors.extend(d.get('timestamp', ''))
+    for entry in model['records']:
+        kind = entry['kind']
+        if kind == 'api_error':
+            if errors.matches(entry['text']) and errors.slot == len(out_blocks) - 1:
+                errors.extend(entry['timestamp'])
             else:
                 close_error_run()
-                out_blocks.append('## CONNECTION-ERROR\n%s\n' % error_label)
-                errors.open(error_label, d.get('timestamp', ''), len(out_blocks) - 1)
-            continue
-
-        queued = claude_events.enqueued_text(d)
-        if queued is not None:
-            if claude_events.is_task_notification(queued):
-                block = ('## NOTIFICATION (queued, delivery not confirmed)\n%s\n'
-                         % claude_events.parse_task_notification(queued))
-            elif claude_events.is_queued_human_text(queued):
-                block = ('## QUEUED-INPUT (delivery not confirmed)\n%s\n' % queued.strip())
-            else:
-                continue
-            out_blocks.append(block)
-            queued_blocks.setdefault(queued, []).append(len(out_blocks) - 1)
-            continue
-
-        notification = claude_events.notification_prompt(d)
-        if notification is not None:
-            out_blocks.append('## NOTIFICATION\n%s\n'
-                              % claude_events.parse_task_notification(notification))
-            continue
-
-        if t == 'assistant':
-            content = d.get('message', {}).get('content', [])
-            if not isinstance(content, list):
-                continue
+                out_blocks.append('## CONNECTION-ERROR\n%s\n' % entry['text'])
+                errors.open(entry['text'], entry['timestamp'], len(out_blocks) - 1)
+        elif kind == 'relay':
+            out_blocks.append(_transcript_event_block(entry['event']))
+        elif kind in ('notification', 'queued_input', 'compact_summary'):
+            label = {'notification': 'NOTIFICATION', 'queued_input': 'QUEUED-INPUT',
+                     'compact_summary': 'COMPACTION SUMMARY'}[kind]
+            if kind == 'notification' and not entry['delivered']:
+                label += ' (queued, delivery not confirmed)'
+            elif kind == 'queued_input':
+                label += ' (delivery not confirmed)'
+            if entry.get('suppressed'):
+                suppressed.add(len(out_blocks))
+            out_blocks.append(f"## {label}\n{entry['text']}\n")
+        elif kind == 'assistant':
             text_parts = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                bt = block.get('type')
-                if bt == 'text':
-                    txt = block.get('text', '')
-                    if txt:
-                        text_parts.append(txt)
-                elif bt == 'tool_use':
-                    tname = block.get('name', '?')
-                    sent = _message_tool_text(tname, block.get('input'))
-                    if sent is not None:
-                        text_parts.append(sent)
-                    pending_tools[block.get('id', '')] = {
-                        'name': tname,
-                        'summary': _tool_input_summary(
-                            tname, block.get('input', {})),
-                        # Keep raw AskUserQuestion input for QA synthesis
-                        '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
-                    }
-                    message = session_message_text(block)
-                    if message is not None:
-                        context = json.dumps(
-                            {k: v for k, v in block['input'].items() if k != 'message'},
-                            ensure_ascii=False)
-                        call_id = block.get('id', 'unknown')
-                        out_blocks.append(
-                            f'## SESSION MESSAGE (tool_use_id={call_id}; {context})\n{message}\n')
-                        pending_tools[block.get('id', '')]['summary'] = f'tool_use_id={call_id}'
+            for block in entry['blocks']:
+                if block['kind'] == 'text':
+                    text_parts.append(block['text'])
+                elif block['kind'] == 'tool' and block['message']:
+                    message = block['message']
+                    if message['audience'] == 'session':
+                        context = json.dumps(message['context'], ensure_ascii=False)
+                        out_blocks.append(f"## SESSION MESSAGE (tool_use_id={block['id']}; {context})\n{message['text']}\n")
+                    else:
+                        text_parts.append(message['text'])
             if text_parts:
                 out_blocks.append('## ASSISTANT\n' + '\n'.join(text_parts) + '\n')
-
-        elif t == 'user':
-            summary = claude_events.compact_summary_text(d)
-            if summary is not None:
-                # The client's account of the turns it compacted away: kept whole, as the
-                # export keeps every message, and labelled as what it is rather than USER.
-                out_blocks.append('## COMPACTION SUMMARY\n%s\n' % summary)
-                next_is_skill = False
+        elif kind == 'user_record':
+            for item in entry['results']:
+                call, receipt = item['call'], item['receipt']
+                if receipt['qa']:
+                    out_blocks.append('## QA\n' + _format_qa_transcript(receipt['qa']) + '\n')
+                    continue
+                result = receipt['text'].strip()
+                if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
+                    n = TRANSCRIPT_TOOL_RESULT_MAX
+                    lines = result.count('\n') + 1
+                    result = result[:n].rstrip() + f' …[+{len(result)-n} chars, ~{lines} lines]'
+                err_tag = ' [ERROR]' if receipt['is_error'] else ''
+                if call:
+                    summary = (f"tool_use_id={call['id']}" if call['message'] and
+                               call['message']['audience'] == 'session' else
+                               _tool_input_summary(call['name'], call['input']))
+                    head = f"[tool: {call['name']}({summary})]{err_tag}"
+                else:
+                    head = f"[tool: ?()]{err_tag}"
+                out_blocks.append(head + ('\n' + result + '\n' if result else '\n'))
+            body = entry['body']
+            if body is None:
                 continue
-            msg_content = d.get('message', {}).get('content')
-            if isinstance(msg_content, str):
-                text = strip_leading_reminders(msg_content).strip()
-                if not text:
-                    next_is_skill = False
-                elif text.startswith('<command-'):
-                    next_is_skill = True
-                elif text.startswith(('<local-command-', '<system-reminder>')):
-                    next_is_skill = False
-                elif (event := _parse_system_event(text)) is not None:
-                    # Keep system events as independent labeled export blocks so later LLM readers can distinguish actors
-                    next_is_skill = False
-                    out_blocks.append(_transcript_event_block(event))
-                else:
-                    out_blocks.append(_transcript_text_block(d, text, next_is_skill))
-                    next_is_skill = False
-            elif isinstance(msg_content, list):
-                user_texts = []
-                for block in msg_content:
-                    if not isinstance(block, dict):
-                        continue
-                    bt = block.get('type')
-                    if bt == 'tool_result':
-                        tool_id = block.get('tool_use_id', '')
-                        # AskUserQuestion becomes a ## QA block; answer is not truncated
-                        if tool_id in pending_tools and pending_tools[tool_id]['name'] == 'AskUserQuestion':
-                            tc = pending_tools.pop(tool_id)
-                            qa_unit = _build_qa_unit(
-                                tc.get('_raw_input'),
-                                d.get('toolUseResult'))
-                            if qa_unit:
-                                out_blocks.append(
-                                    '## QA\n' + _format_qa_transcript(qa_unit) + '\n')
-                                continue
-                            # fallback: treat input/result as a tool path, a rare defensive case
-                            pending_tools[tool_id] = tc
-                        raw = _tool_result_content(block.get('content', ''))
-                        result = (raw or '').strip()
-                        if len(result) > TRANSCRIPT_TOOL_RESULT_MAX:
-                            n = TRANSCRIPT_TOOL_RESULT_MAX
-                            lines = result.count('\n') + 1
-                            result = (result[:n].rstrip() +
-                                      f' …[+{len(result)-n} chars, ~{lines} lines]')
-                        err_tag = ' [ERROR]' if block.get('is_error') else ''
-                        if tool_id in pending_tools:
-                            tc = pending_tools.pop(tool_id)
-                            tc.pop('_raw_input', None)
-                            head = f"[tool: {tc['name']}({tc['summary']})]{err_tag}"
-                        else:
-                            head = f"[tool: ?()]{err_tag}"
-                        out_blocks.append(head + ('\n' + result + '\n' if result else '\n'))
-                    elif bt == 'text':
-                        txt = strip_leading_reminders(block.get('text', ''))
-                        if txt and not txt.lstrip().startswith('<system-reminder>'):
-                            user_texts.append(txt)
-                    elif bt == 'image':
-                        user_texts.append('[image]')
-                if user_texts:
-                    full = '\n'.join(user_texts).strip()
-                    if not full or full.startswith(('<local-command-', '<command-')):
-                        next_is_skill = False
-                    elif (event := _parse_system_event(full)) is not None:
-                        next_is_skill = False
-                        out_blocks.append(_transcript_event_block(event))
-                    else:
-                        out_blocks.append(_transcript_text_block(d, full, next_is_skill))
-                        next_is_skill = False
-                else:
-                    next_is_skill = False
-
+            if body['kind'] == 'event':
+                out_blocks.append(_transcript_event_block(body['event']))
+            elif body['kind'] == 'harness_note':
+                out_blocks.append('## SYSTEM\n%s\n' % _truncate_conv(body['text'], CONV_HARNESS_NOTE_MAX))
+            else:
+                out_blocks.append('## %s\n%s\n' % (body['kind'].upper(), body['text']))
     close_error_run()
-    dropped = set(claude_events.confirmed_queue_entries(queued_blocks, delivered))
-    if dropped:
-        out_blocks = [block for i, block in enumerate(out_blocks) if i not in dropped]
+    out_blocks = [block for i, block in enumerate(out_blocks) if i not in suppressed]
+    project_path = model['project_path']
+    total_lines = claude_history.summary(jsonl_path)['physical_lines']
 
     header = (f'# Session {jsonl_path.stem}\n'
               f'Project: {project_path or "(unknown)"}\n'
