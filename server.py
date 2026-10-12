@@ -25,7 +25,7 @@ from sources.claude_text import (SYSTEM_USER_PREFIXES_EVENT, SYSTEM_USER_PREFIXE
                                  anchored_user_text, assistant_search_words, human_turn_text,
                                  human_turn_words, is_project_checkin, is_system_user_string,
                                  matches_project_id, project_message_ids, project_wake_words, project_reply_text,
-                                 normalize_record, strip_leading_reminders)
+                                 normalize_record, session_message_text, strip_leading_reminders)
 from sources.activity import activity_fields, activity_time
 from sources import claude_history, claude_desktop
 from sources import codex as codex_source
@@ -1440,6 +1440,22 @@ def extract_conversation(jsonl_path, include_rewound=False):
                         })
                         pending_tools[tool_id] = {'__spawn__': True}
                         continue
+                    message = session_message_text(block)
+                    if message is not None:
+                        # Emit at the call even when no receipt has arrived. A later
+                        # tool_result updates this same row instead of replacing its input.
+                        message_turn = {
+                            'type': 'tool', 'name': tname,
+                            'summary': _tool_input_summary(tname, block['input']),
+                            'message': message,
+                            'message_context': json.dumps(
+                                {k: v for k, v in block['input'].items() if k != 'message'},
+                                ensure_ascii=False),
+                            'ts': ts,
+                        }
+                        turns.append(message_turn)
+                        pending_tools[tool_id] = {'__message_turn__': message_turn}
+                        continue
                     sent = _message_tool_text(tname, block.get('input'))
                     if sent is not None:
                         text_parts.append(sent)
@@ -1521,6 +1537,11 @@ def extract_conversation(jsonl_path, include_rewound=False):
                             tc = pending_tools.pop(tool_id)
                             # Agent (subagent spawn) tool_result is not expanded yet
                             if tc.get('__spawn__'):
+                                continue
+                            if '__message_turn__' in tc:
+                                tc['__message_turn__'].update(
+                                    result=_truncate_tool_result(raw, CONV_TOOL_RESULT_MAX),
+                                    is_error=is_err)
                                 continue
                             # AskUserQuestion becomes a QA turn, a conversation subtype, not a truncated tool path
                             if tc['name'] == 'AskUserQuestion':
@@ -1723,6 +1744,15 @@ def extract_transcript(jsonl_path: Path) -> str:
                         # Keep raw AskUserQuestion input for QA synthesis
                         '_raw_input': block.get('input', {}) if tname == 'AskUserQuestion' else None,
                     }
+                    message = session_message_text(block)
+                    if message is not None:
+                        context = json.dumps(
+                            {k: v for k, v in block['input'].items() if k != 'message'},
+                            ensure_ascii=False)
+                        call_id = block.get('id', 'unknown')
+                        out_blocks.append(
+                            f'## SESSION MESSAGE (tool_use_id={call_id}; {context})\n{message}\n')
+                        pending_tools[block.get('id', '')]['summary'] = f'tool_use_id={call_id}'
             if text_parts:
                 out_blocks.append('## ASSISTANT\n' + '\n'.join(text_parts) + '\n')
 

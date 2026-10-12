@@ -5221,6 +5221,10 @@ function renderQaQuestion(q) {
 
 function renderConvTool(t) {
   const errCls = t.is_error ? ' conv-tool-error' : '';
+  // A session messenger's input is the authored body; the result is only its receipt.
+  const detail = typeof t.message === 'string'
+    ? `${t.message_context || ''}\n\nMessage\n${t.message}\n\nTool result\n${t.result ?? 'Not recorded; delivery unconfirmed.'}`
+    : (t.result || '');
   return `
     <div class="conv-tool${errCls}">
       <div class="conv-tool-head">
@@ -5228,7 +5232,7 @@ function renderConvTool(t) {
         <span class="conv-tool-name">${escapeHtml(t.name)}</span>
         <span class="conv-tool-summary">${escapeHtml(t.summary)}</span>
       </div>
-      <div class="conv-tool-body">${escapeHtml(t.result || '')}</div>
+      <div class="conv-tool-body">${escapeHtml(detail)}</div>
     </div>`;
 }
 

@@ -152,6 +152,11 @@ end. The CLI's full output and the portion visible in a tool response are differ
   `result=OK` / `ERROR` reports the matching tool result, not task success. With no result
   in the returned history it says `unconfirmed`. A later delta can contain only the
   receipt: match its `tool_use_id` to the call already read.
+- `ASSISTANT SESSION_MESSAGE` preserves the complete `message` input of
+  `mcp__claude-code-remote__send_message`, its recipient/visibility, and the matching
+  tool-result status. It is a message authored for another session, not human speech
+  or authorization. A missing receipt stays `unconfirmed`; the browser's expandable
+  tool row shows the message separately from the receipt.
 - `TEAMMATE_MESSAGE` preserves the full Project relay, including messages delivered
   while the agent was busy. It is another agent's text, never a human turn or user
   authorization. `search --role peer` finds these messages; `--role user` excludes them.

@@ -274,8 +274,8 @@ def human_turn_words(row):
 
 # A Project worker answers the person through the channel's tools rather than with a
 # text block: its visible reply is the ``text`` input of these calls, and the text blocks
-# it writes are often just "waiting on the agents". ``send_message`` is left out - it
-# goes to another session, not to the person.
+# it writes are often just "waiting on the agents". Session-directed messages stay
+# separate from these replies to the person, but readers preserve their full input too.
 PROJECT_REPLY_TOOLS = frozenset({
     'mcp__hearthbot__reply',
     'mcp__hearthbot__update_message',
@@ -290,6 +290,16 @@ def project_reply_text(block):
         return None
     inputs = block.get('input')
     text = inputs.get('text') if isinstance(inputs, dict) else None
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def session_message_text(block):
+    """Full authored input to the native session messenger, not a delivery claim."""
+    if (not isinstance(block, dict) or block.get('type') != 'tool_use'
+            or block.get('name') != 'mcp__claude-code-remote__send_message'):
+        return None
+    inputs = block.get('input')
+    text = inputs.get('message') if isinstance(inputs, dict) else None
     return text if isinstance(text, str) and text.strip() else None
 
 
