@@ -265,6 +265,38 @@ class ReaderTests(TranscriptFileMixin, unittest.TestCase):
         path = self.write_transcript("eeeeeeee-3333-4333-8333-eeeeeeeeeeee", rows)
         self.assertEqual(ag.extract_metadata(path)["project_path"], "/Users/alice/proj")
 
+    def test_partial_companion_recovers_text_without_moving_anchors(self):
+        question = user(0, "original question")
+        answer = planner(1, "short answer")
+        answer["truncated_fields"] = ["content"]
+        path = self.write_transcript(STRAIGHT_ID, [question, answer])
+        before = ag.source_fingerprint(path)
+        full = path.with_name("transcript_full.jsonl")
+        full.write_text(json.dumps(planner(1, "complete answer")) + "\n"
+                        + json.dumps(planner(2, "companion-only step")) + "\n")
+        meta = ag.extract_metadata(path)
+        self.assertEqual(meta["user_turn_count"], 1)
+        self.assertFalse(meta["single_turn"])
+        self.assertEqual(meta["first_user_msg"], "original question")
+        self.assertIn({"role": "assistant", "text": "complete answer"}, meta["recent_msgs"])
+        conv = ag.extract_conversation(path)
+        self.assertEqual(conv["total_lines"], 2)
+        self.assertEqual([t["text"] for t in conv["turns"]],
+                         ["original question", "complete answer"])
+        self.assertIn("[L2] ASSISTANT: complete answer", at.render_antigravity(path))
+        self.assertIn("complete answer", ag.extract_transcript(path))
+        self.assertIn("short answer", cli.read_evidence(path, line=2, context=0))
+        self.assertNotEqual(before, ag.source_fingerprint(path))
+
+    def test_companion_does_not_restore_a_different_occupant_of_the_same_step(self):
+        answer = planner(1, "current short answer", ts="2026-02-02T00:00:00Z")
+        answer["truncated_fields"] = ["content"]
+        path = self.write_transcript(STRAIGHT_ID, [user(0, "question"), answer])
+        full = path.with_name("transcript_full.jsonl")
+        full.write_text(json.dumps(planner(1, "old complete answer")) + "\n")
+        self.assertEqual(list(ag.iter_messages(path))[-1],
+                         (2, "assistant", "current short answer"))
+
     def test_conversation_shows_only_live_turns(self):
         conv = ag.extract_conversation(self.rewound)
         texts = [t.get("text", "") + t.get("result", "") for t in conv["turns"]]
@@ -448,6 +480,7 @@ class AnchoredRendererTests(TranscriptFileMixin, unittest.TestCase):
         # The same count the web reader reports for this conversation.
         self.assertEqual(sum(1 for turn in ag.extract_conversation(path)["turns"]
                              if turn["type"] == "user"), 2)
+        self.assertEqual(ag.extract_metadata(path)["user_turn_count"], 2)
 
     def test_the_digest_header_names_the_source_and_the_abandoned_lines(self):
         path = self.write_transcript(REWOUND_ID, REWOUND_ROWS)
