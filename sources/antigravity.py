@@ -10,8 +10,8 @@ Storage layout:
 - The plaintext, turn-by-turn conversation lives at
   ~/.gemini/antigravity/brain/<conversation_id>/.system_generated/logs/transcript.jsonl
   (JSONL; each line has source(USER_EXPLICIT/MODEL/SYSTEM) + type + content/thinking/tool_calls)
-- ~/.gemini/antigravity/conversations/*.pb is an encrypted copy of the same conversation
-  (entropy ~8.0, key held inside the app); it can't and shouldn't be read — ignored.
+- When present, transcript_full.jsonl supplies fields the primary log marks as truncated.
+- Native conversation files under ~/.gemini/antigravity/conversations/ are ignored.
 - The title index is at ~/.gemini/antigravity/agyhub_summaries_proto.pb (plaintext protobuf, id→title).
 
 Message mapping:
@@ -66,8 +66,8 @@ def is_antigravity_path(path) -> bool:
 # Aligned with the top-of-file constants in server.py
 RECENT_USER_N = 3
 RECENT_ASSISTANT_N = 3
-CONV_USER_MAX = 5000
-CONV_ASSISTANT_MAX = 10000
+CONV_USER_MAX = 200_000
+CONV_ASSISTANT_MAX = 200_000
 CONV_TOOL_RESULT_MAX = 1500
 CONV_TOOL_INPUT_MAX = 300
 TRANSCRIPT_TOOL_RESULT_MAX = 200
@@ -380,17 +380,79 @@ def _iter_records(jsonl_path: Path):
                 continue
             total += 1
             try:
-                records.append((number, json.loads(line)))
-            except Exception:
+                row = json.loads(line)
+            except ValueError:
                 continue
+            if isinstance(row, dict):
+                records.append((number, row))
     return records, total
 
 
-def _read_lines(jsonl_path: Path):
+def full_transcript_path(path: Path) -> Optional[Path]:
+    """Find the companion only for a primary transcript."""
+    if path.name == 'transcript.jsonl':
+        full = path.with_name('transcript_full.jsonl')
+        if full.is_file():
+            return full
+    return None
+
+
+def source_fingerprint(path: Path) -> str:
+    """Both files can change independently while the conversation is open."""
+    stat = path.stat()
+    stamp = f'{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}'
+    full = full_transcript_path(path)
+    if full is not None:
+        try:
+            stat = full.stat()
+        except FileNotFoundError:
+            return stamp
+        stamp += f':{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}'
+    return stamp
+
+
+def _record_key(row):
+    step = _step_index(row)
+    created_at = row.get('created_at')
+    source = row.get('source')
+    kind = row.get('type')
+    if step is not None and all(isinstance(value, str) and value
+                                for value in (created_at, source, kind)):
+        return step, created_at, source, kind
+    return None
+
+
+def _read_transcript(path: Path):
+    records, total = _iter_records(path)
+    if not any(row.get('truncated_fields') for _, row in records):
+        return records, total
+    full = full_transcript_path(path)
+    if full is None:
+        return records, total
     try:
-        return [row for _, row in _iter_records(jsonl_path)[0]]
-    except Exception:
-        return []
+        full_records, _ = _iter_records(full)
+    except OSError:
+        return records, total
+
+    # The full log can start midway through the conversation. Keep physical lines
+    # and ordering from the primary log, and recover only uniquely matched fields.
+    primary_counts = Counter(_record_key(row) for _, row in records)
+    full_counts = Counter(_record_key(row) for _, row in full_records)
+    by_key = {_record_key(row): row for _, row in full_records}
+    for index, (number, row) in enumerate(records):
+        fields = row.get('truncated_fields')
+        if not isinstance(fields, list):
+            continue
+        key = _record_key(row)
+        if key is None or primary_counts[key] != 1 or full_counts[key] != 1:
+            continue
+        complete = by_key[key]
+        recovered = {field: complete[field] for field in ('content', 'thinking', 'tool_calls')
+                     if field in fields and field in complete
+                     and field not in (complete.get('truncated_fields') or ())}
+        if recovered:
+            records[index] = (number, {**row, **recovered})
+    return records, total
 
 
 # ---------- In-file rewind: live history vs abandoned branches ----------
@@ -483,7 +545,7 @@ def live_history(jsonl_path):
     module. Keeping it here means the anchored renderer and the Agent CLI never restate
     the row classification or the rewind rule; they format what this returns.
     """
-    records, total = _iter_records(Path(jsonl_path))
+    records, total = _read_transcript(Path(jsonl_path))
     live, report = live_records(records)
     return live, report, total
 
@@ -621,37 +683,40 @@ def scan_sessions(root: Optional[Path] = None) -> Iterator[Path]:
 def extract_metadata(jsonl_path: Path) -> Optional[dict]:
     """Antigravity transcript → meta dict (schema aligned with Claude/Codex)."""
     try:
+        fingerprint = source_fingerprint(jsonl_path)
         stat = jsonl_path.stat()
+        records, _ = _read_transcript(jsonl_path)
     except FileNotFoundError:
         return None
     cid = _conv_id(jsonl_path)
-    all_lines = _read_lines(jsonl_path)
+    all_lines = [row for _, row in records]
     # Previews, the first user message and the turn count describe the conversation as it
     # stands, so they read the live history only. The project path is a property of the file
     # (the IDE workspace the conversation ran in), which a rewind does not move, so it is
     # still inferred from every row.
     lines = live_lines(all_lines)
 
-    users = [d for d in lines if d.get('type') == 'USER_INPUT']
+    user_rows = [d for d in lines if d.get('type') == 'USER_INPUT']
+    users = [(d, search_text_from_line(d)) for d in user_rows]
+    users = [(d, text) for d, text in users if text]
     asts = [d for d in lines
             if d.get('type') == 'PLANNER_RESPONSE' and (d.get('content') or '').strip()]
 
     # recent_msgs: take the last N of user / assistant each, merged by ts ascending (same as Claude/Codex)
     raw = []
-    for d in users[-RECENT_USER_N:]:
-        raw.append((d.get('created_at') or '', 'user',
-                    _clean_user_input(d.get('content', ''))))
+    for d, text in users[-RECENT_USER_N:]:
+        raw.append((d.get('created_at') or '', 'user', text))
     for d in asts[-RECENT_ASSISTANT_N:]:
         raw.append((d.get('created_at') or '', 'assistant',
                     (d.get('content') or '').strip()))
     raw.sort(key=lambda m: m[0])
     recent_msgs = [{"role": role, "text": text[:500]} for (_, role, text) in raw if text]
 
-    first_user = _clean_user_input(users[0].get('content', '')) if users else ""
+    first_user = users[0][1] if users else ""
 
     # model: take the model switched to in the last USER_SETTINGS_CHANGE (best-effort)
     model = None
-    for d in users:
+    for d in user_rows:
         c = d.get('content')
         if isinstance(c, str):
             m = re.search(
@@ -665,6 +730,7 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
         "jsonl_path": str(jsonl_path),
         "mtime": stat.st_mtime,
         "mtime_iso": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        "antigravity_fingerprint": fingerprint,
         **activity_fields((ts for ts, _, text in raw if text), stat.st_mtime),
         "size": stat.st_size,
         "source": "antigravity",
@@ -672,6 +738,9 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
         "cli_version": None,
         "custom_title": _load_titles().get(cid, ""),
         "user_turn_count": len(users),
+        # The source explicitly identifies this as user input. Older or copied
+        # records without that marker still use the single-turn heuristic.
+        "single_turn": len(users) == 1 and users[0][0].get('source') != 'USER_EXPLICIT',
         "last_stop_reason": None,
         "recent_msgs": recent_msgs,
         "first_user_msg": first_user or "",
@@ -691,7 +760,7 @@ def extract_conversation(jsonl_path: Path) -> Optional[dict]:
     turns = []
     pending = []   # tool calls awaiting their result to be paired (FIFO)
 
-    records, total_lines = _iter_records(jsonl_path)
+    records, total_lines = _read_transcript(jsonl_path)
     all_lines = [row for _, row in records]
     # Read the live history only. Pairing runs over the live rows alone, so an abandoned
     # tool call can never swallow a live result and drift the FIFO.
@@ -795,7 +864,7 @@ def extract_transcript(jsonl_path: Path) -> str:
         r = trunc_result(result)
         out_blocks.append(head + ("\n" + r + "\n" if r else "\n"))
 
-    records, total_lines = _iter_records(jsonl_path)
+    records, total_lines = _read_transcript(jsonl_path)
     all_lines = [row for _, row in records]
     live, rewind = live_records(records)
 

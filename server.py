@@ -68,7 +68,8 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 # message, recent_msgs), which the CLI title reads.
 # 17: delivered Project relay attachments count as coordinator check-ins, so workers
 # with one human turn and a mid-turn check-in are no longer suspected one-shot runs.
-CACHE_SCHEMA_VERSION = 17
+# 18: Antigravity recovers truncated text and recognizes explicit user turns.
+CACHE_SCHEMA_VERSION = 18
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -1198,6 +1199,8 @@ def file_fingerprint(path) -> str:
         return codex_history.fingerprint(path)
     if Path(PROJECTS_DIR).resolve() in Path(path).resolve().parents:
         return claude_history.describe(path)['history_fingerprint']
+    if ag_source.is_antigravity_path(path):
+        return ag_source.source_fingerprint(Path(path))
     st = os.stat(path)
     version = f"{st.st_mtime_ns}:{st.st_size}"
     return version
@@ -1743,11 +1746,11 @@ def _scan_sessions_locked(force):
         key = str(jsonl_path)
         ag_seen.add(key)
         try:
-            cur_mtime = jsonl_path.stat().st_mtime
+            fingerprint = ag_source.source_fingerprint(jsonl_path)
         except FileNotFoundError:
             continue
         cached = _cache.get(key)
-        if force or cached is None or cached.get("mtime") != cur_mtime:
+        if force or cached is None or cached.get("antigravity_fingerprint") != fingerprint:
             meta = _read_metadata(ag_source.extract_metadata, jsonl_path)
             if meta and _cache.get(key) != meta:
                 _cache[key] = meta
@@ -2165,7 +2168,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     terms is a lowercase search-term list with AND semantics: every term must appear in the
     same session to count as a hit. Return [] for no match.
 
-    lines, when given, replaces reading a Claude, Antigravity or Kimi file: the
+    lines, when given, replaces reading a Claude, legacy Antigravity or Kimi file: the
     (physical line number, raw line) pairs that contain at least one term, in file order.
     Every other line is skipped by the line prefilter below anyway, so the result is the
     same. The line number is what lets Antigravity drop rows a rewind abandoned. Other
@@ -2245,7 +2248,9 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
 
     # An Antigravity rewind abandons earlier rows inside the same file. Search the live
     # history only, in line with the reader and with the other branching sources.
-    skip_lines = ag_source.abandoned_line_numbers(jsonl_path) if is_ag else frozenset()
+    ag_full = ag_source.full_transcript_path(jsonl_path) if is_ag else None
+    skip_lines = (ag_source.abandoned_line_numbers(jsonl_path)
+                  if is_ag and ag_full is None else frozenset())
 
     # Text the person typed into the queue is findable even when nothing proves the agent
     # ever received it - losing your own words because the agent missed them is the worse
@@ -2260,21 +2265,15 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
 
     try:
         with contextlib.ExitStack() as stack:
-            f = lines if lines is not None else enumerate(stack.enter_context(
-                open(jsonl_path, "r", encoding="utf-8", errors="replace")), 1)
-            for line_number, line in f:
-                if line_number in skip_lines:
-                    continue
-                # Supplied lines were already selected by ripgrep for containing a term.
-                if prefilter_safe and lines is None:
-                    line_lower = line.lower()
-                    if not any(form in line_lower for form in raw_forms):
-                        continue
-                try:
-                    d = normalize_record(json.loads(line))
-                except Exception:
-                    continue
+            if ag_full is not None:
+                records = (row for _, row in ag_source.live_history(jsonl_path)[0])
+            else:
+                f = lines if lines is not None else enumerate(stack.enter_context(
+                    open(jsonl_path, "r", encoding="utf-8", errors="replace")), 1)
+                records = _matching_search_records(
+                    f, skip_lines, raw_forms if prefilter_safe and lines is None else ())
 
+            for d in records:
                 t = d.get("type")
                 handed_over = claude_events.delivered_text(d)
                 if handed_over is not None:
@@ -2310,7 +2309,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                             prefix = "…" if start > 0 else ""
                             suffix = "…" if end < len(text) else ""
                             role = ("peer" if claude_events.project_relay_event(d) is not None
-                                    else "you" if t == "user" else "")
+                                    else "you" if t in ("user", "USER_INPUT") else "")
                             candidate = {
                                 "text": prefix + snippet + suffix,
                                 "role": role,
@@ -2349,6 +2348,20 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
     if len(term_found) < len(terms):
         return []
     return snippets
+
+
+def _matching_search_records(lines, skip_lines, raw_forms):
+    for number, line in lines:
+        if number in skip_lines:
+            continue
+        if raw_forms:
+            line_lower = line.lower()
+            if not any(form in line_lower for form in raw_forms):
+                continue
+        try:
+            yield normalize_record(json.loads(line))
+        except Exception:
+            continue
 
 
 def _snippet_around(text, term):
@@ -2415,6 +2428,15 @@ def _rg_prefilter(terms, paths):
         _warn_search_fallback("ripgrep executable not found")
         return None
     path_strs = [str(p) for p in paths if not devin_source.is_devin_path(p)]
+    # Different terms can live in different copies. Map each file's hits back to
+    # the primary transcript before intersecting the per-term candidate sets.
+    companions = {}
+    for path in map(Path, path_strs):
+        if path.name == "transcript.jsonl" and ag_source.is_antigravity_path(path):
+            full = ag_source.full_transcript_path(path)
+            if full is not None:
+                companions[str(full)] = str(path)
+    path_strs.extend(companions)
     if not path_strs:
         return set()
     candidate = None  # None = unconstrained so far; intersect per term to implement AND
@@ -2431,7 +2453,7 @@ def _rg_prefilter(terms, paths):
         # Later terms only need the files every earlier term was found in: a two-word
         # query used to read the whole library once per word.
         if candidate is not None:
-            path_strs = [p for p in path_strs if p in candidate]
+            path_strs = [p for p in path_strs if companions.get(p, p) in candidate]
         for path_str in path_strs:
             arg_bytes = len(os.fsencode(path_str)) + 1
             if batch and batch_bytes + arg_bytes > RIPGREP_ARG_CHUNK_BYTES:
@@ -2461,6 +2483,7 @@ def _rg_prefilter(terms, paths):
             term_hits.update(
                 ln for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln
             )
+        term_hits = {companions.get(p, p) for p in term_hits}
         candidate = term_hits if candidate is None else (candidate & term_hits)
         if not candidate:
             break  # one term already has no intersection, so AND result is empty
@@ -2489,19 +2512,21 @@ def _search_text_dir():
 def _search_text_items(paths):
     """(source path string, kind) for every path that gets a sidecar.
 
-    Devin is a database and Pi selects a branch over the whole file; both stay on their
-    existing paths (they are a few megabytes here).
+    Devin, Pi and Antigravity are handled outside the sidecars. Antigravity's
+    searchable content can change when its companion changes independently.
     """
     items = []
     roots = (str(codex_source.CODEX_ROOT), str(codex_source.CODEX_ARCHIVED_ROOT),
-             str(pi_source.PI_SESSIONS_ROOT), str(devin_source.DEVIN_ROOT))
+             str(pi_source.PI_SESSIONS_ROOT), str(devin_source.DEVIN_ROOT),
+             str(ag_source.AG_BRAIN))
     for p in paths:
         key = (str(p), roots)
         kind = _SEARCH_TEXT_KINDS.get(key)
         if kind is None:
             if len(_SEARCH_TEXT_KINDS) > 100_000:
                 _SEARCH_TEXT_KINDS.clear()
-            if devin_source.is_devin_path(p) or _is_pi_path(p):
+            if (devin_source.is_devin_path(p) or _is_pi_path(p)
+                    or (Path(p).name == "transcript.jsonl" and ag_source.is_antigravity_path(p))):
                 kind = ""
             else:
                 kind = "codex" if codex_source.is_codex_path(p) else "generic"
@@ -3056,7 +3081,9 @@ def _search_slice(terms, ordered, context=None):
         entries, line_chains = [], {}
         for meta, jsonl_path in candidates:
             key = str(jsonl_path)
-            if devin_source.is_devin_path(jsonl_path) or _is_pi_path(jsonl_path):
+            if (devin_source.is_devin_path(jsonl_path) or _is_pi_path(jsonl_path)
+                    or (meta.get("source") == "antigravity"
+                        and ag_source.full_transcript_path(jsonl_path) is not None)):
                 entries.append((meta, jsonl_path, "full"))
             elif codex_source.is_codex_path(jsonl_path):
                 if jsonl_path in inherited:

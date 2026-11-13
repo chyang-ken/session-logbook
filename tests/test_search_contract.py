@@ -82,6 +82,7 @@ class SearchContractTests(unittest.TestCase):
             (kimi, "KIMI_SESSIONS_ROOT", root / "kimi" / "sessions"),
             (antigravity, "AG_ROOT", root / "antigravity"),
             (antigravity, "AG_BRAIN", root / "antigravity" / "brain"),
+            (antigravity, "AG_SUMMARIES", root / "antigravity" / "summaries.pb"),
             (pi, "PI_SESSIONS_ROOT", root / "pi"),
             (devin, "DEVIN_ROOT", root / "devin"),
         ]
@@ -99,10 +100,22 @@ class SearchContractTests(unittest.TestCase):
         self.write_claude()
         self.write_codex()
         self.write_devin()
+        self.write_antigravity_companion()
         server._state[CLAUDE_B] = {"title_override": "Billing recovery"}
         server.scan_sessions()
 
     # ---------- corpus ----------
+    def write_antigravity_companion(self):
+        path = (antigravity.AG_BRAIN / AG_REWOUND / ".system_generated"
+                / "logs" / "transcript.jsonl")
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        row = next(row for row in rows if "liveneedle" in row.get("content", ""))
+        row["truncated_fields"] = ["content"]
+        path.write_text("".join(json.dumps(record) + "\n" for record in rows))
+        full = dict(row, content=row["content"].replace(
+            "liveneedle", "liveneedle companionneedle"), truncated_fields=[])
+        path.with_name("transcript_full.jsonl").write_text(json.dumps(full) + "\n")
+
     def write_claude(self):
         project = self.root / "claude" / "-Users-alice-my-app"
         project.mkdir(parents=True)
@@ -258,6 +271,7 @@ class SearchContractTests(unittest.TestCase):
             ("run the tests", [KIMI_B], "Kimi second session"),
             ("hello world", [AG_B], "Antigravity"),
             ("liveneedle", [AG_REWOUND], "Antigravity live branch after an in-file rewind"),
+            ("companionneedle answering", [AG_REWOUND], "Antigravity terms across both logs"),
             ("abandonedneedle", [], "rows an Antigravity rewind abandoned are not searchable"),
             ("orchard", [PI, CODEX_PAGED], "Pi and Codex both mention it"),
             ("devin widget audit", [DEVIN], "Devin"),
@@ -282,7 +296,7 @@ class SearchContractTests(unittest.TestCase):
             self.assertEqual(hits[0]['snippets'][0]['role'], 'peer')
 
     PAGING_QUERIES = ["widget", "orchard", "inherited goal", "billing retry",
-                      "bbbbbbbb-2222", "liveneedle", "zzqxv-nothing", "devin widget audit"]
+                      "bbbbbbbb-2222", "companionneedle", "zzqxv-nothing", "devin widget audit"]
 
     def test_pages_add_up_to_the_full_search(self):
         # Newest-first paging must return the same hits, in the same order, as one full
@@ -527,6 +541,17 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(self.ids('"quoted"'), [CLAUDE_A])
         self.assertEqual(self.ids("c:\\path"), [CLAUDE_A])
         self.assertEqual(self.ids('"quoted" widget'), [CLAUDE_A])
+
+    def test_antigravity_companion_updates_reach_the_cache_and_search(self):
+        old = next(m for m in server._cache.values() if m["id"] == AG_REWOUND)
+        path = Path(old["jsonl_path"])
+        full = path.with_name("transcript_full.jsonl")
+        full.write_text(full.read_text().replace("companionneedle", "updatedcompanionneedle"))
+        server.scan_sessions()
+        new = server._cache[str(path)]
+        self.assertEqual(old["mtime"], new["mtime"])
+        self.assertNotEqual(old["antigravity_fingerprint"], new["antigravity_fingerprint"])
+        self.assertEqual(self.ids("updatedcompanionneedle"), [AG_REWOUND])
 
     def test_snippets(self):
         result = self.search("repeat marker")[0]
