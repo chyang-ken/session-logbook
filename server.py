@@ -69,7 +69,8 @@ BACKUP_RETENTION_DAYS = 30  # backup retention in days; older backups are auto-c
 # 17: delivered Project relay attachments count as coordinator check-ins, so workers
 # with one human turn and a mid-turn check-in are no longer suspected one-shot runs.
 # 18: Antigravity recovers truncated text and recognizes explicit user turns.
-CACHE_SCHEMA_VERSION = 18
+# 19: Antigravity returns to the original single-turn filtering metadata.
+CACHE_SCHEMA_VERSION = 19
 SCAN_CACHE_FILE = Path.home() / ".session-logbook" / "scan-cache.json"
 # Legacy timestamped backups are pruned for backward compatibility. New backups are not
 # created because this cache is derived entirely from the original session sources.
@@ -2309,7 +2310,7 @@ def _search_session(jsonl_path: Path, terms: list[str], session_meta: dict = Non
                             prefix = "…" if start > 0 else ""
                             suffix = "…" if end < len(text) else ""
                             role = ("peer" if claude_events.project_relay_event(d) is not None
-                                    else "you" if t in ("user", "USER_INPUT") else "")
+                                    else "you" if t == "user" else "")
                             candidate = {
                                 "text": prefix + snippet + suffix,
                                 "role": role,
