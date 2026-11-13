@@ -339,10 +339,9 @@ def cmd_release(args: argparse.Namespace) -> int:
         raise SystemExit(f"release-flow: {MAIN} already contains {ready.tag}.")
     behind = commits_between(main, ready.commit, root)
     branch = f"release/{now.date().isoformat()}"
+    # Read-only, so a dry run reports this refusal exactly as the real run would.
     if ref_exists(f"{REMOTE}/{branch}", root):
         raise SystemExit(f"release-flow: {branch} already exists on {REMOTE}; finish or delete that release first.")
-    git("branch", "--force", branch, ready.commit, cwd=root)
-    git("push", "--quiet", REMOTE, f"{branch}:{branch}", cwd=root)
     title = f"Release: {STAGING} as of {ready.when.date()} ({short(ready.commit)})"
     body = "\n".join([
         "## What & why",
@@ -362,9 +361,15 @@ def cmd_release(args: argparse.Namespace) -> int:
         "- [x] No real session data, secrets, or private project references added",
         "- [x] Public-facing comments / docs are in English",
     ])
+    # Everything above only reads. A dry run must stop here: it once pushed the release branch
+    # and then made the real run refuse with "already exists on origin".
     if args.dry_run:
-        print(f"release-flow: would open PR '{title}' from {branch} into {MAIN}:\n{body}")
+        print(f"release-flow: dry run, nothing was created or pushed.\n"
+              f"release-flow: would push {branch} at {short(ready.commit)} to {REMOTE} "
+              f"and open PR '{title}' into {MAIN}:\n{body}")
         return 0
+    git("branch", "--force", branch, ready.commit, cwd=root)
+    git("push", "--quiet", REMOTE, f"{branch}:{branch}", cwd=root)
     r = subprocess.run(["gh", "pr", "create", "--base", MAIN, "--head", branch, "--title", title, "--body", body],
                        cwd=root, capture_output=True, text=True)
     if r.returncode != 0:
@@ -383,7 +388,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     d = sub.add_parser("deploy", help="fast-forward this checkout to staging, restart the service, record a deployed/ tag")
     d.add_argument("--config", help=f"local deploy config (default: {DEFAULT_CONFIG})")
     r = sub.add_parser("release", help="open a pull request moving main up to the newest soaked deploy")
-    r.add_argument("--dry-run", action="store_true", help="print the PR instead of creating it")
+    r.add_argument("--dry-run", action="store_true", help="print the release branch and PR without creating or pushing anything")
     args = p.parse_args(argv)
     return {"check": cmd_check, "deploy": cmd_deploy, "release": cmd_release}[args.cmd](args)
 

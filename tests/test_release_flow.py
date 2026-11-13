@@ -1,7 +1,7 @@
 """scripts/release_flow.py against a throwaway git remote.
 
 Builds a bare "origin" plus a clone with `main` and `staging`, then drives the real commands
-(`check`, `deploy`, `release --dry-run`) over it. Deploy tags are back-dated through
+(`check`, `deploy`, `release`, `release --dry-run`) over it. Deploy tags are back-dated through
 GIT_COMMITTER_DATE so the soak arithmetic can be exercised without waiting two weeks.
 """
 import importlib.util
@@ -310,21 +310,69 @@ class ReleaseFlowTests(unittest.TestCase):
             rf.main(["--repo", str(self.clone), "deploy"])
 
     # ---- release ----
-    def test_release_dry_run_prepares_branch_and_pr(self):
+    def all_refs(self):
+        """Every ref in the clone and in the bare origin, as ({name: sha}, {name: sha})."""
+        def refs(repo):
+            out = sh(["git", "for-each-ref", "--format=%(refname) %(objectname)"], cwd=repo)
+            return dict(line.split(" ", 1) for line in out.splitlines() if line.strip())
+        return refs(self.clone), refs(self.origin)
+
+    def fake_gh(self):
+        """Put a `gh` first on PATH that records its arguments and prints a PR URL."""
+        bindir = Path(self.tmp.name) / "bin"
+        bindir.mkdir()
+        log = Path(self.tmp.name) / "gh-args"
+        gh = bindir / "gh"
+        gh.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{log}"\necho https://example.com/pull/1\n')
+        gh.chmod(0o755)
+        path = mock.patch.dict(os.environ, {"PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"})
+        path.start()
+        self.addCleanup(path.stop)
+        return log
+
+    def test_release_dry_run_creates_and_pushes_nothing(self):
+        # A dry run once created and pushed release/<date>, so the real run that followed
+        # refused with "already exists on origin" and the PR had to be opened by hand.
         f1 = self.commit("f1", "feature one")
         self.commit("f2", "feature two")
         self.push_staging()
         self.deployed_tag(f1, days_ago=20)
+        # Settle remote-tracking refs first, so the dry run's own fetch has nothing to add.
+        sh(["git", "fetch", "--quiet", "--tags", "origin"], cwd=self.clone)
+        before = self.all_refs()
         buf = io.StringIO()
         with redirect_stdout(buf):
             code = rf.main(["--repo", str(self.clone), "release", "--dry-run"])
         self.assertEqual(code, 0)
+        local, remote = self.all_refs()
+        self.assertEqual(local, before[0], "dry run changed a local ref")
+        self.assertEqual(remote, before[1], "dry run changed a ref on origin")
         out = buf.getvalue()
-        self.assertIn("- ", out)
+        self.assertRegex(out, r"release/\d{4}-\d{2}-\d{2}")
+        self.assertIn("Release: staging as of", out)
         self.assertIn("feature one", out)
         self.assertNotIn("feature two", out)
-        branches = sh(["git", "ls-remote", "--heads", "origin", "release/*"], cwd=self.clone)
-        self.assertIn(f1, branches)
+
+    def test_release_pushes_the_branch_opens_the_pr_and_refuses_a_rerun(self):
+        f1 = self.commit("f1", "feature one")
+        self.commit("f2", "feature two")
+        self.push_staging()
+        self.deployed_tag(f1, days_ago=20)
+        log = self.fake_gh()
+        with redirect_stdout(io.StringIO()):
+            code = rf.main(["--repo", str(self.clone), "release"])
+        self.assertEqual(code, 0)
+        heads = sh(["git", "ls-remote", "--heads", "origin", "release/*"], cwd=self.clone)
+        self.assertIn(f1, heads)
+        args = log.read_text().splitlines()
+        self.assertEqual(args[:5], ["pr", "create", "--base", "main", "--head"])
+        self.assertRegex(args[5], r"^release/\d{4}-\d{2}-\d{2}$")
+        self.assertIn(args[5], heads)
+        # The branch is on origin now: running again, for real or dry, refuses instead of reusing it.
+        for extra in ([], ["--dry-run"]):
+            with self.assertRaises(SystemExit) as raised, redirect_stdout(io.StringIO()):
+                rf.main(["--repo", str(self.clone), "release", *extra])
+            self.assertIn("already exists on origin", str(raised.exception))
 
     def test_release_refuses_when_nothing_soaked(self):
         f1 = self.commit("f1", "feature one")
