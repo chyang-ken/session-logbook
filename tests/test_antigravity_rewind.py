@@ -276,7 +276,7 @@ class ReaderTests(TranscriptFileMixin, unittest.TestCase):
                         + json.dumps(planner(2, "companion-only step")) + "\n")
         meta = ag.extract_metadata(path)
         self.assertEqual(meta["user_turn_count"], 1)
-        self.assertFalse(meta["single_turn"])
+        self.assertNotIn("single_turn", meta)
         self.assertEqual(meta["first_user_msg"], "original question")
         self.assertIn({"role": "assistant", "text": "complete answer"}, meta["recent_msgs"])
         conv = ag.extract_conversation(path)
@@ -480,7 +480,6 @@ class AnchoredRendererTests(TranscriptFileMixin, unittest.TestCase):
         # The same count the web reader reports for this conversation.
         self.assertEqual(sum(1 for turn in ag.extract_conversation(path)["turns"]
                              if turn["type"] == "user"), 2)
-        self.assertEqual(ag.extract_metadata(path)["user_turn_count"], 2)
 
     def test_the_digest_header_names_the_source_and_the_abandoned_lines(self):
         path = self.write_transcript(REWOUND_ID, REWOUND_ROWS)

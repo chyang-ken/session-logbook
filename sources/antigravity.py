@@ -696,27 +696,25 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
     # still inferred from every row.
     lines = live_lines(all_lines)
 
-    user_rows = [d for d in lines if d.get('type') == 'USER_INPUT']
-    users = [(d, search_text_from_line(d)) for d in user_rows]
-    users = [(d, text) for d, text in users if text]
+    users = [d for d in lines if d.get('type') == 'USER_INPUT']
     asts = [d for d in lines
             if d.get('type') == 'PLANNER_RESPONSE' and (d.get('content') or '').strip()]
 
     # recent_msgs: take the last N of user / assistant each, merged by ts ascending (same as Claude/Codex)
     raw = []
-    for d, text in users[-RECENT_USER_N:]:
-        raw.append((d.get('created_at') or '', 'user', text))
+    for d in users[-RECENT_USER_N:]:
+        raw.append((d.get('created_at') or '', 'user', search_text_from_line(d)))
     for d in asts[-RECENT_ASSISTANT_N:]:
         raw.append((d.get('created_at') or '', 'assistant',
                     (d.get('content') or '').strip()))
     raw.sort(key=lambda m: m[0])
     recent_msgs = [{"role": role, "text": text[:500]} for (_, role, text) in raw if text]
 
-    first_user = users[0][1] if users else ""
+    first_user = search_text_from_line(users[0]) if users else ""
 
     # model: take the model switched to in the last USER_SETTINGS_CHANGE (best-effort)
     model = None
-    for d in user_rows:
+    for d in users:
         c = d.get('content')
         if isinstance(c, str):
             m = re.search(
@@ -738,9 +736,6 @@ def extract_metadata(jsonl_path: Path) -> Optional[dict]:
         "cli_version": None,
         "custom_title": _load_titles().get(cid, ""),
         "user_turn_count": len(users),
-        # The source explicitly identifies this as user input. Older or copied
-        # records without that marker still use the single-turn heuristic.
-        "single_turn": len(users) == 1 and users[0][0].get('source') != 'USER_EXPLICIT',
         "last_stop_reason": None,
         "recent_msgs": recent_msgs,
         "first_user_msg": first_user or "",
