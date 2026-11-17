@@ -1,4 +1,5 @@
 """Shared cleanup for Claude's leading environment reminders."""
+import html
 import re
 
 
@@ -10,14 +11,33 @@ _LEADING_REMINDERS = re.compile(r"^(?:\s*<system-reminder>.*?</system-reminder>\
 # user input.
 #   <command-*> / <local-command-*>   slash command injection + hook stdout
 #   <system-reminder>                 system prompt
+#   <session-context ...>             the context block a cloud session opens with; in a
+#                                     Claude Project thread it also carries the spawn brief
 #   <task-notification>               background-task completion notice
 #   <bash-stdout> / <bash-stderr>     bash-mode output from `!command`; unlike <bash-input>
 #   <teammate-message ...>            teammate agent report with variable attributes
+#   <project_claude_message ...> / <relay ...>
+#                                     a note a Claude Project's coordinator session relayed
+#                                     into a worker's thread; see PROJECT_RELAY_PREFIXES
 # These live here rather than in server.py because the anchored transcript, the history
 # index and the HTTP layer all have to agree on what counts as a human turn; two copies
 # of this list is how [U#] came to disagree with user_turn_count.
-SYSTEM_USER_PREFIXES_SKIP = ("<local-command-", "<command-", "<system-reminder>")
-SYSTEM_USER_PREFIXES_EVENT = ("<task-notification>", "<bash-stdout>", "<bash-stderr>", "<teammate-message")
+SYSTEM_USER_PREFIXES_SKIP = ("<local-command-", "<command-", "<system-reminder>", "<session-context")
+
+# A Claude Project's coordinator is another Claude session. When it writes into a worker's
+# thread, the note reaches the worker as a user record wrapped as
+#   <project_claude_message session="..." thread_id="...">
+#     <relay from="coordinator" session="..." current-time="...">
+#       The note below was written by the coordinator session, a Claude session, not by your user.
+#       <note>escaped text</note>
+#     </relay>
+#   </project_claude_message>
+# Older notes carry the <relay> alone. The record says itself that nobody typed it, and the
+# client files it with origin.kind "task-notification" / subkind "projects-relay": it is
+# another agent speaking, like a teammate report, and not a human turn.
+PROJECT_RELAY_PREFIXES = ("<project_claude_message", "<relay ")
+SYSTEM_USER_PREFIXES_EVENT = ("<task-notification>", "<bash-stdout>", "<bash-stderr>",
+                              "<teammate-message") + PROJECT_RELAY_PREFIXES
 
 # The record the client writes when the person presses Esc. It is filed under the user role
 # and the model does receive it, but nobody typed it: it reports that something happened.
@@ -47,10 +67,11 @@ def strip_leading_reminders(text):
 
 
 def normalize_record(row):
-    """Expose delivered human interruptions as user messages, not queue events.
+    """Expose delivered prompts as message records, keeping their actual origin.
 
     Desktop persists an interruption as an attachment after delivery. Its rendered
-    system-reminder is transport wrapping; the attachment prompt is the human text.
+    system-reminder is transport wrapping. A Project relay uses the same attachment
+    shape but remains a peer event, never a human turn.
     Keep original identity and coordinates so raw evidence still points to the source.
     """
     if not isinstance(row, dict) or row.get('type') != 'attachment' or row.get('isMeta'):
@@ -62,10 +83,31 @@ def normalize_record(row):
     prompt = attachment.get('prompt')
     if (attachment.get('type') != 'queued_command'
             or attachment.get('commandMode') != 'prompt'
-            or not isinstance(origin, dict) or origin.get('kind') != 'human'
+            or not isinstance(origin, dict)
+            or not (origin.get('kind') == 'human' or _project_relay_origin(origin))
             or not isinstance(prompt, str) or not prompt.strip()):
         return row
-    return dict(row, type='user', message={'role': 'user', 'content': prompt})
+    return dict(row, type='user', origin=origin, message={'role': 'user', 'content': prompt})
+
+
+def _project_relay_origin(origin):
+    return (isinstance(origin, dict) and origin.get('kind') == 'task-notification'
+            and origin.get('subkind') == 'projects-relay')
+
+
+def project_relay_text(row):
+    """A delivered Project peer message, including a coordinator's spawn brief.
+
+    Queue bookkeeping is not delivery. Explicit client provenance also recognizes a
+    relay whose wrapper is missing; it must never become a human turn in that case.
+    """
+    row = normalize_record(row)
+    if (not isinstance(row, dict) or row.get('type') != 'user'
+            or is_compact_summary(row)):
+        return ''
+    text = user_record_text(row, joiner='\n').lstrip()
+    return text if (text.startswith(PROJECT_RELAY_PREFIXES)
+                    or _project_relay_origin(row.get('origin'))) else ''
 
 
 def is_compact_summary(row):
@@ -112,7 +154,8 @@ def anchored_user_text(row):
     - the summary the client marks ``isCompactSummary`` - it wrote that too, to replace the
       turns it compacted away; the model receives it, and nobody said it;
     - the user-role pseudo-messages in ``is_system_user_string``: a background-task notice,
-      bash-mode output, a teammate report, a slash-command injection, an interrupt marker;
+      bash-mode output, a teammate report, a Project coordinator's note, a slash-command
+      injection, an interrupt marker;
     - a record holding nothing but tool results.
 
     A human turn, even though it has no typed words: a message that is only an image.
@@ -120,7 +163,7 @@ def anchored_user_text(row):
     row = normalize_record(row)
     if not isinstance(row, dict) or row.get('type') != 'user':
         return ''
-    if row.get('isMeta') or is_compact_summary(row):
+    if row.get('isMeta') or is_compact_summary(row) or project_relay_text(row):
         return ''
     text = user_record_text(row)
     if not text.strip() or is_system_user_string(text.lstrip()):
@@ -128,12 +171,156 @@ def anchored_user_text(row):
     return text
 
 
+# A Claude Project worker is woken by the channel, not by a prompt box. The person's
+# message reaches it as a user record wrapped in an envelope like
+#   <wake reason="mention" ...><project ...><thread ...>
+#     <message from="human" author-id="..." sent-at="..." ...>escaped text</message>
+#   </thread></project></wake>
+# and one record can carry several envelopes. The envelope is transport: its attributes
+# would make every worker match "human" or "mention", and the body is HTML-escaped, so a
+# typed "<" or "&" would not match either. The channel tells the worker that every
+# message in a wake is from the project owner.
+_WAKE_ENVELOPE = re.compile(r"\s*<wake[\s>]")
+_WAKE_MESSAGE = re.compile(r"<message\b[^>]*>(.*?)</message>", re.DOTALL)
+
+
+def project_wake_words(text):
+    """The message bodies inside a Project wake envelope, or the text unchanged."""
+    if not _WAKE_ENVELOPE.match(text or ''):
+        return text
+    bodies = [html.unescape(body).strip() for body in _WAKE_MESSAGE.findall(text)]
+    bodies = [body for body in bodies if body]
+    return '\n\n'.join(bodies) if bodies else text
+
+
+# Each envelope names the Project thread and messages it belongs to, as attributes such as
+# <thread ts="cmsg_..."> or <project_claude_message thread_id="cmsg_...">. Those ids are what
+# a Project link carries (#cmsg_...), so a person who pastes one expects to find the worker
+# session that thread ran in. They are attributes, so project_wake_words() drops them.
+_PROJECT_ID_ATTRIBUTE = re.compile(r'\b(?:ts|id|thread_id)="(cmsg_[A-Za-z0-9]+)"')
+
+
+def project_message_ids(row):
+    """The Project thread and message ids named by the envelope of one user record.
+
+    Only a wake envelope or a coordinator relay counts; a person who types an id into an
+    ordinary prompt is already found by the words they typed.
+    """
+    row = normalize_record(row)
+    if not isinstance(row, dict) or row.get('type') != 'user':
+        return set()
+    text = user_record_text(row).lstrip()
+    if not (_WAKE_ENVELOPE.match(text) or text.startswith(PROJECT_RELAY_PREFIXES)):
+        return set()
+    return set(_PROJECT_ID_ATTRIBUTE.findall(text))
+
+
+def matches_project_id(term, ids):
+    """Whether a search term is one of these ids, whole.
+
+    A whole id only: every Project id starts with cmsg_, so a partial match would turn
+    "cmsg" into a hit on every worker session.
+    """
+    term = (term or '').lower()
+    return bool(term) and any(term == value.lower() for value in ids)
+
+
+def is_project_status_wake(text):
+    """Whether text is a Project wake envelope that carries no message from anyone.
+
+    The channel also wakes a worker to report its own state, for example that a device
+    folder is now connected: <wake reason="device-folder-thread-status"> holding only
+    <system-note> lines. Nobody typed it.
+    """
+    return bool(_WAKE_ENVELOPE.match(text or '')) and not _WAKE_MESSAGE.search(text)
+
+
+def is_project_checkin(row):
+    """Whether this record is a Project coordinator's note delivered to a running worker.
+
+    Not a human turn, but a turn all the same: the worker acts on it, so a session that got
+    one is not a one-shot run. The client's own ``isMeta`` copy, the brief a coordinator hands
+    a worker it spawns, is left out: it opens the session the way a first message does.
+    """
+    row = normalize_record(row)
+    if not isinstance(row, dict) or row.get('type') != 'user' or row.get('isMeta'):
+        return False
+    return bool(project_relay_text(row))
+
+
+def human_turn_text(row):
+    """The text of a human turn as it is shown to a reader, or '' when this record is not one.
+
+    The verdict is :func:`anchored_user_text`'s, taken on the record as written; only the
+    wording shown changes. A Project wake envelope is reduced to the messages it carries,
+    so the card, the title, the reader and the transcripts show what the person typed, as
+    search already matches it. The envelope itself stays one ``[L#]`` away in the source.
+    """
+    text = anchored_user_text(row)
+    return project_wake_words(text) if text else ''
+
+
 def human_turn_words(row):
     """Only the words the person typed in a human turn, or '' - for matching a search.
 
     The same verdict as :func:`anchored_user_text`, without the ``[image]`` placeholder:
     that word is ours, and a search for "image" must not find it in every pasted picture.
+    A Project wake envelope is reduced to the messages it carries.
     """
     if not anchored_user_text(row):
         return ''
-    return user_record_text(normalize_record(row), image_placeholder='')
+    return project_wake_words(user_record_text(normalize_record(row), image_placeholder=''))
+
+
+# A Project worker answers the person through the channel's tools rather than with a
+# text block: its visible reply is the ``text`` input of these calls, and the text blocks
+# it writes are often just "waiting on the agents". Session-directed messages stay
+# separate from these replies to the person, but readers preserve their full input too.
+PROJECT_REPLY_TOOLS = frozenset({
+    'mcp__hearthbot__reply',
+    'mcp__hearthbot__update_message',
+})
+
+
+def project_reply_text(block):
+    """Full authored text of a known Project reply/edit call, not a delivery claim."""
+    if (not isinstance(block, dict) or block.get('type') != 'tool_use'
+            or not isinstance(block.get('name'), str)
+            or block.get('name') not in PROJECT_REPLY_TOOLS):
+        return None
+    inputs = block.get('input')
+    text = inputs.get('text') if isinstance(inputs, dict) else None
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def session_message_text(block):
+    """Full authored input to the native session messenger, not a delivery claim."""
+    if (not isinstance(block, dict) or block.get('type') != 'tool_use'
+            or block.get('name') != 'mcp__claude-code-remote__send_message'):
+        return None
+    inputs = block.get('input')
+    text = inputs.get('message') if isinstance(inputs, dict) else None
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def assistant_search_words(content):
+    """What the assistant said to the person, for matching a search.
+
+    Text blocks, plus the text a Project worker posted to its channel. Thinking and
+    every other tool call stay out.
+    """
+    if not isinstance(content, list):
+        return ''
+    parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get('type') == 'text':
+            text = block.get('text')
+        elif block.get('type') == 'tool_use':
+            text = project_reply_text(block)
+        else:
+            continue
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return ' '.join(parts)

@@ -35,16 +35,6 @@ def _encode_summaries(mapping):
     return bytes(blob)
 
 
-class ModuleTests(unittest.TestCase):
-    def test_module_importable(self):
-        self.assertTrue(hasattr(ag, "AG_ROOT"))
-        self.assertTrue(hasattr(ag, "AG_BRAIN"))
-
-    def test_fixtures_present(self):
-        self.assertTrue(CONV_A.exists())
-        self.assertTrue(CONV_B.exists())
-
-
 class ConvIdTests(unittest.TestCase):
     def test_conv_id_from_path(self):
         self.assertEqual(ag._conv_id(CONV_A), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")

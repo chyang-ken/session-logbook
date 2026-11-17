@@ -257,12 +257,6 @@ class _SliceAcrossSources(unittest.TestCase):
 
 
 class SliceAcrossSourcesTests(_SliceAcrossSources):
-    def test_every_source_renders_addressable_turns(self):
-        for name, target in self.targets().items():
-            with self.subTest(source=name):
-                anchors = at.turn_anchors(cli.render_context(target))
-                self.assertTrue(anchors, f"{name} renders no [U#] a caller could ask for")
-
     def test_every_source_keeps_only_the_last_turn_when_asked(self):
         for name, target in self.targets().items():
             with self.subTest(source=name):

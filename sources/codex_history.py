@@ -499,15 +499,19 @@ def iter_messages(path):
             yield entry['path'], entry['line'], role, text
 
 
-def canonical_paths(paths):
-    """Search each known Codex ID's newest segment, never its replaced branch tails."""
+def canonical_paths(paths, read_meta=None):
+    """Search each known Codex ID's newest segment, never its replaced branch tails.
+
+    read_meta defaults to codex._read_session_meta; a caller may pass a memoized reader.
+    """
     from sources import codex
+    read_meta = read_meta or codex._read_session_meta
     winners, others = {}, []
     for path in paths:
         if not codex.is_codex_path(path):
             others.append(path)
             continue
-        meta = codex._read_session_meta(path) or {}
+        meta = read_meta(path) or {}
         sid = meta.get('id')
         if not sid:
             others.append(path)

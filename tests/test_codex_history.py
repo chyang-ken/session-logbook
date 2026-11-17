@@ -177,8 +177,8 @@ class HistoryTests(unittest.TestCase):
         server._cache[str(latest)] = codex.extract_metadata(latest)
         real = server._rg_matching_lines
 
-        def broken(terms, paths):
-            yield from real(terms, paths)
+        def broken(terms, paths, *rest):
+            yield from real(terms, paths, *rest)
             raise RuntimeError('ripgrep exited with status 2')
         expected = server.search_sessions('request')
         with patch.object(server, '_rg_matching_lines', broken):

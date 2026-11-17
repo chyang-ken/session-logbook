@@ -22,7 +22,8 @@ from sources.activity import activity_time
 from sources import anchored_transcript, session_identity, codex_history, claude_history
 from sources import antigravity as ag_source
 from sources import claude_events
-from sources.claude_text import human_turn_words
+from sources.claude_text import (assistant_search_words, human_turn_words, matches_project_id,
+                                 project_message_ids, project_wake_words)
 from sources import codex as codex_source
 from sources import devin as devin_source
 from sources import kimi as kimi_source
@@ -220,6 +221,9 @@ def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
 
     if source == "claude":
         row = server.normalize_record(row)
+        relay = claude_events.project_relay_words(row)
+        if relay:
+            return "peer", relay
         if row.get("isMeta"):
             return None, ""
         kind = row.get("type")
@@ -228,7 +232,7 @@ def _message_from_row(row: dict, source: str) -> tuple[Optional[str], str]:
             # summary or a harness note is not something the person said.
             return "user", human_turn_words(row)
         if kind == "assistant":
-            return "assistant", server._assistant_text((row.get("message") or {}).get("content"))
+            return "assistant", assistant_search_words((row.get("message") or {}).get("content"))
         return None, ""
 
     if row.get("type") != "response_item":
@@ -281,7 +285,7 @@ def iter_messages(path, source):
     for text, line_numbers in queued.items():
         for line_number in line_numbers:
             if line_number not in unconfirmed:
-                yield line_number, claude_events.QUEUED_INPUT_ROLE, text.strip()
+                yield line_number, claude_events.QUEUED_INPUT_ROLE, project_wake_words(text).strip()
 
 
 def _parse_since(value: Optional[str]) -> Optional[float]:
@@ -305,6 +309,28 @@ def _candidate_paths(source: Optional[str], include_subagents: bool) -> list[Pat
     return codex_history.canonical_paths(list(iter_session_paths(source=source, include_subagents=include_subagents)))
 
 
+def _project_id_terms(path: Path, terms: list[str]) -> set:
+    """The Project thread or message ids in this file's envelopes that a search term names.
+
+    Every Project id starts with cmsg_, so a file is read only for terms of that shape.
+    """
+    wanted = [term for term in terms if term.startswith("cmsg_")]
+    if not wanted:
+        return set()
+    ids = set()
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if any(term in line.lower() for term in wanted):
+                    try:
+                        ids |= project_message_ids(json.loads(line))
+                    except ValueError:
+                        continue
+    except OSError:
+        return set()
+    return {value for value in ids if any(matches_project_id(term, [value]) for term in wanted)}
+
+
 def search_sessions(
     query: str,
     *,
@@ -315,7 +341,7 @@ def search_sessions(
     include_subagents: bool = False,
     limit: int = 10,
 ) -> list[dict]:
-    """Search real user/assistant text with AND semantics and useful filters."""
+    """Search user/assistant text and labelled Project peers with AND semantics."""
     terms = [term.lower() for term in query.split() if term]
     if not terms:
         raise SessionLookupError("search query must not be empty")
@@ -388,6 +414,12 @@ def search_sessions(
 
         found = set(metadata_terms)
         snippets = []
+        if role == "any" and item['source'] == 'claude':
+            project_ids = _project_id_terms(path, terms)
+            if project_ids:
+                found |= {term for term in terms if matches_project_id(term, project_ids)}
+                snippets.append({"role": "metadata", "line": None,
+                                 "text": "Project id: " + ", ".join(sorted(project_ids))})
         custom_title = str(item.get("custom_title") or "")
         display_title = title_override or custom_title
         if role == "any" and any(term in f"{custom_title} {title_override}".lower() for term in terms):
@@ -901,7 +933,7 @@ def render_context(path: Path, after_line: int = 0, historical_terminal: bool = 
     elif item["source"] == "antigravity":
         body = anchored_transcript.render_antigravity(path)
     else:
-        body = anchored_transcript.render_claude(path, claude_history.records(path, after_line))
+        body = anchored_transcript.render_claude(path, first=after_line)
     # Pi can switch branches inside one file. Return the complete selected branch
     # on follow rather than pretending an append-only cursor preserves its context.
     if item["source"] not in {"pi", "claude"}:
@@ -1155,9 +1187,9 @@ def build_parser():
     search = sub.add_parser("search", help="search session message text")
     search.add_argument("query", help="one or more words; several are matched with AND "
                                       "across a session, and a session title or ID matches too")
-    search.add_argument("--role", choices=("any", "user", "assistant"), default="any",
-                        help="match only what a person typed, only what the model replied, "
-                             "or either")
+    search.add_argument("--role", choices=("any", "user", "assistant", "peer"), default="any",
+                        help="match human input, assistant replies, Project peer messages, "
+                             "or all searchable roles")
     search.add_argument("--source", choices=SUPPORTED_SOURCES, help="restrict to one agent client")
     search.add_argument("--project", help="project-path substring")
     search.add_argument("--since", help="ISO date/time or relative days such as 7d")

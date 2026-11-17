@@ -9,8 +9,9 @@ proves the contract; this proves nothing drifted on real, messy data.
 
 - The baseline is exported from git into a temporary directory; the candidate is the
   working tree.
-- Each build runs in its own process with isolated state, scan cache and history index
-  (copies), so neither writes to ~/.session-logbook. Source logs are only read.
+- Each build runs in its own process with isolated state, scan cache, history index and
+  search-text sidecars, so neither writes to ~/.session-logbook. Source logs are only read.
+  A build that has sidecars builds them all before its first query (the time is printed).
 - Queries: one per line. Include unique strings, paths, IDs, common words, multi-term,
   and terms with quotes or backslashes.
 - Output goes to _private/ (git-ignored): it contains real session IDs and snippets.
@@ -44,14 +45,25 @@ server.SCAN_CACHE_FILE = state / "scan-cache.json"
 server.SCAN_CACHE_BACKUP_DIR = state / "scan-backups"
 server.BACKUP_DIR = state / "backups"
 server.scan_sessions()
+# A build with search-text sidecars builds them all first, so every query below goes
+# through them rather than through the raw-file fallback.
+build = getattr(server, "build_search_text", None)
+if build is not None:
+    start = time.time()
+    fresh, total = build()
+    print(f"search text: {fresh}/{total} sidecars built in {time.time() - start:.1f}s", flush=True)
+stats = getattr(getattr(server, "search_text", None), "stats", None)
 out = {}
 for query in json.load(open(sys.argv[2])):
     err = io.StringIO()
+    before = dict(stats) if stats is not None else None
     with contextlib.redirect_stderr(err):
         start = time.time()
         results = server.search_sessions(query)
         elapsed = time.time() - start
     out[query] = {"results": results, "seconds": elapsed, "warnings": err.getvalue().strip()}
+    if stats is not None:
+        out[query]["sidecars"] = {k: stats[k] - before[k] for k in stats}
     print(f"{elapsed:7.2f}s {len(results):5} {query[:40]!r}", flush=True)
 json.dump(out, open(sys.argv[3], "w"), ensure_ascii=False)
 '''
@@ -67,7 +79,8 @@ def prepare_state(target):
 def run(label, checkout, state, queries_file, out_file):
     print(f"== {label}: {checkout}", flush=True)
     env = dict(os.environ, SESSION_LOGBOOK_HISTORY_INDEX=str(state / "history-index.sqlite3"),
-               SESSION_LOGBOOK_EVENTS=str(state / "events.db"))
+               SESSION_LOGBOOK_EVENTS=str(state / "events.db"),
+               SESSION_LOGBOOK_SEARCH_TEXT=str(state / "search-text"))
     runner = state / "runner.py"
     runner.write_text(RUNNER)
     subprocess.run([sys.executable, str(runner), str(state), str(queries_file), str(out_file)],
@@ -92,7 +105,9 @@ def compare(base, cand):
     print(f"{same}/{len(base)} queries identical")
     print("seconds  baseline -> candidate")
     for query in base:
+        sidecars = cand[query].get("sidecars")
         print(f"  {base[query]['seconds']:7.2f} -> {cand[query]['seconds']:7.2f}  {query[:40]!r}"
+              + (f"  [sidecars {sidecars['indexed']} / raw {sidecars['unindexed']}]" if sidecars else "")
               + ("  [candidate warned: " + cand[query]["warnings"][:60] + "]" if cand[query]["warnings"] else ""))
 
 

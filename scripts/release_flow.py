@@ -15,7 +15,9 @@ The model (see CLAUDE.md "Branch model and release flow"):
   is behind it. It is wired as a session-start hook so the question "is anything ready to
   release?" gets asked automatically whenever work resumes.
 * `release` opens a pull request that moves `main` up to that commit. It never merges: merging
-  into `main` is a separate, human decision, and `main` is branch-protected anyway.
+  into `main` is a separate decision that belongs to the maintainer, and `main` is
+  branch-protected anyway. An agent may click merge only after the maintainer has explicitly
+  approved that release.
 
 Only the git logic lives here. The machine-specific part (how to restart the service, which
 URL proves it is up) is read from a git-ignored local file, `_private/deploy.json`:

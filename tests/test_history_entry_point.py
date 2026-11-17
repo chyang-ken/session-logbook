@@ -3,6 +3,7 @@
 A reader that bypasses the entry point sees only one physical page of a split session
 (missing turns, wrong previews) or pays the full ancestry cost on every call.
 """
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -24,6 +25,26 @@ class EntryPointTests(unittest.TestCase):
                 if CALL.search(line):
                     offenders.append(f'{rel}:{number}: {line.strip()}')
         self.assertEqual(offenders, [], 'use codex_history.load() instead:\n' + '\n'.join(offenders))
+
+
+class ClaudeMessageEntryPointTests(unittest.TestCase):
+    def test_reading_surfaces_do_not_bypass_shared_message_reader(self):
+        for filename, names in {
+            'server.py': ('extract_conversation', 'extract_transcript'),
+            'sources/anchored_transcript.py': ('render_claude',),
+        }.items():
+            tree = ast.parse((ROOT / filename).read_text())
+            for function in tree.body:
+                if not isinstance(function, ast.FunctionDef) or function.name not in names:
+                    continue
+                with self.subTest(surface=function.name):
+                    calls = {ast.unparse(node.func) for node in ast.walk(function)
+                             if isinstance(node, ast.Call)}
+                    self.assertIn('claude_messages.read', calls)
+                    forbidden = {'claude_history.records', 'json.loads', 'anchored_user_text',
+                                 'project_reply_text', 'session_message_text',
+                                 'claude_events.project_relay_event', 'claude_events.enqueued_text'}
+                    self.assertFalse(calls & forbidden, calls & forbidden)
 
 
 if __name__ == '__main__':

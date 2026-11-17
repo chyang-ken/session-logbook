@@ -122,8 +122,8 @@ vm.runInContext(section('function renderConv(', '// User-msg navigation:'), rend
 // The turn renderer lives further down the file; load it too, so the event rows this
 // harness asserts on are produced by the real code rather than a stub.
 vm.runInContext(section('const FOLD_LIMITS = {', 'function renderQaQuestion('), renderContext);
-vm.runInContext(`const renderConvTool = t => '<div class="conv-tool"></div>';
-const renderMarkdown = x => String(x ?? '');
+vm.runInContext(section('function renderConvTool(', '// Conversation global keyboard:'), renderContext);
+vm.runInContext(`const renderMarkdown = x => String(x ?? '');
 const renderFoldableText = (text, limit) => String(text ?? '');`, renderContext);
 vm.runInContext(`
 const chain=[{id:'old',relation:null,is_current:false},
@@ -251,4 +251,43 @@ for (const standalone of [false,true]) {
   assert.ok(head.innerHTML.includes('max="1"'),where+' let goto reach an event row');
 }
 console.log('PASS: real renderer exposes conversation navigation in modal and full page');
+
+// The expanded message must contain its full input, not just the delivery receipt.
+for (const standalone of [false,true]) {
+  _convStandalone=standalone;
+  setItems(standalone?[]:[{id:'current',size:100}]);
+  const message='Report with multiple paragraphs.\\n'.repeat(60)+'REMOTE_MESSAGE_END';
+  const outgoing={type:'tool',name:'mcp__claude-code-remote__send_message',
+    summary:'session_id=parent, message=Report...',message,
+    message_context:'session_id=parent; visibility=sent_to_shared_agent'};
+  renderConv({...base,turns:[{type:'user',text:'Report the findings.'},
+    {...outgoing,result:'Receipt accepted',is_error:false},
+    {...outgoing,result:'Delivery rejected',is_error:true},outgoing,
+    {type:'tool',name:'Bash',summary:'pwd',result:'/workspace'}]},
+    standalone?null:findItem('current'));
+  const where=standalone?'full page':'modal';
+  assert.equal(body.innerHTML.split(message).length-1,3,where+' truncated a message input');
+  for (const text of ['Message','Tool result','Receipt accepted','Delivery rejected',
+    'Not recorded; delivery unconfirmed.','sent_to_shared_agent','conv-tool-error']) {
+    assert.ok(body.innerHTML.includes(text),where+' missing '+text);
+  }
+  assert.ok(head.innerHTML.includes('1 msgs'),where+' counted a send as human speech');
+  assert.ok(body.innerHTML.includes('<div class="conv-tool-body">/workspace</div>'),
+    where+' changed an ordinary tool');
+}
+console.log('PASS: full message inputs and distinct receipts in both reader modes');
 `, renderContext);
+
+// Use the actual escaping helper for untrusted message content.
+const toolContext = vm.createContext({assert});
+vm.runInContext('const ICONS={chevron:""};', toolContext);
+vm.runInContext(section('function escapeHtml(', 'function highlightTerms('), toolContext);
+vm.runInContext(section('function renderConvTool(', '// Conversation global keyboard:'), toolContext);
+vm.runInContext(`
+const output=renderConvTool({name:'send',summary:'parent',message:'<img src=x onerror=alert(1)>',
+  message_context:'<parent>',result:'<receipt>'});
+assert.ok(!output.includes('<img'));
+assert.ok(output.includes('&lt;img'));
+assert.ok(output.includes('&lt;parent&gt;'));
+assert.ok(output.includes('&lt;receipt&gt;'));
+`, toolContext);

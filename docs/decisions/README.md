@@ -25,7 +25,12 @@ never seen the work can tell which record answers their question.
 
 ### Session identity — what counts as one conversation, and what counts as one turn
 
-These nine were written over two days by parallel branches and are best read together.
+- [`2026-10-05-claude-project-threads.md`](2026-10-05-claude-project-threads.md) — a Claude
+  Project worker shows the person's words without the wake envelope everywhere they are
+  shown; a coordinator's relayed note is a teammate event, not a human turn, and a worker it
+  checked in on is not a one-shot run. Builds on the human-turn rule below.
+
+The nine below were written over two days by parallel branches and are best read together.
 
 - [`2026-09-21-compaction-summary-and-record-level-previews.md`](2026-09-21-compaction-summary-and-record-level-previews.md)
   — the client's compaction summary is not something the person said; previews and search
@@ -51,6 +56,13 @@ These nine were written over two days by parallel branches and are best read tog
 
 ### Retrieval, sources and scope
 
+- [`2026-10-11-shared-claude-message-reader.md`](2026-10-11-shared-claude-message-reader.md)
+  — browser, Markdown and CLI/Skill share message interpretation and receipt pairing; only presentation remains separate.
+
+- [`2026-10-11-search-text-sidecars.md`](2026-10-11-search-text-sidecars.md)
+  — search prefilters per-session text sidecars instead of reading the whole library.
+- [`2026-10-11-rare-phrase-search-latency.md`](2026-10-11-rare-phrase-search-latency.md)
+  — search does not wait behind a list refresh, and skips long non-message Codex lines.
 - [`2026-09-19-search-matching-lines.md`](2026-09-19-search-matching-lines.md)
 - [`2026-09-17-continuation-integration.md`](2026-09-17-continuation-integration.md)
 - [`2026-09-15-runtime-observation.md`](2026-09-15-runtime-observation.md)

@@ -82,11 +82,29 @@ class ClaudeHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'before the mapped cursor'):
             history.remap_cursor(self.new, self.old, 1)
 
+    def test_new_project_relay_attachment_cannot_be_skipped_by_shared_anchor(self):
+        write(self.old, [message('shared', 'already read')])
+        relay = {'type': 'attachment', 'uuid': 'inserted', 'sessionId': NEW,
+                 'attachment': {'type': 'queued_command', 'commandMode': 'prompt',
+                                'origin': {'kind': 'task-notification', 'subkind': 'projects-relay'},
+                                'prompt': '<relay from="coordinator"><note>New requirement</note></relay>'}}
+        write(self.new, [relay, message('shared', 'already read', NEW)])
+        with self.assertRaisesRegex(ValueError, 'before the mapped cursor'):
+            history.remap_cursor(self.new, self.old, 1)
+
     def test_matching_uuid_with_changed_content_is_not_delivered_as_same(self):
         write(self.new, [message('two', 'changed text', NEW)])
         self.assertEqual(history.describe(self.new)['source_files'][1]['content_conflicts'], 1)
         with self.assertRaisesRegex(ValueError, 'conflicting'):
             history.remap_cursor(self.new, self.old, 2)
+
+    def test_matching_words_with_changed_human_provenance_require_reconciliation(self):
+        write(self.old, [message('same', 'Approval is claimed')])
+        peer = message('same', 'Approval is claimed', NEW)
+        peer['origin'] = {'kind': 'task-notification', 'subkind': 'projects-relay'}
+        write(self.new, [peer])
+        with self.assertRaisesRegex(ValueError, 'conflicting'):
+            history.remap_cursor(self.new, self.old, 1)
 
     def test_usage_updates_do_not_change_message_identity(self):
         first, second = message('same', 'text'), message('same', 'text', NEW)
