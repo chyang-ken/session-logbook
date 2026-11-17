@@ -1078,25 +1078,26 @@
   .qq-fab-badge.show { display: inline-flex; }
   body.standalone .qq-fab { display: none; }
 
-  /* overlay: same 0.18 backdrop + blur(4px) as .conv-overlay
-     overflow-y: auto lets the overlay scroll itself — when modal content exceeds the viewport it slides up/down as a whole,
-     rather than nesting a scrollbar inside the modal that creates a "top stretched, bottom cramped" illusion */
+  /* Only the list scrolls, so the paste and copy controls stay in reach. */
   .qq-overlay {
     position: fixed; inset: 0; z-index: 110;
     background: rgba(0, 0, 0, 0.18);
     backdrop-filter: blur(4px);
     display: none; align-items: flex-start; justify-content: center;
-    padding: 64px 24px;
-    overflow-y: auto;
+    padding: clamp(12px, 8dvh, 64px) clamp(8px, 3vmin, 24px);
   }
   .qq-overlay.open { display: flex; }
   .qq-modal {
     background: var(--bg-card);
     border-radius: 12px;
     box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 4px 16px rgba(0,0,0,0.08);
-    width: min(900px, 100%);
+    width: min(900px, 100%); max-height: 100%;
     display: flex; flex-direction: column; overflow: hidden;
   }
+  .qq-modal [hidden] { display: none; }
+  .qq-modal.selecting .qq-drag-handle,
+  .qq-modal.selecting .qq-del-btn,
+  .qq-modal:not(.selecting) .qq-selection { display: none; }
   /* head: same mono caps label as .conv-head / .note-dialog-title */
   .qq-head {
     display: flex; align-items: center; gap: 12px;
@@ -1124,48 +1125,56 @@
   }
   .qq-close:hover { background: var(--bg-hover); color: var(--text-1); }
 
-  /* Body: 12-column grid + dense packing, letting each tile span 4/6/8/12 by content length
-     to fill gaps like laying tiles; cross-row dragging uses the same before/after semantics.
-     Height is determined by content, no longer flex:1 + inner scroll — overflow is taken over by the overlay's whole-page scroll */
+  .qq-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
+    padding: 8px 24px;
+    border-bottom: 1px solid var(--border-light);
+    flex-shrink: 0;
+  }
+  .qq-btn {
+    background: none; border: 0; border-radius: 4px;
+    color: var(--text-2); font: 500 11px var(--font-mono);
+    padding: 6px 8px; cursor: pointer;
+  }
+  .qq-btn:not(:disabled):hover { color: var(--text-1); background: var(--bg-hover); }
+  .qq-btn:disabled { color: var(--text-4); cursor: default; }
+  .qq-btn.qq-action:not(:disabled) { color: var(--accent); }
+
   .qq-body {
-    padding: 16px 24px 8px;
+    padding: 12px 24px;
     display: grid;
-    grid-template-columns: repeat(12, 1fr);
-    grid-auto-flow: dense;
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px;
     align-content: start;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
   }
 
-  /* Empty state: same restraint as the site's .empty — a single line of text-4 copy */
   .qq-empty {
-    grid-column: 1 / -1;
-    padding: 60px 20px; text-align: center;
-    color: var(--text-4); font-size: 14px;
+    padding: 28px 12px; text-align: center;
+    color: var(--text-2); font-size: 13px;
   }
 
-  /* Cell: same tokens as .card — --radius 8px, --shadow, --shadow-hover
-     --span is computed by JS from content length (4/6/8/12); grid-auto-flow dense packs automatically */
   .qq-cell {
-    --span: 6;
-    grid-column: span var(--span);
-    display: flex; gap: 0; align-items: stretch;
+    display: flex; align-items: flex-start;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 0;
-    overflow: hidden;
     box-shadow: var(--shadow);
     transition: box-shadow 0.15s, border-color 0.15s, opacity 0.15s;
     position: relative;
     min-width: 0;
   }
   .qq-cell:hover { box-shadow: var(--shadow-hover); }
+  .qq-cell:has(.qq-preview:not([hidden])) { align-items: center; }
   .qq-cell:focus-within {
     border-color: var(--accent);
     box-shadow: 0 0 0 2px var(--focus-ring), var(--shadow);
   }
-  /* While dragging: the source cell is semi-transparent, with pointer-events off so elementFromPoint can pass through to find the cell beneath.
-     No longer using drop-left/right markers — instead, splice items directly during dragover for a live make-way preview */
+  .qq-cell.selected { border-color: var(--accent); background: var(--focus-ring); }
   .qq-cell.dragging { opacity: 0.4; pointer-events: none; }
   /* Drag ghost: a small chip floating with the pointer, giving the cursor a visual anchor for "what am I dragging".
      position fixed + pointer-events none keeps it from interfering with elementFromPoint */
@@ -1195,84 +1204,89 @@
   }
   .qq-cell.qq-flash { animation: qq-cell-flash 0.6s ease-out; }
 
-  .qq-drag-handle {
-    flex-shrink: 0;
-    width: 24px;
-    display: flex; align-items: center; justify-content: center;
-    color: var(--text-4);
-    cursor: grab;
-    user-select: none;
-    transition: color 0.15s, background 0.15s;
+  .qq-cell-btn.qq-drag-handle {
+    cursor: grab; user-select: none; touch-action: none;
   }
-  .qq-drag-handle:hover { color: var(--text-2); background: var(--bg-hover); }
   .qq-drag-handle:active { cursor: grabbing; }
-  .qq-drag-handle svg { width: 12px; height: 12px; display: block; }
 
-  .qq-cell-ta {
-    flex: 1; min-width: 0;
-    resize: none; overflow: hidden;
+  .qq-cell-content { flex: 1; min-width: 0; }
+  .qq-cell-ta, .qq-preview, .qq-paste {
     background: transparent; border: none;
     font-family: var(--font-body);
     font-size: 14px; line-height: 1.55;
     color: var(--text-1);
-    padding: 10px 12px; outline: none;
-    min-height: 22px;
+    padding: 8px 4px;
   }
-  .qq-cell-ta::placeholder { color: var(--text-4); }
-
-  /* In-cell buttons: space is precious in the tiled layout, so actions go vertical and show icon only.
-     The first one's border-left joins the cell body, the second one's border-top joins the previous one.
-     align-items stretch (cross axis, horizontal) makes buttons fill the column width */
-  .qq-cell-actions {
-    display: flex; flex-direction: column; gap: 0;
-    flex-shrink: 0;
-    align-items: stretch;
-    border-left: 1px solid var(--border);
+  .qq-cell-ta {
+    width: 100%; display: block; min-height: 38px;
+    resize: none; overflow: hidden; outline: none;
   }
-  /* flex: 1 makes the two buttons split the main axis (vertical) evenly — they grow together to whatever height the cell is,
-     and the icon centers within each via the button's own inline-flex + align/justify center */
+  .qq-preview {
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    color: var(--text-2);
+  }
   .qq-cell-btn {
     background: transparent;
     border: none;
     color: var(--text-3);
     cursor: pointer;
-    width: 32px; min-height: 32px;
-    flex: 1;
+    width: 28px; height: 38px; flex-shrink: 0;
     transition: color 0.15s, background 0.15s;
     display: inline-flex; align-items: center; justify-content: center;
     padding: 0;
   }
-  .qq-cell-btn + .qq-cell-btn { border-top: 1px solid var(--border); }
-  /* hover follows the color pairing: copy is the primary action → accent blue; delete is destructive → rust red */
   .qq-cell-btn:hover { color: var(--accent); background: var(--bg-hover); }
   .qq-cell-btn.danger:hover { color: var(--rust); }
+  .qq-cell-btn.qq-fold:hover, .qq-cell-btn.qq-drag-handle:hover { color: var(--text-1); }
   .qq-cell-btn svg { width: 13px; height: 13px; display: block; }
-  .qq-cell-btn .qq-btn-label { display: none; }
-
-  /* Bottom primary action: mono caps blue fill, matching the .note-dialog-foot .btn-save token style but full-width */
-  .qq-foot {
-    padding: 8px 24px 16px;
+  .qq-cell-btn[data-tooltip]::after { top: calc(100% + 2px); bottom: auto; }
+  .qq-cell-btn.qq-drag-handle::after, .qq-cell-btn.qq-fold::after { left: 0; right: auto; }
+  .qq-fold[aria-expanded="true"] svg { transform: rotate(90deg); }
+  .qq-cell-actions {
+    align-self: stretch;
+    display: flex; flex-direction: column; flex-shrink: 0;
+    border-left: 1px solid var(--border);
+    border-radius: 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0;
+    overflow: hidden;
+  }
+  .qq-cell-actions .qq-cell-btn {
+    width: 32px; height: auto; min-height: 32px; flex: 1;
+    outline-offset: -2px;
+  }
+  .qq-cell-actions .qq-del-btn { border-top: 1px solid var(--border); }
+  .qq-selection {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 38px; padding: 0 6px 0 8px;
     flex-shrink: 0;
   }
-  /* Site-wide restrained ghost/outline language: use a dashed "add" button, hover switches to accent,
-     no solid saturated blue block (which was the product's only solid CTA, out of step with the overall tone). */
-  .qq-add-btn {
-    width: 100%;
-    background: none;
-    color: var(--text-2);
-    border: 1px dashed var(--border);
-    border-radius: var(--radius);
-    padding: 10px 14px;
-    font-family: var(--font-mono);
-    font-size: 11px; font-weight: 600;
-    letter-spacing: 0.1em; text-transform: uppercase;
-    cursor: pointer;
-    transition: color 0.15s, border-color 0.15s, background 0.15s, transform 0.05s;
-    display: flex; align-items: center; justify-content: center; gap: 8px;
+  .qq-check { margin: 0; accent-color: var(--accent); cursor: pointer; }
+  .qq-ref { color: var(--accent); font: 11px var(--font-mono); min-width: 5ch; }
+
+  .qq-add-form, .qq-copy-bar {
+    padding: 8px 24px 12px;
+    flex-shrink: 0;
+    display: flex; align-items: center; gap: 8px;
+    border-top: 1px solid var(--border-light);
   }
-  .qq-add-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--bg-hover); }
-  .qq-add-btn:active { transform: translateY(1px); }
-  .qq-add-btn svg { width: 12px; height: 12px; display: block; }
+  .qq-paste {
+    flex: 1; min-width: 0; min-height: 38px;
+    resize: none; max-height: min(40dvh, 280px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+  }
+  .qq-paste:focus {
+    border-color: var(--accent); outline: 2px solid var(--focus-ring);
+  }
+  .qq-add-form { align-items: flex-end; }
+  .qq-add-btn { min-height: 38px; }
+  .qq-copy-bar { flex-wrap: wrap; justify-content: space-between; }
+  .qq-range-hint { color: var(--text-2); font: 11px var(--font-mono); }
+  @media (max-width: 480px) {
+    .qq-head, .qq-toolbar, .qq-body, .qq-add-form, .qq-copy-bar {
+      padding-inline: 12px;
+    }
+  }
 
   /* ---------- Card meta row (sid + actions + time + dot) ----------
      Merges the former card-header (project/time/dot) with card-foot (sid/actions);
@@ -5943,8 +5957,6 @@ if ('serviceWorker' in navigator) {
 }
 
 // ---------- Prompt Queue ----------
-// FAB pill + modal: serially stack the prompt texts waiting to be sent, auto-grow for multiple lines, one-click copy per cell
-// Persisted in localStorage ('qq.items', reusing the old key without migration)
 (function() {
   // In standalone mode (?session=<id>) the full queue isn't mounted — the single-session reading page doesn't need it.
   if (document.body.classList.contains('standalone')) {
@@ -5952,24 +5964,65 @@ if ('serviceWorker' in navigator) {
   }
 
   const STORAGE_KEY = 'qq.items';
+  const FOLDS_KEY = 'qq.folds';
+
+  // Ignore fold positions if an older build has changed the text list.
+  function textListSignature(raw) {
+    let hash = 0;
+    for (let i = 0; i < raw.length; i++) hash = (Math.imul(hash, 31) + raw.charCodeAt(i)) | 0;
+    return `${raw.length}:${hash}`;
+  }
+
+  function loadFoldedPositions(raw) {
+    try {
+      const folds = JSON.parse(localStorage.getItem(FOLDS_KEY));
+      if (folds?.signature === textListSignature(raw) && Array.isArray(folds.positions)) {
+        return new Set(folds.positions);
+      }
+    } catch {}
+    return new Set();
+  }
 
   function loadItems() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       const arr = raw ? JSON.parse(raw) : [];
-      return Array.isArray(arr) ? arr.map(x => typeof x === 'string' ? x : '') : [];
+      if (!Array.isArray(arr)) return [];
+      const folded = raw ? loadFoldedPositions(raw) : new Set();
+      return arr.map((item, index) => typeof item === 'string'
+        ? {text: item, collapsed: folded.has(index)}
+        : {text: typeof item?.text === 'string' ? item.text : '', collapsed: item?.collapsed === true});
     } catch { return []; }
   }
   function saveItems() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(items)); } catch {}
+    // Keep the original string list readable if the dashboard is rolled back.
+    const raw = JSON.stringify(items.map(item => item.text));
+    try {
+      localStorage.setItem(STORAGE_KEY, raw);
+    } catch {
+      toast('Could not save Prompt Queue changes');
+      return false;
+    }
+    try {
+      const positions = [];
+      items.forEach((item, index) => { if (item.collapsed) positions.push(index); });
+      localStorage.setItem(FOLDS_KEY, JSON.stringify({signature: textListSignature(raw), positions}));
+    } catch {
+      toast('Snippets saved. Could not save fold state');
+    }
+    return true;
   }
 
-  let items = loadItems();
+  const items = loadItems();
+  const selected = new Set();
+  let selecting = false;
+  let selectionStart = null;
 
   // ---- FAB ----
   const fab = document.createElement('button');
   fab.className = 'qq-fab';
   fab.title = 'Prompt Queue';
+  fab.type = 'button';
   fab.setAttribute('aria-label', 'Open Prompt Queue');
   fab.innerHTML = `
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -5996,60 +6049,128 @@ if ('serviceWorker' in navigator) {
         <div class="qq-spacer"></div>
         <button class="qq-close" type="button" aria-label="Close">${ICONS.close}</button>
       </div>
+      <div class="qq-toolbar">
+        <button class="qq-btn qq-expand-all" type="button">Expand all</button>
+        <button class="qq-btn qq-collapse-all" type="button">Collapse all</button>
+        <div class="qq-spacer"></div>
+        <button class="qq-btn qq-action qq-mode" type="button">Select to copy</button>
+      </div>
       <div class="qq-body"></div>
-      <div class="qq-foot">
-        <button class="qq-add-btn" type="button">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19"></line>
-            <line x1="5" y1="12" x2="19" y2="12"></line>
-          </svg>
-          <span>Add Query</span>
-        </button>
+      <form class="qq-add-form">
+        <textarea class="qq-paste" rows="1" aria-label="New snippet" placeholder="Paste to add a snippet…" spellcheck="false"></textarea>
+        <button class="qq-btn qq-action qq-add-btn" type="submit" title="Add (⌘+Return)" aria-keyshortcuts="Meta+Enter" disabled>Add</button>
+      </form>
+      <div class="qq-copy-bar" hidden>
+        <span class="qq-range-hint">Shift-click to select a range</span>
+        <button class="qq-btn qq-action qq-copy-selected" type="button" disabled>Copy selected</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
 
+  const $modal = overlay.querySelector('.qq-modal');
   const $body = overlay.querySelector('.qq-body');
   const $count = overlay.querySelector('.qq-count');
+  const $expandAll = overlay.querySelector('.qq-expand-all');
+  const $collapseAll = overlay.querySelector('.qq-collapse-all');
+  const $mode = overlay.querySelector('.qq-mode');
+  const $form = overlay.querySelector('.qq-add-form');
+  const $paste = overlay.querySelector('.qq-paste');
   const $addBtn = overlay.querySelector('.qq-add-btn');
+  const $copyBar = overlay.querySelector('.qq-copy-bar');
+  const $copySelected = overlay.querySelector('.qq-copy-selected');
   const $closeBtn = overlay.querySelector('.qq-close');
 
-  // ---- Pointer-based DnD state ----
-  // dragState: { srcIdx, ghost, origItems } | null
-  //   srcIdx     —— the dragged cell's current index in items (updated after each splice)
-  //   ghost      —— the floating chip that follows the cursor
-  //   origItems  —— starting snapshot, used to roll back on Escape
-  // During pointermove, directly splice items + move the DOM (no render, to avoid listener-rebuild flicker),
-  // and persist on pointerup. Escape rolls back to origItems.
   let dragState = null;
 
-  function updateBadge() {
-    const n = items.filter(s => s && s.trim().length > 0).length;
-    if (n > 0) { badge.textContent = String(n); badge.classList.add('show'); }
-    else { badge.classList.remove('show'); }
+  function updateControls() {
+    const n = items.filter(item => item.text.trim()).length;
+    badge.textContent = n;
+    badge.classList.toggle('show', n > 0);
+    $expandAll.disabled = !items.some(item => item.collapsed);
+    $collapseAll.disabled = !items.some(item => !item.collapsed);
+    $mode.disabled = !selecting && n === 0;
   }
 
   function autoGrow(ta) {
     ta.style.height = 'auto';
-    ta.style.height = ta.scrollHeight + 'px';
+    ta.style.height = (ta.scrollHeight + ta.offsetHeight - ta.clientHeight) + 'px';
   }
 
-  // Pick the grid column span by content length: short queries become small tiles, long queries take the full row
-  // Synced live while typing (called inside the input listener), so the user watches the tile grow as they write
-  function computeSpan(text) {
-    const t = text || '';
-    const len = t.length;
-    const lines = t.split('\n').length;
-    if (lines >= 3 || len > 200) return 12;
-    if (len > 80) return 8;
-    if (len > 24) return 6;
-    return 4;
+  function syncPasteField() {
+    $addBtn.disabled = !$paste.value.trim();
+    autoGrow($paste);
   }
-  function applySpan(cell, text) {
-    // With only 1 cell, force a full 12-column span — the dense tiling is meant for piecing together multiple tiles,
-    // and a lone cell's whitespace looks like a bug. When adding/removing cells, render() reruns applySpan.
-    const span = items.length <= 1 ? 12 : computeSpan(text);
-    cell.style.setProperty('--span', String(span));
+
+  function resizeRows() {
+    const fields = $body.querySelectorAll('textarea:not([hidden])');
+    for (const field of fields) field.style.height = 'auto';
+    const heights = Array.from(fields, field => field.scrollHeight);
+    fields.forEach((field, i) => { field.style.height = heights[i] + 'px'; });
+  }
+
+  function updateFold(cell, item) {
+    const preview = cell.querySelector('.qq-preview');
+    preview.textContent = item.collapsed ? item.text.trim().split(/\r?\n/, 1)[0] || 'Empty snippet' : '';
+    preview.hidden = !item.collapsed;
+    cell.querySelector('textarea').hidden = item.collapsed;
+    const fold = cell.querySelector('.qq-fold');
+    fold.setAttribute('aria-expanded', String(!item.collapsed));
+    const label = item.collapsed ? 'Expand snippet' : 'Collapse snippet';
+    fold.setAttribute('aria-label', label);
+    fold.dataset.tooltip = label;
+  }
+
+  function setAllCollapsed(collapsed) {
+    items.forEach((item, index) => {
+      item.collapsed = collapsed;
+      updateFold($body.children[index], item);
+    });
+    saveItems();
+    updateControls();
+    if (!collapsed) resizeRows();
+  }
+
+  function updateSelection() {
+    let count = 0;
+    items.forEach((item, index) => {
+      const cell = $body.children[index];
+      const checked = selected.has(item);
+      cell.querySelector('.qq-check').checked = checked;
+      cell.querySelector('.qq-ref').textContent = checked ? `ref${++count}` : '';
+      cell.classList.toggle('selected', checked);
+    });
+    $copySelected.disabled = count === 0;
+    $copySelected.textContent = count ? `Copy selected (${count})` : 'Copy selected';
+  }
+
+  function selectItem(item, checked, range) {
+    const end = items.indexOf(item);
+    const start = range && selectionStart ? items.indexOf(selectionStart) : end;
+    if (!range || !selectionStart) selectionStart = item;
+    const from = Math.min(start, end);
+    const to = Math.max(start, end);
+    for (let index = from; index <= to; index++) {
+      if (!items[index].text.trim()) continue;
+      if (checked) selected.add(items[index]);
+      else selected.delete(items[index]);
+    }
+    updateSelection();
+  }
+
+  function setSelecting(active) {
+    cancelDrag();
+    selecting = active;
+    selected.clear();
+    selectionStart = null;
+    $modal.classList.toggle('selecting', active);
+    $mode.textContent = active ? 'Done selecting' : 'Select to copy';
+    $form.hidden = active;
+    $copyBar.hidden = !active;
+    if (!active) syncPasteField();
+    $body.querySelectorAll('textarea').forEach(field => { field.readOnly = active; });
+    updateSelection();
+    resizeRows();
+    $mode.focus();
   }
 
   // ---- Pointer DnD: helpers ----
@@ -6058,15 +6179,12 @@ if ('serviceWorker' in navigator) {
     ghost.style.left = (x + 14) + 'px';
     ghost.style.top = (y + 14) + 'px';
   }
-  function reindexCells() {
-    Array.from($body.children).forEach((c, i) => {
-      if (c.classList.contains('qq-cell')) c.dataset.idx = String(i);
-    });
-  }
-  function startDrag(srcIdx, srcCell, e) {
+  function startDrag(item, cell, e) {
+    if (selecting || dragState || items.length < 2 || e.button !== 0) return;
+    e.preventDefault();
     const ghost = document.createElement('div');
     ghost.className = 'qq-drag-ghost';
-    const text = items[srcIdx] || '';
+    const text = item.text;
     if (text.trim()) {
       ghost.textContent = text.length > 100 ? text.slice(0, 100) + '…' : text;
     } else {
@@ -6075,233 +6193,259 @@ if ('serviceWorker' in navigator) {
     }
     document.body.appendChild(ghost);
     positionGhost(ghost, e.clientX, e.clientY);
-    srcCell.classList.add('dragging');
+    cell.classList.add('dragging');
 
-    dragState = { srcIdx, ghost, origItems: items.slice() };
+    dragState = {cell, ghost, pointerId: e.pointerId, originalItems: items.slice()};
 
     document.addEventListener('pointermove', onPointerMove);
     document.addEventListener('pointerup', onPointerUp);
-    document.addEventListener('pointercancel', onPointerUp);
-    document.addEventListener('keydown', onDragKeydown);
+    document.addEventListener('pointercancel', onPointerCancel);
   }
+
+  function moveRow(cell, target, after) {
+    const rows = Array.from($body.children);
+    const from = rows.indexOf(cell);
+    const at = rows.indexOf(target);
+    const to = at + Number(after) - Number(from < at);
+    if (from === to) return;
+    const [item] = items.splice(from, 1);
+    items.splice(to, 0, item);
+    if (after) target.after(cell);
+    else target.before(cell);
+  }
+
   function onPointerMove(e) {
-    if (!dragState) return;
-    e.preventDefault();
+    if (e.pointerId !== dragState.pointerId) return;
     positionGhost(dragState.ghost, e.clientX, e.clientY);
-
-    // The dragging cell already has pointer-events:none, so elementFromPoint naturally passes through to the cell below
     const el = document.elementFromPoint(e.clientX, e.clientY);
-    const tgtCell = el && el.closest && el.closest('.qq-cell');
-    if (!tgtCell || !$body.contains(tgtCell)) return;
-    const tgtIdx = Number(tgtCell.dataset.idx);
-    if (tgtIdx === dragState.srcIdx) return;
-
-    const rect = tgtCell.getBoundingClientRect();
-    const left = (e.clientX - rect.left) < rect.width / 2;
-    let newIdx;
-    if (left) {
-      newIdx = tgtIdx > dragState.srcIdx ? tgtIdx - 1 : tgtIdx;
-    } else {
-      newIdx = tgtIdx > dragState.srcIdx ? tgtIdx : tgtIdx + 1;
-    }
-    if (newIdx === dragState.srcIdx) return;
-
-    // Do the DOM move + items splice together, to avoid listener-rebuild flicker
-    const cells = Array.from($body.children).filter(c => c.classList.contains('qq-cell'));
-    const draggedCell = cells[dragState.srcIdx];
-    if (!draggedCell) return;
-    if (newIdx > dragState.srcIdx) {
-      cells[newIdx].after(draggedCell);
-    } else {
-      cells[newIdx].before(draggedCell);
-    }
-    const moved = items.splice(dragState.srcIdx, 1)[0];
-    items.splice(newIdx, 0, moved);
-    dragState.srcIdx = newIdx;
-    reindexCells();
+    const target = el?.closest('.qq-cell');
+    if (!target || !$body.contains(target) || target === dragState.cell) return;
+    const rect = target.getBoundingClientRect();
+    moveRow(dragState.cell, target, e.clientY >= rect.top + rect.height / 2);
   }
-  function onPointerUp() {
-    if (!dragState) return;
+  function onPointerUp(e) {
+    if (e.pointerId !== dragState.pointerId) return;
     saveItems();
     cleanupDrag();
   }
-  function onDragKeydown(e) {
-    if (!dragState || e.key !== 'Escape') return;
-    e.preventDefault();
-    e.stopPropagation();
-    // Roll back to the pre-drag order, re-render so all listeners are clean
-    items.length = 0;
-    Array.prototype.push.apply(items, dragState.origItems);
+  function onPointerCancel(e) {
+    if (e.pointerId === dragState.pointerId) cancelDrag();
+  }
+  function cancelDrag() {
+    if (!dragState) return;
+    items.splice(0, items.length, ...dragState.originalItems);
     cleanupDrag();
     render();
   }
   function cleanupDrag() {
-    if (dragState && dragState.ghost) dragState.ghost.remove();
+    dragState.ghost.remove();
+    dragState.cell.classList.remove('dragging');
     dragState = null;
-    $body.querySelectorAll('.qq-cell.dragging').forEach(c => c.classList.remove('dragging'));
     document.removeEventListener('pointermove', onPointerMove);
     document.removeEventListener('pointerup', onPointerUp);
-    document.removeEventListener('pointercancel', onPointerUp);
-    document.removeEventListener('keydown', onDragKeydown);
+    document.removeEventListener('pointercancel', onPointerCancel);
   }
 
   function render() {
     const total = items.length;
     $count.textContent = total ? `${total} item${total > 1 ? 's' : ''}` : '';
+    updateControls();
     $body.innerHTML = '';
 
     if (total === 0) {
       const empty = document.createElement('div');
       empty.className = 'qq-empty';
-      empty.textContent = 'No queries yet';
+      empty.textContent = 'Paste or type a snippet below to start.';
       $body.appendChild(empty);
       return;
     }
 
-    items.forEach((text, idx) => {
+    items.forEach((item, index) => {
       const cell = document.createElement('div');
       cell.className = 'qq-cell';
-      cell.dataset.idx = String(idx);
       cell.innerHTML = `
-        <div class="qq-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">
+        <div class="qq-selection">
+          <input class="qq-check" type="checkbox" aria-label="Select snippet">
+          <span class="qq-ref"></span>
+        </div>
+        <button class="qq-cell-btn qq-drag-handle" type="button" data-tooltip="Drag to reorder" aria-label="Reorder snippet (Up or Down)">
           <svg viewBox="0 0 24 24" fill="currentColor">
             <circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/>
             <circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/>
             <circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>
           </svg>
+        </button>
+        <button class="qq-cell-btn qq-fold" type="button">${ICONS.chevron}</button>
+        <div class="qq-cell-content">
+          <div class="qq-preview" hidden></div>
+          <textarea class="qq-cell-ta" name="prompt-queue-item" aria-label="Snippet" rows="1" placeholder="Type your snippet…" spellcheck="false"></textarea>
         </div>
-        <textarea class="qq-cell-ta" name="prompt-queue-item" aria-label="Prompt queue item" rows="1" placeholder="Type your query…" spellcheck="false"></textarea>
         <div class="qq-cell-actions">
-          <button class="qq-cell-btn qq-copy-btn" type="button" title="Copy">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-            <span class="qq-btn-label">Copy</span>
-          </button>
-          <button class="qq-cell-btn danger qq-del-btn" type="button" title="Delete">
+          <button class="qq-cell-btn qq-copy-btn" type="button" title="Copy" aria-label="Copy snippet">${ICONS.copy}</button>
+          <button class="qq-cell-btn danger qq-del-btn" type="button" title="Delete" aria-label="Delete snippet">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="3 6 5 6 21 6"></polyline>
               <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"></path>
               <path d="M10 11v6"></path>
               <path d="M14 11v6"></path>
             </svg>
-            <span class="qq-btn-label">Delete</span>
           </button>
         </div>`;
 
       const ta = cell.querySelector('textarea');
-      ta.value = text;
-      applySpan(cell, text);
-      // Measure once immediately, but the DOM hasn't reflowed yet so scrollHeight may be too low → top it up again on rAF
-      autoGrow(ta);
-      requestAnimationFrame(() => autoGrow(ta));
+      ta.value = item.text;
+      ta.readOnly = selecting;
+      updateFold(cell, item);
 
+      const check = cell.querySelector('.qq-check');
+      check.disabled = !item.text.trim();
+      check.addEventListener('click', e => {
+        if (selecting) selectItem(item, check.checked, e.shiftKey);
+      });
       ta.addEventListener('input', () => {
-        const i = Number(cell.dataset.idx);
-        items[i] = ta.value;
+        item.text = ta.value;
         saveItems();
-        // live resize: span changes with character count so the tile grows as you write; when width changes, re-measure the textarea height
-        const beforeSpan = cell.style.getPropertyValue('--span');
-        applySpan(cell, ta.value);
-        if (cell.style.getPropertyValue('--span') !== beforeSpan) {
-          requestAnimationFrame(() => autoGrow(ta));
-        } else {
-          autoGrow(ta);
-        }
-        updateBadge();
+        autoGrow(ta);
+        check.disabled = !item.text.trim();
+        updateControls();
       });
 
-      cell.querySelector('.qq-copy-btn').addEventListener('click', () => {
-        const i = Number(cell.dataset.idx);
-        const text = items[i] || '';
-        if (!text) { toast('Empty query'); return; }
-        navigator.clipboard.writeText(text).then(
-          () => {
-            toast(`Copied query #${i + 1}`);
-            // Flash a gold border as success feedback, reusing the .qq-flash class
-            cell.classList.remove('qq-flash');
-            void cell.offsetWidth; // force a reflow so rapid clicks can re-trigger it
-            cell.classList.add('qq-flash');
-            setTimeout(() => cell.classList.remove('qq-flash'), 600);
-          },
-          () => toast('Copy failed')
-        );
+      cell.querySelector('.qq-fold').addEventListener('click', () => {
+        item.collapsed = !item.collapsed;
+        saveItems();
+        updateFold(cell, item);
+        if (!item.collapsed) autoGrow(ta);
+        updateControls();
+      });
+
+      cell.querySelector('.qq-copy-btn').addEventListener('click', async () => {
+        if (!item.text) { toast('Empty snippet'); return; }
+        if (await copyText(item.text, 'Snippet copied')) {
+          cell.classList.remove('qq-flash');
+          void cell.offsetWidth;
+          cell.classList.add('qq-flash');
+          setTimeout(() => cell.classList.remove('qq-flash'), 600);
+        }
       });
 
       cell.querySelector('.qq-del-btn').addEventListener('click', () => {
-        const i = Number(cell.dataset.idx);
-        items.splice(i, 1);
+        if (selecting || dragState) return;
+        items.splice(items.indexOf(item), 1);
         saveItems();
-        updateBadge();
         render();
       });
 
-      // ---- Drag: pointerdown takes over, move/up go through document-level listeners (cleaned up in cleanupDrag) ----
       const handle = cell.querySelector('.qq-drag-handle');
-      handle.addEventListener('pointerdown', e => {
-        if (e.button !== 0) return;       // only accept the left button / primary pointer
+      handle.addEventListener('pointerdown', e => startDrag(item, cell, e));
+      handle.addEventListener('keydown', e => {
+        if (selecting || dragState || !['ArrowUp', 'ArrowDown'].includes(e.key)) return;
         e.preventDefault();
-        startDrag(Number(cell.dataset.idx), cell, e);
+        const down = e.key === 'ArrowDown';
+        const target = down ? cell.nextElementSibling : cell.previousElementSibling;
+        if (!target) return;
+        moveRow(cell, target, down);
+        saveItems();
+        handle.focus();
       });
 
       $body.appendChild(cell);
     });
+    updateSelection();
+    resizeRows();
   }
 
-  function addCell(focusIt) {
-    items.push('');
-    saveItems();
-    updateBadge();
-    render();
-    if (focusIt) {
-      requestAnimationFrame(() => {
-        const tas = $body.querySelectorAll('textarea');
-        if (tas.length) {
-          const last = tas[tas.length - 1];
-          last.focus();
-          last.scrollIntoView({ block: 'nearest' });
-        }
-      });
+  async function copyText(text, message) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(message);
+      return true;
+    } catch {
+      toast('Copy failed');
+      return false;
     }
+  }
+
+  function copySelected() {
+    if (!selecting || selected.size === 0) return;
+    const clips = items.filter(item => selected.has(item));
+    const text = clips.map((item, index) => {
+      const tag = `ref${index + 1}`;
+      return `<${tag}>\n${item.text}\n</${tag}>`;
+    }).join('\n\n');
+    copyText(text, `Copied ${clips.length} reference${clips.length === 1 ? '' : 's'}`);
+  }
+
+  function addSnippet(text) {
+    if (selecting || dragState || !text.trim()) return;
+    items.push({text, collapsed: false});
+    if (!saveItems()) {
+      items.pop();
+      $paste.value = text;
+      syncPasteField();
+      return;
+    }
+    $paste.value = '';
+    syncPasteField();
+    render();
+    $body.lastElementChild.scrollIntoView({block: 'start'});
+    $paste.focus({preventScroll: true});
   }
 
   function openQueue() {
-    // On first open (empty queue), auto-add one empty cell to save a +Add click
-    if (items.length === 0) {
-      items.push('');
-      // Don't saveItems — avoid polluting localStorage; persist only after the user types something
-    }
-    render();
     overlay.classList.add('open');
-    requestAnimationFrame(() => {
-      const tas = $body.querySelectorAll('textarea');
-      if (tas.length) {
-        const target = tas[tas.length - 1];
-        target.focus();
-        const len = target.value.length;
-        target.setSelectionRange(len, len);
-      }
-    });
+    render();
+    syncPasteField();
+    $paste.focus({preventScroll: true});
   }
 
   function closeQueue() {
+    cancelDrag();
+    if (selecting) setSelecting(false);
     overlay.classList.remove('open');
+    fab.focus({preventScroll: true});
   }
 
   fab.addEventListener('click', openQueue);
   $closeBtn.addEventListener('click', closeQueue);
-  $addBtn.addEventListener('click', () => addCell(true));
-  // Click the overlay's blank area (outside the modal) to close
+  $expandAll.addEventListener('click', () => setAllCollapsed(false));
+  $collapseAll.addEventListener('click', () => setAllCollapsed(true));
+  $mode.addEventListener('click', () => setSelecting(!selecting));
+  $copySelected.addEventListener('click', copySelected);
+  $form.addEventListener('submit', e => {
+    e.preventDefault();
+    addSnippet($paste.value);
+  });
+  $paste.addEventListener('input', syncPasteField);
+  $paste.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || !e.metaKey || e.altKey || e.ctrlKey || e.shiftKey || e.isComposing) return;
+    e.preventDefault();
+    if (!e.repeat && !$addBtn.disabled) $form.requestSubmit($addBtn);
+  });
+  $paste.addEventListener('paste', e => {
+    if ($paste.value || selecting || dragState) return;
+    const text = e.clipboardData?.getData('text/plain');
+    if (!text?.trim()) return;
+    e.preventDefault();
+    addSnippet(text);
+  });
   overlay.addEventListener('click', e => {
     if (e.target === overlay) closeQueue();
   });
   document.addEventListener('keydown', e => {
+    if (!overlay.classList.contains('open') || e.key !== 'Escape' || e.isComposing) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragState) cancelDrag();
+    else if (selecting) setSelecting(false);
+    else closeQueue();
+  }, true);
+  window.addEventListener('resize', () => {
     if (!overlay.classList.contains('open')) return;
-    if (e.key === 'Escape') { e.preventDefault(); closeQueue(); }
+    resizeRows();
+    if (!selecting) syncPasteField();
   });
 
-  updateBadge();
+  updateControls();
 })();
 </script>
 </body>
